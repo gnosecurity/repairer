@@ -262,6 +262,15 @@ func fixRound(f *filing, id int) {
 	waits.Set(waitKey(f, id), true)
 }
 
+// moved says whether the weight under a waiting round's prefix differs from
+// what it was when the round was fixed. Nothing should move it; if
+// something ever does, the draw takes a new round instead of failing until
+// its deadline costs the filer its bond (round 12, minor 7).
+func moved(f *filing) bool {
+	total, _, _, _ := below(f.oldBelow)
+	return total != f.total
+}
+
 // unwait: the filing's round no longer waits for a draw.
 func unwait(f *filing, id int) {
 	if f.waiting {
@@ -334,6 +343,11 @@ func Draw(cur realm, id int) string {
 		panic("guards: not waiting for a draw")
 	case now() > f.fixedAt+DrawDeadline:
 		panic("guards: the draw's deadline has passed; abandon it")
+	}
+	if moved(f) {
+		fixRound(f, id)
+		chain.Emit("GuardRedraw", "filing", strconv.Itoa(id), "round", strconv.FormatUint(f.round, 10), "why", "the pool moved")
+		return f.state
 	}
 	picks := pick(roundSig(f), "draw", id, f.draws, Checkers-(len(f.checks)-1), f, false)
 	unwait(f, id)

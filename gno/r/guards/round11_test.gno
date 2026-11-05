@@ -29,14 +29,14 @@ func TestVoteThreshold(cur realm, t *testing.T) {
 	cases := []struct {
 		weights []int64
 		says    []string // what each owner votes; "" stays away
-		leaving int      // an owner unstaked before the filing: parked, and still in the vote; -1 for none
+		leaving int      // an owner unstaked before the filing: out of the vote and its weight (round 12, new major 1); -1 for none
 		want    string
 	}{
 		{[]int64{100_000_000, 100_000_000, 100_000_000}, []string{ok, "", ""}, -1, Undecided},
 		{[]int64{100_000_001, 100_000_000, 100_000_000}, []string{ok, "", ""}, -1, Tested},
 		{[]int64{110_000_000, 110_000_000, 80_000_000}, []string{ok, lie, ""}, -1, Undecided},
 		{[]int64{110_000_000, 100_000_000, 90_000_000}, []string{ok, lie, fails}, -1, Tested},
-		{[]int64{100_000_001, 100_000_000, 100_000_000, 100_000_000}, []string{ok, "", "", ""}, 3, Undecided},
+		{[]int64{100_000_001, 100_000_000, 100_000_000, 100_000_000}, []string{ok, "", "", ""}, 3, Tested},
 	}
 	stranger := testutils.TestAddress("stranger")
 	for n, c := range cases {
@@ -589,13 +589,13 @@ func TestCompactInSteps(cur realm, t *testing.T) {
 		testing.SetRealm(u(a))
 		Withdraw(cross(cur), len(owners)+i)
 	}
-	if len(pending) != 8 {
-		t.Fatalf("%d pending", len(pending))
+	if pending.Size() != 8 {
+		t.Fatalf("%d pending", pending.Size())
 	}
 	testing.SetRealm(u(anyone))
 	draw(t, cur, id, 1001, sig1001) // no round waits after it: it parks or takes out four
-	if len(pending) != 4 {
-		t.Fatalf("after the draw %d pending", len(pending))
+	if pending.Size() != 4 {
+		t.Fatalf("after the draw %d pending", pending.Size())
 	}
 	for _, want := range []int{2, 0} {
 		if n := Compact(cross(cur)); n != want {
@@ -941,12 +941,12 @@ func TestWithdrawPendingWhenNoneWaits(cur realm, t *testing.T) {
 	Unstake(cross(cur), 3)
 	testing.SetRealm(u(eve))
 	Unstake(cross(cur), 4)
-	if len(pending) != 2 {
-		t.Fatalf("%d pending", len(pending))
+	if pending.Size() != 2 {
+		t.Fatalf("%d pending", pending.Size())
 	}
 	testing.SkipHeights(UnbondBlocks) // the round lapses; nobody compacts
 	Withdraw(cross(cur), 4)
-	if sum, left, gone, parked := below(nTickets); sum != 3*MinTicket || left != 0 || gone != 0 || parked != MinTicket || len(pending) != 0 {
-		t.Fatalf("after the withdrawal: %d, %d leaving, %d withdrawn, %d parked; %d pending", sum, left, gone, parked, len(pending))
+	if sum, left, gone, parked := below(nTickets); sum != 3*MinTicket || left != 0 || gone != 0 || parked != MinTicket || pending.Size() != 0 {
+		t.Fatalf("after the withdrawal: %d, %d leaving, %d withdrawn, %d parked; %d pending", sum, left, gone, parked, pending.Size())
 	}
 }

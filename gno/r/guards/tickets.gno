@@ -44,6 +44,7 @@ type ticket struct {
 	stake   int64 // what is left to charge or give back
 	height  int64 // staked at
 	leaving int64 // Unstake's height, or when charges left it under the floor; 0 while staked
+	leftNo  int   // which leave it was, counting every ticket's (leaves); 0 while staked
 	open    int   // unsettled seats it holds: checks and panel seats it was drawn into
 	gone    bool  // withdrawn: its stake paid back; its weight out of the tree, or marked withdrawn there until Compact
 	parked  bool  // leaving, its weight moved out of what draws see
@@ -65,7 +66,8 @@ type sumNode struct {
 var (
 	sumRoot = &sumNode{}
 	active  int64           // the stake of every ticket not leaving, at what is left of it
-	pending []int           // tickets whose weight waits for no round to wait: to park, or to take out
+	leaves  int             // how many tickets have begun leaving: orders leaves and votes within a block
+	pending = avl.NewTree() // key(ticket) → ticket: tickets whose weight waits for no round to wait, to park or take out (round 12, minor 4)
 	waits   = avl.NewTree() // key(fixedAt)+key(filing) → true: rounds waiting for their draw
 )
 
@@ -142,11 +144,16 @@ func Compact(cur realm) int {
 
 func compact(max int) int {
 	if roundsWait() {
-		return len(pending)
+		return pending.Size()
 	}
-	for ; max > 0 && len(pending) > 0; max-- {
-		t := ticketAt(pending[len(pending)-1])
-		pending = pending[:len(pending)-1]
+	var ids []int
+	pending.Iterate("", "", func(_ string, v any) bool {
+		ids = append(ids, v.(int))
+		return len(ids) >= max
+	})
+	for _, id := range ids {
+		pending.Remove(key(uint64(id)))
+		t := ticketAt(id)
 		switch {
 		case t.out || t.parked: // done already
 		case t.gone:
@@ -157,7 +164,7 @@ func compact(max int) int {
 			t.parked = true
 		}
 	}
-	return len(pending)
+	return pending.Size()
 }
 
 // LiveStake is the stake of every ticket not leaving, at what is left of it.
@@ -195,10 +202,12 @@ func Unstake(cur realm, id int) {
 // once when no round waits, or marked leaving until none does.
 func leave(t *ticket) {
 	t.leaving = now()
+	leaves++
+	t.leftNo = leaves
 	active -= t.stake
 	if roundsWait() {
 		addPath(t.id, 0, t.weight, 0, 0)
-		pending = append(pending, t.id)
+		pending.Set(key(uint64(t.id)), t.id)
 	} else {
 		addPath(t.id, -t.weight, 0, 0, t.weight)
 		t.parked = true
@@ -211,9 +220,12 @@ var MaxSettle = 64
 
 // SettleVotes settles up to MaxSettle of a ticket's pool votes, in order,
 // and says how many are left: a ticket with more to settle than Withdraw
-// settles calls it first.
+// settles calls it first. Anyone may call it for any ticket, so a ticket
+// that voted wrong or not at all is charged without its owner, and one left
+// under half its weight leaves (round 12, minor 2).
 func SettleVotes(cur realm, id int) int {
-	t := ownTicket(cur, id)
+	caller(cur)
+	t := ticketAt(id)
 	settleVotes(t, MaxSettle)
 	return len(allVotes) - t.votes
 }

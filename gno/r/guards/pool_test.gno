@@ -269,7 +269,7 @@ func TestPoolUndecided(cur realm, t *testing.T) {
 	if !strings.Contains(Render("filing/"+itoa(id)), "- Undecided: no transcript held over a third of the stake with no rival") {
 		t.Errorf("the filing's page:\n%s", Render("filing/"+itoa(id)))
 	}
-	if bal(worker)-before != FilingBond || FundBalance() != PoolFee || Burned() != 0 {
+	if bal(worker)-before != FilingBond-int64(Checkers)*CheckFee || FundBalance() != PoolFee || Burned() != 0 { // the checkers who answered are paid (round 12, minor 3)
 		t.Errorf("the worker got back %d; fund %d, burned %d", bal(worker)-before, FundBalance(), Burned())
 	}
 	testing.SetRealm(u(voters[0]))
@@ -377,12 +377,17 @@ func TestPoolStallGivesBondsBack(cur realm, t *testing.T) {
 	if s := Tally(cross(cur), id); s != Undecided || lvl() != "" {
 		t.Fatalf("a stalled vote: %s, level %q", s, lvl())
 	}
-	if got := bal(worker) - before[worker]; got != FilingBond+bond || RecordOf(worker).Faults != 0 {
+	if got := bal(worker) - before[worker]; got != FilingBond-int64(Checkers)*CheckFee+bond || RecordOf(worker).Faults != 0 {
 		t.Errorf("the worker got %d back of %d and %d; record %+v", got, FilingBond, bond, RecordOf(worker))
 	}
+	checker := map[address]bool{drawn[0]: true, drawn[1]: true, drawn[2]: true}
 	for _, a := range owners {
-		if got := bal(a) - before[a]; got != 0 || stakeOf2(a, owners) != MinTicket {
-			t.Errorf("%s (%d seats): paid %d, stake %d", a, seats[a], got, stakeOf2(a, owners))
+		want := int64(0)
+		if checker[a] { // it answered: paid for the run, and no seat is (round 12, minor 3)
+			want = CheckFee
+		}
+		if got := bal(a) - before[a]; got != want || stakeOf2(a, owners) != MinTicket {
+			t.Errorf("%s (%d seats): paid %d, want %d, stake %d", a, seats[a], got, want, stakeOf2(a, owners))
 		}
 	}
 	if FundBalance() != PoolFee+int64(size)*PanelFee || Burned() != 0 {
@@ -451,10 +456,10 @@ func TestPoolStallWritesNoLevel(cur realm, t *testing.T) {
 	if s := Tally(cross(cur), id); s != Undecided || lvl() != "" {
 		t.Fatalf("a stalled vote after a passing word: %s, level %q", s, lvl())
 	}
-	if got := bal(worker) - before[worker]; got != FilingBond {
+	if got := bal(worker) - before[worker]; got != FilingBond-int64(Checkers)*CheckFee {
 		t.Errorf("the worker got %d", got)
 	}
-	if stakeOf2(liar, owners) != MinTicket || bal(liar)-before[liar] != bond {
+	if stakeOf2(liar, owners) != MinTicket || bal(liar)-before[liar] != bond+CheckFee {
 		t.Errorf("the liar: stake %d, paid %d", stakeOf2(liar, owners), bal(liar)-before[liar])
 	}
 	if FundBalance() != PoolFee+int64(size)*PanelFee || Burned() != 0 {
@@ -566,7 +571,7 @@ func TestPoolNoStake(cur realm, t *testing.T) {
 	testing.SetRealm(u(anyone))
 	Settle(cross(cur), id)
 	get(id).oldBelow = 0
-	if s := OpenPool(cross(cur), id); s != Undecided || bal(worker)-before != FilingBond {
+	if s := OpenPool(cross(cur), id); s != Undecided || bal(worker)-before != FilingBond-int64(Checkers)*CheckFee {
 		t.Fatalf("with no stake: %s, the worker got back %d", s, bal(worker)-before)
 	}
 	for tid := range owners {

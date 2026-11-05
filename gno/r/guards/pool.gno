@@ -63,6 +63,7 @@ type poolVote struct {
 	voted     *avl.Tree // key(ticket) → true
 	closed    bool
 	closedAt  int64
+	leaveMark int // leaves when it opened: a ticket that began leaving by then has no vote in it
 	decided   string // the winning transcript, or "" when undecided
 	winners   int64  // the winning weight
 	pot       int64  // PoolFee, set aside from the fund
@@ -83,8 +84,8 @@ func OpenPool(cur realm, id int) string {
 	if f.state != Pool {
 		panic("guards: not waiting for the pool")
 	}
-	sum, _, gone, parked := below(f.oldBelow)
-	total := sum - gone + parked // tickets withdrawn by now can't vote; leaving ones can
+	sum, left, _, _ := below(f.oldBelow)
+	total := sum - left // tickets leaving by now have no vote and aren't held by it (round 12, new major 1)
 	if total <= 0 {
 		return undecided(cur, f, id) // round 9, minor 10
 	}
@@ -93,7 +94,7 @@ func OpenPool(cur realm, id int) string {
 	}
 	fund -= PoolFee
 	f.panelCost += PoolFee
-	v := &poolVote{filing: id, open: now(), oldBelow: f.oldBelow, total: total, by: map[string]int64{},
+	v := &poolVote{filing: id, open: now(), leaveMark: leaves, oldBelow: f.oldBelow, total: total, by: map[string]int64{},
 		voters: map[address]*voter{}, voted: avl.NewTree(), pot: PoolFee}
 	votes[id] = v
 	openVotes = append(openVotes, len(allVotes))
@@ -127,7 +128,7 @@ func CommitVote(cur realm, id int, ticketList, commitment string) {
 		switch {
 		case t.owner != who:
 			panic("guards: ticket " + s + " isn't yours")
-		case t.gone || tid >= v.oldBelow:
+		case t.gone || !inVote(t, v):
 			panic("guards: ticket " + s + " has no vote on this filing")
 		case v.voted.Has(key(uint64(tid))):
 			panic("guards: ticket " + s + " already voted")
@@ -243,16 +244,23 @@ func SweepVote(cur realm, id int) int64 {
 	return n
 }
 
-// undecided ends a dispute whose vote stalled: no level, nobody paid or
-// charged for the dispute, every bond back and every ticket let go.
+// undecided ends a dispute whose vote stalled: no level, nobody charged
+// for the dispute, every bond back, every ticket let go. Each checker that
+// answered is paid CheckFee from the bond for running the rig, as an
+// abandon pays it (round 12, minor 3); no panel seat is paid.
 func undecided(cur realm, f *filing, id int) string {
 	fund += f.reserve
 	f.reserve = 0
-	pay(cur, f.filer, f.bond)
-	f.bond = 0
+	bond := f.bond
 	for _, c := range f.checks[1:] {
+		if c.revealed || c.prev != "" {
+			pay(cur, c.owner, CheckFee)
+			bond -= CheckFee
+		}
 		release(c)
 	}
+	pay(cur, f.filer, bond)
+	f.bond = 0
 	for _, p := range f.panels {
 		for _, c := range p {
 			release(c)
@@ -280,10 +288,19 @@ func openVote(id int) *poolVote {
 	return v
 }
 
+// inVote says whether a ticket has a vote in v: in its prefix, and not
+// leaving when it opened. A ticket leaving before a vote opened is neither
+// held by it nor charged for not voting in it, so a leaving ticket waits
+// only for votes already open, which close well within UnbondBlocks
+// (round 12, new major 1).
+func inVote(t *ticket, v *poolVote) bool {
+	return t.id < v.oldBelow && (t.leftNo == 0 || t.leftNo > v.leaveMark)
+}
+
 // inOpenVote says whether a ticket may still vote in a vote not yet closed.
 func inOpenVote(t *ticket) bool {
 	for _, i := range openVotes {
-		if i >= t.votes && t.id < allVotes[i].oldBelow {
+		if i >= t.votes && inVote(t, allVotes[i]) {
 			return true
 		}
 	}
@@ -299,7 +316,7 @@ func settleVotes(t *ticket, max int) {
 	for ; max > 0 && t.votes < len(allVotes); t.votes++ {
 		max--
 		v := allVotes[t.votes]
-		if t.id >= v.oldBelow {
+		if !inVote(t, v) {
 			continue
 		}
 		if !v.closed {

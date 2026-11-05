@@ -271,6 +271,7 @@ func MemoPolicy(old, new *policy.Policy) (string, error) {
 	d = append(d, keysDiff("model", old.Signers.Model, new.Signers.Model)...)
 	d = append(d, keysDiff("builders", old.Signers.Builders, new.Signers.Builders)...)
 	d = append(d, keysDiff("agents", old.Signers.Agents, new.Signers.Agents)...)
+	d = append(d, listDiff("rig build", old.Rigs, new.Rigs)...)
 	d = append(d, listDiff("tier", tierLines(old), tierLines(new))...)
 	d = append(d, listDiff("protected", flowLines(old), flowLines(new))...)
 	d = append(d, listDiff("health", healthLines(old), healthLines(new))...)

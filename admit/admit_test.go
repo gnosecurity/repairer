@@ -40,6 +40,7 @@ func fleet(t *testing.T, k keyring) *policy.Policy {
 		"vetters":[{"name":"v1","key":"` + k.hex("v1") + `"},{"name":"v2","key":"` + k.hex("v2") + `"},{"name":"v3","key":"` + k.hex("v3") + `"}],"vetters_needed":2,
 		"model":[{"name":"model","key":"` + k.hex("model") + `"}],
 		"agents":[{"name":"backup","key":"` + k.hex("backup") + `","host":"backup"},{"name":"mail","key":"` + k.hex("mail") + `","host":"mail"}]},
+		"rigs":["` + strings.Repeat("c", 64) + `"],
 		"tiers":[{"name":"A","hosts":["backup","mail","mysites"],"admit":["me","rig","vetters","model"],"canaries":["backup"]},
 		         {"name":"B","hosts":["sentry"],"admit":["me","model"],"critical":false},
 		         {"name":"C","hosts":["validator"],"admit":["me"],"critical":true}]}`))
@@ -121,6 +122,10 @@ func TestRigAndVetters(t *testing.T) {
 	if d := Admit(p, "backup", g, Evidence{Signed: []Signed{tested("rig")}}, onUbuntu, nonce, now); !d.OK || d.By != "rig" {
 		t.Fatalf("rig: %+v", d)
 	}
+	unpinned := sign(t, k, "rig", approve.Statement{Kind: approve.KindTested, Image: "ubuntu 24.04", Chain: "autopatch:vet", Guard: g.Hash(), Rig: strings.Repeat("d", 64)})
+	if d := Admit(p, "backup", g, Evidence{Signed: []Signed{unpinned}}, onUbuntu, nonce, now); d.OK || !strings.Contains(d.Why, "from a pinned rig build") {
+		t.Fatalf("a Tested from a rig build the policy doesn't pin: %+v", d) // round 9, minor 12
+	}
 	if d := Admit(p, "backup", g, Evidence{Signed: []Signed{tested("stranger")}}, onUbuntu, nonce, now); d.OK {
 		t.Fatal("a stranger's Tested admitted")
 	}
@@ -130,6 +135,12 @@ func TestRigAndVetters(t *testing.T) {
 	}
 	if d := Admit(p, "backup", g, Evidence{Signed: []Signed{tested("v1"), tested("v3")}}, onUbuntu, nonce, now); !d.OK || d.By != "vetters" {
 		t.Fatalf("two vetters: %+v", d)
+	}
+	vetted := func(who string) Signed {
+		return sign(t, k, who, approve.Statement{Kind: approve.KindTested, Image: "ubuntu 24.04", Chain: "autopatch:vet", Guard: g.Hash(), Rig: strings.Repeat("d", 64)})
+	}
+	if d := Admit(p, "backup", g, Evidence{Signed: []Signed{vetted("v1"), vetted("v3")}}, onUbuntu, nonce, now); d.OK {
+		t.Fatal("two vetters' Tested from a rig build the policy doesn't pin admitted")
 	}
 	// A Tested counts only on the system the rig ran: not on another
 	// release the guard is written for, not where the system is unknown

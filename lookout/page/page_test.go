@@ -79,7 +79,7 @@ func testPage(t *testing.T, w testWallet) (*Server, *httptest.Server, ed25519.Pr
 	p, err := policy.Decode([]byte(`{"fleet":"home","replaces":"","delay_seconds":86400,
 		"signers":{"me":{"name":"owner","key":"02db41e6e79a9f5fc6813df46202e996d245ef327e5ff3cc47c11bdb46071ab08e"},
 		"agents":[{"name":"mail","key":"` + hex.EncodeToString(key.Public().(ed25519.PublicKey)) + `","host":"mail"}]},
-		"tiers":[{"name":"A","hosts":["mail"],"admit":["me"]}]}`))
+		"tiers":[{"name":"A","hosts":["mail","web"],"admit":["me"]}]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +169,11 @@ func TestSignInAndDashboard(t *testing.T) {
 	if !strings.Contains(body, "Sign in with Adena") || strings.Contains(body, "mail") {
 		t.Fatalf("before sign-in: %s", body)
 	}
-	if res.Header.Get("Cache-Control") != "no-store" || !strings.Contains(res.Header.Get("X-Robots-Tag"), "noindex") {
+	// same-origin, so a browser sends the page's own origin with its forms'
+	// POSTs (under no-referrer it sends "Origin: null", and the sign-out and
+	// upload forms were refused).
+	if res.Header.Get("Cache-Control") != "no-store" || !strings.Contains(res.Header.Get("X-Robots-Tag"), "noindex") ||
+		res.Header.Get("Referrer-Policy") != "same-origin" {
 		t.Fatalf("headers %v", res.Header)
 	}
 	for _, path := range []string{"/admin/reports.tar", "/admin/policy.json", "/admin/guard/" + strings.Repeat("cd", 32)} {
@@ -182,7 +186,8 @@ func TestSignInAndDashboard(t *testing.T) {
 		t.Fatalf("cookie %+v", ck)
 	}
 	_, body = get(t, ts, "/admin", ck)
-	for _, want := range []string{"mail", "2 min ago", "PENDING", "waiting for you: health failed 3 times in a row", "cve-2099-1/test v1"} {
+	for _, want := range []string{"mail", "2 min ago", "PENDING", "waiting for you: health failed 3 times in a row", "cve-2099-1/test v1",
+		"<td>web</td>", "no agent key in the policy yet"} { // a machine that can't report yet is listed
 		if !strings.Contains(body, want) {
 			t.Errorf("the dashboard lacks %q", want)
 		}

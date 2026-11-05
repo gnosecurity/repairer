@@ -3,7 +3,9 @@
 # against its vendor's checksums: Ubuntu's SHA256SUMS signed with the Ubuntu
 # cloud image key (gpgv), Debian's SHA512SUMS over HTTPS from cloud.debian.org.
 # Prints the lines for scripts/rig/images.tsv, which pins each image by
-# sha256; rig.sh boots only an image whose sha256 is pinned there.
+# sha256; rig.sh boots only an image whose sha256 is pinned there. Then it
+# fetches the packages scripts/rig/debs.tsv pins into $RIG/debs and checks
+# each against its pinned sha256.
 set -euo pipefail
 R=${1:?the rig directory}
 mkdir -p "$R/images"
@@ -30,3 +32,8 @@ ubuntu 24.04
 ubuntu 26.04
 debian 12 bookworm
 debian 13 trixie
+mkdir -p "$R/debs"
+grep -v '^#' "$(dirname "$(readlink -f "$0")")/debs.tsv" | while IFS=$'\t' read -r sys f sum url; do
+  [ -f "$R/debs/$f" ] || curl -sfL -o "$R/debs/$f" "$url"
+  [ "$(sha256sum "$R/debs/$f" | cut -d' ' -f1)" = "$sum" ] || { echo "images.sh: $f isn't the pinned package" >&2; exit 1; }
+done

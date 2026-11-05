@@ -305,3 +305,23 @@ func TestMemoPolicyRefusals(t *testing.T) {
 		t.Errorf("a diff too big for a Ledger: %v", err)
 	}
 }
+
+// A change of the pinned rig builds shows each build's whole hash, so the
+// owner reads on the Ledger exactly which rig's Tested will count (round
+// 9, minor 12).
+func TestMemoPolicyRigs(t *testing.T) {
+	old, _ := fixturePolicies(t)
+	pinned := *old
+	pinned.Replaces = old.Hash()
+	pinned.Rigs = []string{strings.Repeat("a", 64)}
+	m, err := MemoPolicy(old, &pinned)
+	if err != nil || !strings.HasSuffix(m, ": rig build +"+strings.Repeat("a", 64)) {
+		t.Fatalf("memo %q, %v", m, err)
+	}
+	moved := pinned
+	moved.Replaces = pinned.Hash()
+	moved.Rigs = []string{strings.Repeat("b", 64)}
+	if m, err := MemoPolicy(&pinned, &moved); err != nil || !strings.Contains(m, "rig build -"+strings.Repeat("a", 64)+"; rig build +"+strings.Repeat("b", 64)) {
+		t.Fatalf("memo %q, %v", m, err)
+	}
+}

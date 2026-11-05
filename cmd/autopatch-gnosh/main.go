@@ -6,8 +6,9 @@
 //
 // launch holds the model's key and never lets it into the sandbox: it runs
 // judge in new user, network and mount namespaces (unshare), in a jail whose
-// whole filesystem is an empty in-memory root holding the model's UNIX
-// socket and nothing else, with no network interfaces; then it checks the
+// whole filesystem is a read-only in-memory root holding the model's UNIX
+// socket and a copy of this program, the old root unmounted (pivot_root),
+// with no network interfaces and no capabilities; then it checks the
 // answer against rule 6 itself and signs the model's yes only for a drop
 // narrowed by IP options that isn't one of the model's own drafts (-drafts
 // is required: the list of what the model drafted, empty if nothing). In:
@@ -73,6 +74,19 @@ func run(ctx context.Context, cmd string, args []string, stdin io.Reader, stdout
 	if *socket == "" || *model == "" || *weights == "" {
 		return errors.New("needs -socket, -model and -weights")
 	}
+	if cmd == "jail" {
+		// Inside launch's namespaces: make the jail and run judge in it
+		// with no capabilities. The ask stays on stdin for judge.
+		self, err := os.Executable()
+		if err != nil {
+			return err
+		}
+		if err := enterJail(*root, *socket, self); err != nil {
+			return fmt.Errorf("the jail: %w", err)
+		}
+		err = execJudge([]string{"autopatch-gnosh", "judge", "-socket", "/model.sock", "-model", *model, "-weights", *weights}, nil)
+		return fmt.Errorf("the jail: running judge: %w", err)
+	}
 	in, err := io.ReadAll(io.LimitReader(stdin, 4<<20))
 	if err != nil {
 		return err
@@ -82,12 +96,7 @@ func run(ctx context.Context, cmd string, args []string, stdin io.Reader, stdout
 		return fmt.Errorf("the ask: %w", err)
 	}
 	switch cmd {
-	case "jail", "judge":
-		if cmd == "jail" {
-			if *socket, err = enterJail(*root, *socket); err != nil {
-				return fmt.Errorf("the jail: %w", err)
-			}
-		}
+	case "judge":
 		ans, err := gnosh.Judge(ctx, gnosh.SocketModel{Socket: *socket, Name: *model, Weight: *weights}, ask)
 		if err != nil {
 			return err

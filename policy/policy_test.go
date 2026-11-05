@@ -21,6 +21,7 @@ const example = `{
     "agents": [{"name": "backup", "key": "6666666666666666666666666666666666666666666666666666666666666666", "host": "backup"},
                {"name": "sentry", "key": "7777777777777777777777777777777777777777777777777777777777777777", "host": "sentry"}]
   },
+  "rigs": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
   "tiers": [
     {"name": "A", "hosts": ["backup", "mail", "mysites"], "admit": ["me", "rig", "vetters", "model"], "canaries": ["backup", "mail"], "spacing_seconds": 900},
     {"name": "B", "hosts": ["sentry", "validator"], "admit": ["me"], "critical": true}
@@ -56,6 +57,9 @@ func TestRefusals(t *testing.T) {
 		{"three canaries", `"canaries": ["backup", "mail"]`, `"canaries": ["backup", "mail", "mysites"]`, "more than two"},
 		{"an unknown role", `"admit": ["me"], "critical"`, `"admit": ["me", "friend"], "critical"`, "not a role"},
 		{"more vetters needed than listed", `"vetters_needed": 2`, `"vetters_needed": 4`, "vetters_needed"},
+		{"a rig build in capitals", `"rigs": ["` + strings.Repeat("a", 64) + `"]`, `"rigs": ["` + strings.Repeat("A", 64) + `"]`, "64 lowercase hex"},
+		{"a short rig build", `"rigs": ["` + strings.Repeat("a", 64) + `"]`, `"rigs": ["aaaa"]`, "64 lowercase hex"},
+		{"a rig build twice", `"rigs": ["` + strings.Repeat("a", 64) + `"]`, `"rigs": ["` + strings.Repeat("a", 64) + `", "` + strings.Repeat("a", 64) + `"]`, "rig aaaaaaaaaaaaaaaa is listed twice"},
 		{"a short owner key", `"02db41e6e79a9f5fc6813df46202e996d245ef327e5ff3cc47c11bdb46071ab08e"`, `"02db41"`, "33 bytes"},
 		{"an uncompressed owner key", `"02db41e6e79a9f5fc6813df46202e996d245ef327e5ff3cc47c11bdb46071ab08e"`, `"04db41e6e79e9f5fc6813df46202e996d245ef327e5ff3cc47c11bdb46071ab08e"`, "compressed"},
 		{"uppercase hex", `"1111111111111111111111111111111111111111111111111111111111111111"`, `"AAAA111111111111111111111111111111111111111111111111111111111111"`, "hex"},
@@ -75,5 +79,27 @@ func TestRefusals(t *testing.T) {
 				t.Fatalf("err %v, want %q", err, c.want)
 			}
 		})
+	}
+}
+
+// A tier that admits the rig or vetters needs a pinned rig build, or no
+// Tested would count there: the signing tool and an agent's init refuse
+// such a policy (round 9, minor 12). Admitting only the owner and the
+// model needs none.
+func TestRigsPinned(t *testing.T) {
+	p, err := Decode([]byte(example))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.RigsPinned(); err != nil {
+		t.Fatal(err)
+	}
+	p.Rigs = nil
+	if err := p.RigsPinned(); err == nil || !strings.Contains(err.Error(), "tier A admits rig") {
+		t.Fatalf("no rig build pinned: %v", err)
+	}
+	p.Tiers[0].Admit = []string{"me", "model"}
+	if err := p.RigsPinned(); err != nil {
+		t.Fatalf("neither rig nor vetters: %v", err)
 	}
 }

@@ -248,6 +248,9 @@ func run(ctx context.Context, cmd string, args []string, stdout io.Writer) error
 		if newPolicy, err = readPolicy(fs.Arg(0)); err != nil {
 			return err
 		}
+		if err := newPolicy.RigsPinned(); err != nil {
+			return err
+		}
 		book, err := loadBook(*configDir)
 		if err != nil {
 			return err

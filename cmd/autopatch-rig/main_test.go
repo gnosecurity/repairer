@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -59,5 +60,37 @@ func TestSign(t *testing.T) {
 	m := strings.Replace(good, "73804a3fcab787f11c404c13c46b06eb8452aa585fb7f92429fa7ab98635ed6c", mg.Hash(), 1)
 	if _, err := Sign(seed, rig, mixed, []byte(m)); err == nil || !strings.Contains(err.Error(), "mixes") {
 		t.Errorf("a mixed guard: %v", err)
+	}
+}
+
+// The rig hash covers the files a run uses, directly in the scripts
+// directory, and changes with any of them, the image or the agent; a
+// folder there (planted/, the rig's own test guards) neither breaks it nor
+// changes it.
+func TestRigHash(t *testing.T) {
+	dir := t.TempDir()
+	scripts := filepath.Join(dir, "rig")
+	os.MkdirAll(filepath.Join(scripts, "planted"), 0o755)
+	write := func(p, s string) { os.WriteFile(p, []byte(s), 0o644) }
+	write(filepath.Join(scripts, "rig.sh"), "run")
+	write(filepath.Join(scripts, "debs.tsv"), "debian 12\tnftables")
+	write(filepath.Join(scripts, "planted", "p1.json"), "a planted guard")
+	image, agent := filepath.Join(dir, "image"), filepath.Join(dir, "agent")
+	write(image, "image")
+	write(agent, "agent")
+	h0, err := rigHash(scripts, image, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	write(filepath.Join(scripts, "planted", "p1.json"), "another planted guard")
+	if h, err := rigHash(scripts, image, agent); err != nil || h != h0 {
+		t.Fatalf("a planted guard changed the rig hash: %v", err)
+	}
+	for _, f := range []string{filepath.Join(scripts, "debs.tsv"), image, agent} {
+		write(f, "changed")
+		if h, err := rigHash(scripts, image, agent); err != nil || h == h0 {
+			t.Fatalf("%s changed and the hash didn't: %v", f, err)
+		}
+		h0, _ = rigHash(scripts, image, agent)
 	}
 }

@@ -40,6 +40,7 @@ func TestCanaryFirstThroughTheLookout(t *testing.T) {
 		"signers":{"me":{"name":"owner","key":"02db41e6e79a9f5fc6813df46202e996d245ef327e5ff3cc47c11bdb46071ab08e"},
 		"rig":[{"name":"rig1","key":"` + hex.EncodeToString(rig.Public().(ed25519.PublicKey)) + `"}],
 		"agents":[` + strings.Join(agentKeys, ",") + `]},
+		"rigs":["` + strings.Repeat("0", 64) + `"],
 		"tiers":[{"name":"A","hosts":["backup","mail","web"],"admit":["rig"],"canaries":["backup"],"spacing_seconds":300}],
 		"health":[{"hosts":["backup","mail","web"],"kind":"tcp","target":"203.0.113.5:443","want":""}]}`))
 	if err != nil {

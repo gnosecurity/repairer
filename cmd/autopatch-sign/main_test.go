@@ -202,3 +202,53 @@ func TestStanding(t *testing.T) {
 		t.Errorf("an ended Yes or an Off listed:\n%s", got)
 	}
 }
+
+// A policy whose tier admits the rig with no rig build pinned would count
+// no Tested there: the tool won't sign it, and says why, before anything
+// reaches gnokey (round 9, minor 12). Pinned, it goes on to the address
+// book, which here has never seen the rig's key.
+func TestPolicyRigsPinned(t *testing.T) {
+	dir := t.TempDir()
+	_, mailKey, _ := ed25519.GenerateKey(nil)
+	const ownerHex = "02db41e6e79a9f5fc6813df46202e996d245ef327e5ff3cc47c11bdb46071ab08e"
+	p, err := policy.Decode([]byte(`{"fleet":"pintest","replaces":"","delay_seconds":86400,
+		"signers":{"me":{"name":"owner","key":"` + ownerHex + `"},
+		"agents":[{"name":"mail","key":"` + hex.EncodeToString(mailKey.Public().(ed25519.PublicKey)) + `","host":"mail"}]},
+		"tiers":[{"name":"A","hosts":["mail"],"admit":["me"]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pfile := filepath.Join(dir, "policy.json")
+	os.WriteFile(pfile, p.Canonical(), 0o644)
+	reports := filepath.Join(dir, "reports")
+	os.MkdirAll(reports, 0o755)
+	owner, _ := hex.DecodeString(ownerHex)
+	body, _ := json.Marshal(map[string]any{"kind": "report", "chain": approve.ChainID(owner, "pintest"), "host": "mail", "time": time.Now().UTC(), "policy": p.Hash(), "owner_seq": 1})
+	sr, _ := json.Marshal(approve.SignReport(mailKey, body))
+	os.WriteFile(filepath.Join(reports, "mail.json"), sr, 0o644)
+	args := func(file string) []string {
+		return []string{"-policy", pfile, "-reports", reports, "-key", "owner", "-gnokey", filepath.Join(dir, "no-gnokey"),
+			"-config", filepath.Join(dir, "config"), "-yes", "-out", filepath.Join(dir, "out.json"), file}
+	}
+	withRig := func(rigs string) string {
+		np, err := policy.Decode([]byte(`{"fleet":"pintest","replaces":"` + p.Hash() + `","delay_seconds":86400,
+			"signers":{"me":{"name":"owner","key":"` + ownerHex + `"},
+			"rig":[{"name":"rig1","key":"` + strings.Repeat("1", 64) + `"}],
+			"agents":[{"name":"mail","key":"` + hex.EncodeToString(mailKey.Public().(ed25519.PublicKey)) + `","host":"mail"}]},` + rigs + `
+			"tiers":[{"name":"A","hosts":["mail"],"admit":["me","rig"]}]}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		f := filepath.Join(dir, "new.json")
+		os.WriteFile(f, np.Canonical(), 0o644)
+		return f
+	}
+	var out bytes.Buffer
+	if err := run(context.Background(), "policy", args(withRig("")), &out); err == nil || !strings.Contains(err.Error(), "tier A admits rig, but no rig build is pinned") {
+		t.Fatalf("an unpinned policy: %v", err)
+	}
+	out.Reset()
+	if err := run(context.Background(), "policy", args(withRig(`"rigs":["`+strings.Repeat("a", 64)+`"],`)), &out); err == nil || strings.Contains(err.Error(), "rig build") {
+		t.Fatalf("a pinned policy should pass the rig check and stop at the address book: %v", err)
+	}
+}

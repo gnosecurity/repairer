@@ -81,13 +81,13 @@ func Admit(p *policy.Policy, host string, g *guard.Guard, ev Evidence, m Machine
 				why = append(why, "no yes from the owner for tier "+tier.Name+" in force")
 			}
 		case "rig":
-			if n := countKeys(testedOn(ev.Signed, m), approve.KindTested, h, p.Signers.Rig); n > 0 {
+			if n := countKeys(testedOn(p, ev.Signed, m), approve.KindTested, h, p.Signers.Rig); n > 0 {
 				by = "rig"
 			} else {
-				why = append(why, "the rig hasn't signed Tested on "+m.image())
+				why = append(why, "the rig hasn't signed Tested on "+m.image()+" from a pinned rig build")
 			}
 		case "vetters":
-			if n := countKeys(testedOn(ev.Signed, m), approve.KindTested, h, p.Signers.Vetters); n >= p.Signers.VettersNeeded {
+			if n := countKeys(testedOn(p, ev.Signed, m), approve.KindTested, h, p.Signers.Vetters); n >= p.Signers.VettersNeeded {
 				by = "vetters"
 			} else {
 				why = append(why, fmt.Sprintf("%d of %d vetters", n, p.Signers.VettersNeeded))
@@ -162,11 +162,13 @@ func modelRefuses(tier *policy.Tier, g *guard.Guard, m Machine) string {
 }
 
 // testedOn keeps the statements that count on this machine: a Tested only
-// for the system it ran on (round 8, minor 9); other kinds as they are.
-func testedOn(ss []Signed, m Machine) []Signed {
+// for the system it ran on (round 8, minor 9) and from a rig build the
+// policy pins (round 9, minor 12); other kinds as they are.
+func testedOn(p *policy.Policy, ss []Signed, m Machine) []Signed {
 	var out []Signed
 	for _, s := range ss {
-		if s.Statement.Kind != approve.KindTested || (m.OS != "" && s.Statement.Image == m.image()) {
+		st := s.Statement
+		if st.Kind != approve.KindTested || (m.OS != "" && st.Image == m.image() && contains(p.Rigs, st.Rig)) {
 			out = append(out, s)
 		}
 	}

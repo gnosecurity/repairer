@@ -62,6 +62,7 @@ func gen3(dir string) error {
 		"signers":{"me":{"name":"owner","key":"02db41e6e79a9f5fc6813df46202e996d245ef327e5ff3cc47c11bdb46071ab08e"},
 		"rig":[{"name":"rig1","key":"` + hex.EncodeToString(rig.Public().(ed25519.PublicKey)) + `"}],
 		"agents":[` + strings.Join(agents, ",") + `]},
+		"rigs":["` + strings.Repeat("0", 64) + `"],
 		"tiers":[{"name":"A","hosts":["vm1","vm2","vm3"],"admit":["rig"],"canaries":["vm1"],"spacing_seconds":300}],
 		"health":[{"hosts":["vm1","vm2","vm3"],"kind":"tcp","target":"127.0.0.1:22","want":""}]}`))
 	if err != nil {
@@ -104,6 +105,7 @@ func gen(dir string) error {
 	p, err := policy.Decode([]byte(`{"fleet":"e2e","replaces":"","delay_seconds":86400,
 		"signers":{"me":{"name":"owner","key":"02db41e6e79a9f5fc6813df46202e996d245ef327e5ff3cc47c11bdb46071ab08e"},
 		"rig":[{"name":"rig1","key":"` + hex.EncodeToString(rig.Public().(ed25519.PublicKey)) + `"}]},
+		"rigs":["` + strings.Repeat("0", 64) + `"],
 		"tiers":[{"name":"A","hosts":["vm1"],"admit":["rig"]}],
 		"health":[{"hosts":["vm1"],"kind":"tcp","target":"127.0.0.1:22","want":""}]}`))
 	if err != nil {

@@ -146,3 +146,65 @@ func TestSettleVotesTakesACount(cur realm, t *testing.T) {
 		t.Fatalf("%d votes left to settle", left)
 	}
 }
+
+// A ticket its owner left out of its vote is charged as an abstainer,
+// though the owner voted with its other tickets and was right: settling
+// reads the ticket's own entry in the voted tree, not the owner's vote
+// (round 13, new major 1).
+func TestUnvotedTicketOfAVoter(cur realm, t *testing.T) {
+	reset()
+	Reruns, PanelSizes = 0, nil
+	PoolCommitWindow, PoolRevealWindow = 100, 50
+	owners := ownersN(2)
+	for _, w := range owners {
+		testing.SetRealm(u(w))
+		stakeOne(t, cur)
+	}
+	big := testutils.TestAddress("big")
+	testing.SetRealm(u(big))
+	stakeOne(t, cur) // 2
+	stakeOne(t, cur) // 3
+	stakeOne(t, cur) // 4, left out of its vote
+	testing.SetRealm(u(anyone))
+	send(PoolFee)
+	Fund(cross(cur))
+	send(0)
+	testing.SkipHeights(MinTicketAge)
+	testing.SetRealm(u(worker))
+	id := file(t, cur, ok, 1001)
+	testing.SetRealm(u(anyone))
+	drawn := draw(t, cur, id, 1001, sig1001)
+	for _, c := range drawn {
+		testing.SetRealm(u(c))
+		CommitCheck(cross(cur), id, Commitment(c, "check", ok, salt(c)))
+	}
+	for _, c := range append([]address{worker}, drawn...) {
+		testing.SetRealm(u(c))
+		RevealCheck(cross(cur), id, ok, salt(c))
+	}
+	testing.SetRealm(u(anyone))
+	Settle(cross(cur), id)
+	stranger := testutils.TestAddress("stranger")
+	testing.SetRealm(u(stranger))
+	send(ObjectionBond)
+	Object(cross(cur), id, lie)
+	send(0)
+	testing.SetRealm(u(anyone))
+	OpenPool(cross(cur), id)
+	testing.SetRealm(u(big))
+	CommitVote(cross(cur), id, "2,3", Commitment(big, "vote", ok, "v"))
+	testing.SkipHeights(PoolCommitWindow + 1)
+	RevealVote(cross(cur), id, ok, "v")
+	testing.SetRealm(u(anyone))
+	if s := Tally(cross(cur), id); s != Tested { // two of five tickets: over a third
+		t.Fatalf("the vote: %s", s)
+	}
+	SettleVotes(cross(cur), 4, 0)
+	SettleVotes(cross(cur), 2, 0)
+	if got := stakeOf(4); got != MinTicket-MinTicket*AbstainShare/100 {
+		t.Errorf("the ticket left out has %d, want an abstainer's charge taken", got)
+	}
+	if got := stakeOf(2); got != MinTicket {
+		t.Errorf("the ticket that voted right has %d", got)
+	}
+}

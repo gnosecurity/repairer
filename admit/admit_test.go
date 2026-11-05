@@ -35,7 +35,7 @@ func newKeys(t *testing.T, names ...string) keyring {
 func fleet(t *testing.T, k keyring) *policy.Policy {
 	t.Helper()
 	p, err := policy.Decode([]byte(`{"fleet":"home","replaces":"","delay_seconds":86400,
-		"signers":{"me":{"name":"owner","key":"02db41e6e79e9f5fc6813df46202e996d245ef327e5ff3cc47c11bdb46071ab08e"},
+		"signers":{"me":{"name":"owner","key":"02db41e6e79a9f5fc6813df46202e996d245ef327e5ff3cc47c11bdb46071ab08e"},
 		"rig":[{"name":"rig","key":"` + k.hex("rig") + `"}],
 		"vetters":[{"name":"v1","key":"` + k.hex("v1") + `"},{"name":"v2","key":"` + k.hex("v2") + `"},{"name":"v3","key":"` + k.hex("v3") + `"}],"vetters_needed":2,
 		"model":[{"name":"model","key":"` + k.hex("model") + `"}],

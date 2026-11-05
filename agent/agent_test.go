@@ -862,7 +862,7 @@ func TestGates(t *testing.T) {
 func TestInitAndIntake(t *testing.T) {
 	a, _, _ := newAgent(t)
 	p, err := policy.Decode([]byte(`{"fleet":"home","replaces":"","delay_seconds":86400,
-		"signers":{"me":{"name":"owner","key":"02db41e6e79e9f5fc6813df46202e996d245ef327e5ff3cc47c11bdb46071ab08e"}},
+		"signers":{"me":{"name":"owner","key":"02db41e6e79a9f5fc6813df46202e996d245ef327e5ff3cc47c11bdb46071ab08e"}},
 		"tiers":[{"name":"A","hosts":["backup","mail"],"admit":["me"]}]}`))
 	if err != nil {
 		t.Fatal(err)

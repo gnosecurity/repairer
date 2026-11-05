@@ -29,11 +29,16 @@ type Policy struct {
 	Replaces string `json:"replaces"`
 	// DelaySeconds is how long a signed change to this policy waits, counted
 	// from when an agent first sees it.
-	DelaySeconds int      `json:"delay_seconds"`
-	Signers      Signers  `json:"signers"`
-	Tiers        []Tier   `json:"tiers"`
-	Protected    []Flow   `json:"protected,omitempty"`
-	Health       []Health `json:"health,omitempty"`
+	DelaySeconds int     `json:"delay_seconds"`
+	Signers      Signers `json:"signers"`
+	// Rigs are the rig builds whose Tested count, by the hash each Tested
+	// carries: the pinned scripts, images and QEMU. A Tested from any other
+	// build, an old or a private one, counts for nothing (round 9, minor
+	// 12). A policy whose tiers admit the rig or vetters names at least one.
+	Rigs      []string `json:"rigs,omitempty"`
+	Tiers     []Tier   `json:"tiers"`
+	Protected []Flow   `json:"protected,omitempty"`
+	Health    []Health `json:"health,omitempty"`
 }
 
 // Signers are every key the agents count, by role. A key may appear once.
@@ -164,6 +169,25 @@ func (p *Policy) Hash() string {
 	return hex.EncodeToString(sum[:])
 }
 
+// RigsPinned refuses a policy whose tiers admit the rig or vetters while it
+// pins no rig build: no Tested would count there, so such a tier would
+// admit nothing but the owner's Yes. Validate allows it, since an agent
+// then fails closed (and older signed policies stay readable); the signing
+// tool refuses to sign it, and the agent's init warns.
+func (p *Policy) RigsPinned() error {
+	if len(p.Rigs) > 0 {
+		return nil
+	}
+	for _, t := range p.Tiers {
+		for _, a := range t.Admit {
+			if a == "rig" || a == "vetters" {
+				return fmt.Errorf("policy: tier %s admits %s, but no rig build is pinned (rigs), so no Tested would count", t.Name, a)
+			}
+		}
+	}
+	return nil
+}
+
 // Validate checks every rule: names, keys of the right length, no key twice
 // or in two roles, each host in one tier, canaries in their tier, roles a
 // tier can admit, and flows and checks on known hosts.
@@ -212,6 +236,16 @@ func (p *Policy) Validate() error {
 	}
 	if len(s.Builders) == 1 {
 		return errors.New("policy: a release needs two builders' rebuilds, so name none or at least two")
+	}
+	seenRig := map[string]bool{}
+	for _, r := range p.Rigs {
+		if !isHex(r, 32) {
+			return fmt.Errorf("policy: rig %q is not a rig build's hash (64 lowercase hex digits)", r)
+		}
+		if seenRig[r] {
+			return fmt.Errorf("policy: rig %s is listed twice", r[:16])
+		}
+		seenRig[r] = true
 	}
 	hostTier := map[string]string{}
 	if len(p.Tiers) == 0 {

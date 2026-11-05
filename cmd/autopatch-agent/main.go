@@ -32,6 +32,7 @@ import (
 
 	"github.com/jaekwon/autopatch/agent"
 	"github.com/jaekwon/autopatch/guard"
+	"github.com/jaekwon/autopatch/policy"
 )
 
 const usage = `usage: autopatch-agent <command> [flags] [args]
@@ -276,6 +277,11 @@ func run(ctx context.Context, cmd string, args []string) error {
 		pub, err := a.Init(*host, b, *seq)
 		if err != nil {
 			return err
+		}
+		if p, err := policy.Parse(b); err == nil {
+			if err := p.RigsPinned(); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: %v; only the owner's Yes admits a guard there until a policy pins one\n", err)
+			}
 		}
 		if *intakeUser != "" {
 			if err := agent.SetupHalves(*stateDir, *intakeUser); err != nil {

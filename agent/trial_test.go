@@ -62,6 +62,7 @@ func newTrialTier(t *testing.T, host, tierA, extra string, moreTargets ...string
 		"rig":[{"name":"rig1","key":"` + pub(tr.rig) + `"}],
 		"agents":[{"name":"backup","key":"` + pub(tr.keys["backup"]) + `","host":"backup"},
 		          {"name":"mail","key":"` + pub(tr.keys["mail"]) + `","host":"mail"}]},
+		"rigs":["` + strings.Repeat("c", 64) + `"],
 		"tiers":[{"name":"A",` + tierA + `,"admit":["me","rig"],"canaries":["backup"]}],
 		"health":[` + healthJSON(append([]string{site}, moreTargets...)) + `]` + extra + `}`))
 	if err != nil {

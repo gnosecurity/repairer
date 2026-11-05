@@ -46,7 +46,11 @@ type OSFacts struct {
 
 // Kernel is the running build against what is installed.
 type Kernel struct {
-	Running   string   `json:"running"` // e.g. 6.8.0-142.142
+	Running string `json:"running"` // e.g. 6.8.0-142.142
+	// Source is the running image's source package as the flaw trackers
+	// name it: linux, linux-hwe-6.8, linux-aws (the signed builds' sources
+	// are named for what they sign).
+	Source    string   `json:"source,omitempty"`
 	Flavour   string   `json:"flavour,omitempty"`
 	Release   string   `json:"release"`   // uname -r
 	Installed []string `json:"installed"` // linux-image versions dpkg calls installed
@@ -130,6 +134,11 @@ func (a *Agent) Report(ctx context.Context) *Report {
 	} else {
 		fail("installed kernels", err)
 	}
+	if r.Kernel.Release != "" {
+		if out, err := a.Sys.Run(ctx, nil, "dpkg-query", "-W", "-f", "${source:Package}", "linux-image-"+r.Kernel.Release); err == nil {
+			r.Kernel.Source = trackerSource(r.OS.ID, strings.TrimSpace(string(out)))
+		}
+	}
 	if out, err := a.Sys.Run(ctx, nil, "dkms", "status"); err == nil {
 		r.Kernel.DKMSMissing = dkmsMissing(out, r.Kernel.Newest)
 	}
@@ -203,6 +212,20 @@ func osFacts(b []byte) OSFacts {
 		}
 	}
 	return o
+}
+
+// trackerSource names a kernel image's source package as the flaw trackers
+// do. Signed images come from a signing package named for what it signs:
+// Ubuntu's linux-signed-hwe-6.8 signs linux-hwe-6.8, and Debian's
+// linux-signed-amd64 signs linux.
+func trackerSource(os, src string) string {
+	switch {
+	case os == "debian" && strings.HasPrefix(src, "linux-signed-"):
+		return "linux"
+	case strings.HasPrefix(src, "linux-signed"):
+		return "linux" + strings.TrimPrefix(src, "linux-signed")
+	}
+	return src
 }
 
 // eol reads the end of standard support from distro-info's CSV: for Ubuntu,

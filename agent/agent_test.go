@@ -901,3 +901,17 @@ func TestInitAndIntake(t *testing.T) {
 		t.Fatal("took a bundle over the cap")
 	}
 }
+
+func TestTrackerSource(t *testing.T) {
+	for _, c := range []struct{ os, src, want string }{
+		{"ubuntu", "linux-signed", "linux"},
+		{"ubuntu", "linux-signed-hwe-6.8", "linux-hwe-6.8"},
+		{"ubuntu", "linux-aws", "linux-aws"},
+		{"debian", "linux-signed-amd64", "linux"},
+		{"debian", "linux", "linux"},
+	} {
+		if got := trackerSource(c.os, c.src); got != c.want {
+			t.Errorf("%s %s: %s, want %s", c.os, c.src, got, c.want)
+		}
+	}
+}

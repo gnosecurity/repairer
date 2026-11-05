@@ -1,0 +1,252 @@
+[
+ {
+  "host": "u2204-a",
+  "os": {
+   "id": "ubuntu",
+   "version": "22.04",
+   "codename": "jammy",
+   "eol": "2027-06-01"
+  },
+  "kernel": {
+   "running": "5.15.0-198.208",
+   "release": "5.15.0-198-generic",
+   "source": "linux",
+   "installed": [
+    "5.15.0-198.208",
+    "5.15.0-202.212"
+   ]
+  }
+ },
+ {
+  "host": "u2604-a",
+  "os": {
+   "id": "ubuntu",
+   "version": "26.04",
+   "codename": "resolute",
+   "eol": "2031-05-29"
+  },
+  "kernel": {
+   "running": "7.0.0-38.38",
+   "release": "7.0.0-38-generic",
+   "source": "linux",
+   "installed": [
+    "7.0.0-38.38",
+    "7.0.0-42.42"
+   ]
+  }
+ },
+ {
+  "host": "u2404-a",
+  "os": {
+   "id": "ubuntu",
+   "version": "24.04",
+   "codename": "noble",
+   "eol": "2029-05-31"
+  },
+  "kernel": {
+   "running": "6.8.0-147.147",
+   "release": "6.8.0-147-generic",
+   "source": "linux",
+   "installed": [
+    "6.8.0-146.146",
+    "6.8.0-147.147"
+   ]
+  }
+ },
+ {
+  "host": "u2404-b",
+  "os": {
+   "id": "ubuntu",
+   "version": "24.04",
+   "codename": "noble",
+   "eol": "2029-05-31"
+  },
+  "kernel": {
+   "running": "6.8.0-142.142",
+   "release": "6.8.0-142-generic",
+   "source": "linux",
+   "installed": [
+    "6.8.0-142.142",
+    "6.8.0-147.147"
+   ]
+  }
+ },
+ {
+  "host": "u2404-c",
+  "os": {
+   "id": "ubuntu",
+   "version": "24.04",
+   "codename": "noble",
+   "eol": "2029-05-31"
+  },
+  "kernel": {
+   "running": "6.8.0-142.142",
+   "release": "6.8.0-142-generic",
+   "source": "linux",
+   "installed": [
+    "6.8.0-142.142",
+    "6.8.0-147.147"
+   ]
+  }
+ },
+ {
+  "host": "u2404-d",
+  "os": {
+   "id": "ubuntu",
+   "version": "24.04",
+   "codename": "noble",
+   "eol": "2029-05-31"
+  },
+  "kernel": {
+   "running": "6.8.0-142.142",
+   "release": "6.8.0-142-generic",
+   "source": "linux",
+   "installed": [
+    "6.8.0-142.142",
+    "6.8.0-147.147"
+   ]
+  }
+ },
+ {
+  "host": "u2604-b",
+  "os": {
+   "id": "ubuntu",
+   "version": "26.04",
+   "codename": "resolute",
+   "eol": "2031-05-29"
+  },
+  "kernel": {
+   "running": "7.0.0-31.31",
+   "release": "7.0.0-31-generic",
+   "source": "linux",
+   "installed": [
+    "7.0.0-31.31",
+    "7.0.0-42.42"
+   ]
+  }
+ },
+ {
+  "host": "u2404-e",
+  "os": {
+   "id": "ubuntu",
+   "version": "24.04",
+   "codename": "noble",
+   "eol": "2029-05-31"
+  },
+  "kernel": {
+   "running": "6.8.0-142.142",
+   "release": "6.8.0-142-generic",
+   "source": "linux",
+   "installed": [
+    "6.8.0-142.142",
+    "6.8.0-147.147"
+   ]
+  }
+ },
+ {
+  "host": "u2404-f",
+  "os": {
+   "id": "ubuntu",
+   "version": "24.04",
+   "codename": "noble",
+   "eol": "2029-05-31"
+  },
+  "kernel": {
+   "running": "6.8.0-142.142",
+   "release": "6.8.0-142-generic",
+   "source": "linux",
+   "installed": [
+    "6.8.0-142.142",
+    "6.8.0-147.147"
+   ]
+  }
+ },
+ {
+  "host": "u2404-g",
+  "os": {
+   "id": "ubuntu",
+   "version": "24.04",
+   "codename": "noble",
+   "eol": "2029-05-31"
+  },
+  "kernel": {
+   "running": "6.8.0-137.137",
+   "release": "6.8.0-137-generic",
+   "source": "linux",
+   "installed": [
+    "6.8.0-137.137"
+   ]
+  }
+ },
+ {
+  "host": "u2404-h",
+  "os": {
+   "id": "ubuntu",
+   "version": "24.04",
+   "codename": "noble",
+   "eol": "2029-05-31"
+  },
+  "kernel": {
+   "running": "6.8.0-137.137",
+   "release": "6.8.0-137-generic",
+   "source": "linux",
+   "installed": [
+    "6.8.0-137.137"
+   ]
+  }
+ },
+ {
+  "host": "u2504-a",
+  "os": {
+   "id": "ubuntu",
+   "version": "25.04",
+   "codename": "plucky",
+   "eol": "2026-01-15"
+  },
+  "kernel": {
+   "running": "6.14.0-37.37",
+   "release": "6.14.0-37-generic",
+   "source": "linux",
+   "installed": [
+    "6.14.0-23.23",
+    "6.14.0-37.37"
+   ]
+  }
+ },
+ {
+  "host": "u2604-c",
+  "os": {
+   "id": "ubuntu",
+   "version": "26.04",
+   "codename": "resolute",
+   "eol": "2031-05-29"
+  },
+  "kernel": {
+   "running": "7.0.0-38.38",
+   "release": "7.0.0-38-generic",
+   "source": "linux",
+   "installed": [
+    "7.0.0-38.38",
+    "7.0.0-42.42"
+   ]
+  }
+ },
+ {
+  "host": "u2604-d",
+  "os": {
+   "id": "ubuntu",
+   "version": "26.04",
+   "codename": "resolute",
+   "eol": "2031-05-29"
+  },
+  "kernel": {
+   "running": "7.0.0-38.38",
+   "release": "7.0.0-38-generic",
+   "source": "linux",
+   "installed": [
+    "7.0.0-38.38",
+    "7.0.0-42.42"
+   ]
+  }
+ }
+]

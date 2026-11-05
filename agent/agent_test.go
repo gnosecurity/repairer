@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"io/fs"
 	"os"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/jaekwon/autopatch/guard"
 	"github.com/jaekwon/autopatch/nft"
+	"github.com/jaekwon/autopatch/policy"
 )
 
 var ctx = context.Background()
@@ -854,5 +856,48 @@ func TestGates(t *testing.T) {
 	}
 	if inLoginSession([]byte("0::/system.slice/cron.service\n")) || !inLoginSession([]byte("0::/user.slice/user-1000.slice/session-3.scope\n")) {
 		t.Error("inLoginSession wrong")
+	}
+}
+
+func TestInitAndIntake(t *testing.T) {
+	a, _, _ := newAgent(t)
+	p, err := policy.Decode([]byte(`{"fleet":"home","replaces":"","delay_seconds":86400,
+		"signers":{"me":{"name":"owner","key":"02db41e6e79e9f5fc6813df46202e996d245ef327e5ff3cc47c11bdb46071ab08e"}},
+		"tiers":[{"name":"A","hosts":["backup","mail"],"admit":["me"]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Init("kourt", p.Canonical(), 0); err == nil {
+		t.Fatal("init for a host in no tier")
+	}
+	if _, err := a.Init("mail", []byte("{}"), 0); err == nil {
+		t.Fatal("init with a policy that isn't canonical")
+	}
+	pub, err := a.Init("mail", p.Canonical(), 41)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := a.agentKey()
+	if err != nil || !bytes.Equal(pub, again) {
+		t.Fatal("the agent's key changed")
+	}
+	f, err := a.loadFleet()
+	if err != nil || f.Host != "mail" || f.LastSeq != 41 {
+		t.Fatalf("fleet %+v %v", f, err)
+	}
+	if fi, err := os.Stat(filepath.Join(a.StateDir, keyFile)); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("key file %v %v", fi, err)
+	}
+
+	spool := filepath.Join(a.StateDir, spoolDir)
+	path, err := Intake(spool, strings.NewReader(`{"messages":[]}`))
+	if err != nil || !strings.HasPrefix(path, spool) {
+		t.Fatalf("intake %q %v", path, err)
+	}
+	if _, err := Intake(spool, strings.NewReader("not json")); err == nil {
+		t.Fatal("took a bundle that isn't JSON")
+	}
+	if _, err := Intake(spool, strings.NewReader(`"`+strings.Repeat("x", MaxBundle)+`"`)); err == nil {
+		t.Fatal("took a bundle over the cap")
 	}
 }

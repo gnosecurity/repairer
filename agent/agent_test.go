@@ -860,6 +860,32 @@ func TestGates(t *testing.T) {
 	if inLoginSession([]byte("0::/system.slice/cron.service\n")) || !inLoginSession([]byte("0::/user.slice/user-1000.slice/session-3.scope\n")) {
 		t.Error("inLoginSession wrong")
 	}
+	// Every kernel installed whole (round 14, new major 1): a newer kernel
+	// half configured by a postinst that failed, or an older one missing its
+	// initrd, holds every reboot; one removed with its config left doesn't.
+	sys.files["/boot/initrd.img-6.8.0-149-generic"] = "initrd"
+	sys.files["/boot/vmlinuz-6.8.0-147-generic"] = "kernel"
+	sys.runOut["dkms status"] = ""
+	sys.runOut["dpkg-query -W -f ${Package} ${Version} ${db:Status-Abbrev}\n linux-image-[0-9]*"] =
+		"linux-image-6.8.0-140-generic 6.8.0-140.140 rc \nlinux-image-6.8.0-147-generic 6.8.0-147.147 ii \n" +
+			"linux-image-6.8.0-149-generic 6.8.0-149.149 ii \nlinux-image-6.8.0-151-generic 6.8.0-151.151 iF \n"
+	got = map[string]Gate{}
+	for _, g := range a.Gates(ctx) {
+		got[strings.SplitN(g.Name, " (", 2)[0]] = g
+	}
+	g := got["every kernel installed whole"]
+	if g.OK || !strings.Contains(g.Why, "linux-image-6.8.0-151-generic is iF") || !strings.Contains(g.Why, "/boot/initrd.img-6.8.0-147-generic is missing") ||
+		strings.Contains(g.Why, "140") || strings.Contains(g.Why, "149") {
+		t.Errorf("kernels whole: %+v", g)
+	}
+	sys.files["/boot/initrd.img-6.8.0-147-generic"] = "initrd"
+	sys.runOut["dpkg-query -W -f ${Package} ${Version} ${db:Status-Abbrev}\n linux-image-[0-9]*"] =
+		"linux-image-6.8.0-147-generic 6.8.0-147.147 ii \nlinux-image-6.8.0-149-generic 6.8.0-149.149 ii \n"
+	for _, g := range a.Gates(ctx) {
+		if strings.HasPrefix(g.Name, "every kernel installed whole") && !g.OK {
+			t.Errorf("whole kernels held: %+v", g)
+		}
+	}
 }
 
 func TestInitAndIntake(t *testing.T) {

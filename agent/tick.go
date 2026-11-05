@@ -396,6 +396,11 @@ func (a *Agent) advance(ctx context.Context, f *Fleet, p *policy.Policy, sample 
 			busy = true
 		}
 	}
+	// A reboot under way, or in its health window, is a change in flight
+	// too: no guard's trial starts then (round 14, minor 3).
+	if st, err := a.loadReboot(); err == nil && (st.Phase == Rebooting || st.Phase == Booted) {
+		busy = true
+	}
 	// One change in flight at a time, but a keep goes on even while a
 	// window is open: a keep guard is never blamed.
 	a.next(ctx, f, p, entries, evs, checks, sample, busy, res)

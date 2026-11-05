@@ -107,6 +107,31 @@ func (a *Agent) Gates(ctx context.Context) []Gate {
 		}
 	}
 	add("newest kernel can boot ("+rel+")", len(why) == 0, strings.Join(why, "; "))
+
+	// 6. Every kernel is installed whole: no linux-image package half
+	// installed or half configured (a postinst that failed), and every
+	// installed one has its vmlinuz and initrd, since GRUB lists each vmlinuz
+	// in /boot and a boot may land on any of them (round 14, new major 1).
+	var half []string
+	sc := bufio.NewScanner(bytes.NewReader(out))
+	for sc.Scan() {
+		f := strings.Fields(sc.Text())
+		if len(f) < 3 {
+			continue
+		}
+		switch krel := strings.TrimPrefix(f[0], "linux-image-"); f[2] {
+		case "ii":
+			for _, fl := range []string{"/boot/vmlinuz-" + krel, "/boot/initrd.img-" + krel} {
+				if fi, err := a.Sys.Stat(fl); err != nil || fi.Size() == 0 {
+					half = append(half, fl+" is missing or empty")
+				}
+			}
+		case "rc", "un", "pn": // removed, or never installed
+		default:
+			half = append(half, f[0]+" is "+f[2]+", not fully installed")
+		}
+	}
+	add("every kernel installed whole", len(half) == 0, strings.Join(half, "; "))
 	return gs
 }
 

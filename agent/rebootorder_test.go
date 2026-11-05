@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -63,6 +64,7 @@ func orderAgent(t *testing.T, tier string) (a *Agent, sys *fakeSys, tick func(..
 	if _, err := a.Init("web", p.Canonical(), 0); err != nil {
 		t.Fatal(err)
 	}
+	a.Health = func(context.Context, policy.Health) string { return "" } // every check passes
 	owner, _ := hex.DecodeString(pub)
 	chain := approve.ChainID(owner, p.Fleet)
 	seq := uint64(0)
@@ -171,7 +173,7 @@ func TestRebootOrderWaits(t *testing.T) {
 	t.Run("another kernel", func(t *testing.T) {
 		a, sys, tick, reboot, _ := orderAgent(t, ``)
 		res := tick(reboot("web", "6.8.0-150-generic", a.now().Add(time.Hour).Truncate(time.Minute)))
-		if !strings.Contains(res.Reboot, "your Reboot #1 names 6.8.0-150-generic, but the newest kernel installed is "+newRel) || len(ran(sys, "grub-reboot")) != 0 {
+		if !strings.Contains(res.Reboot, "your Reboot #1 names 6.8.0-150-generic, not "+newRel+", the kernel a reboot now would boot") || len(ran(sys, "grub-reboot")) != 0 {
 			t.Fatalf("%q", res.Reboot)
 		}
 		// Once that kernel is installed and ready, the kept Reboot is used.
@@ -200,7 +202,17 @@ func TestRebootOrderWaits(t *testing.T) {
 		sys.runOut[dpkgQuery] = "linux-image-" + oldRel + " 6.8.0-142.142 ii \n"
 		sys.files["/run/reboot-required"] = "*** System restart required ***\n"
 		res := tick(reboot("web", oldRel, a.now().Add(time.Hour).Truncate(time.Minute)))
-		if res.Reboot != "rebooting (the system asked)" || len(ran(sys, "systemctl reboot")) != 1 || len(ran(sys, "grub-")) != 0 {
+		if res.Reboot != "rebooting (the system asked)" || len(ran(sys, "systemctl reboot")) != 1 || len(ran(sys, "grub-reboot")) != 0 {
+			t.Fatalf("%q", res.Reboot)
+		}
+	})
+	t.Run("the running kernel", func(t *testing.T) {
+		// Nothing owed, but the owner's Reboot names the running kernel: a
+		// plain reboot (round 14, minor 2).
+		a, sys, tick, reboot, _ := orderAgent(t, ``)
+		sys.runOut[dpkgQuery] = "linux-image-" + oldRel + " 6.8.0-142.142 ii \n"
+		res := tick(reboot("web", oldRel, a.now().Add(time.Hour).Truncate(time.Minute)))
+		if res.Reboot != "rebooting (your Reboot #1)" || len(ran(sys, "systemctl reboot")) != 1 || len(ran(sys, "grub-reboot")) != 0 {
 			t.Fatalf("%q", res.Reboot)
 		}
 	})

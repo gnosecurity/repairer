@@ -84,9 +84,11 @@ type Tier struct {
 	// RebootWindow is when a "window" tier may reboot: "HH:MM-HH:MM", UTC.
 	// It may wrap midnight ("23:30-00:30").
 	RebootWindow string `json:"reboot_window,omitempty"`
-	// RebootAfter names a host, in another tier, whose agent must have
-	// signed Healthy since its own last reboot before this tier's hosts
-	// reboot: the validator waits for the sentry.
+	// RebootAfter names a host, in another tier, that must be up, current
+	// and healthy before this tier's hosts reboot: the validator waits for
+	// the sentry. Its agent's signed Back over the waiting host's fresh
+	// nonce is the all-clear (still to come; until then this tier reboots
+	// only on the owner's Reboot).
 	RebootAfter string `json:"reboot_after,omitempty"`
 }
 

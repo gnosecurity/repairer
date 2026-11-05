@@ -166,6 +166,11 @@ func DrawPanel(cur realm, id int) {
 		panic("guards: the panel's deadline has passed; settle it for a new round")
 	}
 	size := PanelSizes[f.panelLevel]
+	if moved(f) {
+		fixRound(f, id) // its fees stay set aside
+		chain.Emit("GuardPanel", "filing", strconv.Itoa(id), "size", strconv.Itoa(size), "round", strconv.FormatUint(f.round, 10), "why", "the pool moved")
+		return
+	}
 	picks := pick(roundSig(f), "panel", id, f.panelLevel, size, f, true)
 	unwait(f, id)
 	compact(4)

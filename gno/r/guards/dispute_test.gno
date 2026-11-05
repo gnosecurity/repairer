@@ -526,8 +526,8 @@ func TestFundWaits(cur realm, t *testing.T) {
 	if st, _, _ := State(id); st != Panelled || FundBalance() != 0 || roundsWait() {
 		t.Fatalf("after the draw: %s, fund %d, a round waits: %v", st, FundBalance(), roundsWait())
 	}
-	if _, _, _, parked := below(nTickets); len(pending) != 0 || parked != MinTicket {
-		t.Errorf("the panel's draw left %d pending, %d parked", len(pending), parked)
+	if _, _, _, parked := below(nTickets); pending.Size() != 0 || parked != MinTicket {
+		t.Errorf("the panel's draw left %d pending, %d parked", pending.Size(), parked)
 	}
 }
 

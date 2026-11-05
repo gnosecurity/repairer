@@ -31,6 +31,8 @@ type System interface {
 	WriteFile(name string, data []byte, perm fs.FileMode) error
 	// Remove removes a file; a file already gone is not an error.
 	Remove(name string) error
+	// Stat describes a file, following symlinks.
+	Stat(name string) (fs.FileInfo, error)
 	// ReadSetting and WriteSetting read and write a kernel setting live, in
 	// the agent's own network namespace for net.* settings.
 	ReadSetting(name string) (string, error)
@@ -130,6 +132,8 @@ func (l Linux) ReadFile(name string) ([]byte, error) { return os.ReadFile(l.path
 func (l Linux) WriteFile(name string, data []byte, perm fs.FileMode) error {
 	return writeAtomic(l.path(name), data, perm)
 }
+
+func (l Linux) Stat(name string) (fs.FileInfo, error) { return os.Stat(l.path(name)) }
 
 func (l Linux) Remove(name string) error {
 	if err := os.Remove(l.path(name)); err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -377,7 +381,11 @@ func (l Linux) Listening() ([]Listen, error) {
 			socks = append(socks, sock{Listen{Proto: src.proto, Addr: addr.String(), Port: int(port)}, f[9]})
 		}
 	}
-	owner := map[string]string{}
+	type proc struct {
+		pid  int
+		name string
+	}
+	owner := map[string]proc{}
 	scanProcs(func(pid string) string {
 		fds, err := os.ReadDir("/proc/" + pid + "/fd")
 		if err != nil {
@@ -385,7 +393,8 @@ func (l Linux) Listening() ([]Listen, error) {
 		}
 		for _, fd := range fds {
 			if t, err := os.Readlink("/proc/" + pid + "/fd/" + fd.Name()); err == nil && strings.HasPrefix(t, "socket:[") {
-				owner[strings.TrimSuffix(strings.TrimPrefix(t, "socket:["), "]")] = comm(pid)
+				n, _ := strconv.Atoi(pid)
+				owner[strings.TrimSuffix(strings.TrimPrefix(t, "socket:["), "]")] = proc{n, comm(pid)}
 			}
 		}
 		return ""
@@ -393,7 +402,7 @@ func (l Linux) Listening() ([]Listen, error) {
 	seen := map[Listen]bool{}
 	var out []Listen
 	for _, s := range socks {
-		s.Process = owner[s.inode]
+		s.Process, s.PID = owner[s.inode].name, owner[s.inode].pid
 		if !seen[s.Listen] {
 			seen[s.Listen] = true
 			out = append(out, s.Listen)

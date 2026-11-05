@@ -87,6 +87,7 @@ type Listen struct {
 	Addr    string `json:"addr"`
 	Port    int    `json:"port"`
 	Process string `json:"process,omitempty"`
+	PID     int    `json:"pid,omitempty"`
 }
 
 // GuardFacts is a guard on the machine, from live state.

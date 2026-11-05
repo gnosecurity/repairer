@@ -827,3 +827,32 @@ func TestProcAddr(t *testing.T) {
 		}
 	}
 }
+
+func TestGates(t *testing.T) {
+	a, sys, _ := newAgent(t)
+	sys.units["ssh.socket"] = &fakeUnit{enabled: "enabled"}
+	sys.listen = []Listen{{Proto: "tcp", Addr: "0.0.0.0", Port: 22, Process: "sshd", PID: 100}, {Proto: "tcp", Addr: "0.0.0.0", Port: 8000, Process: "python3", PID: 200}}
+	sys.files["/proc/100/cgroup"] = "0::/system.slice/ssh.service\n"
+	sys.files["/proc/200/cgroup"] = "0::/user.slice/user-0.slice/session-12.scope\n"
+	sys.files["/boot/vmlinuz-6.8.0-149-generic"] = "kernel"
+	sys.runOut = map[string]string{
+		"dpkg-query -W -f ${Package} ${Version} ${db:Status-Abbrev}\n linux-image-[0-9]*": "linux-image-6.8.0-149-generic 6.8.0-149.149 ii \n",
+		"dkms status": "amdgpu/6.12, 6.8.0-147-generic, x86_64: installed\n",
+	}
+	got := map[string]Gate{}
+	for _, g := range a.Gates(ctx) {
+		got[strings.SplitN(g.Name, " (", 2)[0]] = g
+	}
+	if !got["ssh comes back"].OK {
+		t.Error("ssh.socket enabled should pass")
+	}
+	if g := got["no hand-started listeners"]; g.OK || !strings.Contains(g.Why, "python3 (pid 200, port 8000)") {
+		t.Errorf("hand-started: %+v", g)
+	}
+	if g := got["newest kernel can boot"]; g.OK || !strings.Contains(g.Why, "initrd.img-6.8.0-149-generic is missing") || !strings.Contains(g.Why, "amdgpu") {
+		t.Errorf("kernel: %+v", g)
+	}
+	if inLoginSession([]byte("0::/system.slice/cron.service\n")) || !inLoginSession([]byte("0::/user.slice/user-1000.slice/session-3.scope\n")) {
+		t.Error("inLoginSession wrong")
+	}
+}

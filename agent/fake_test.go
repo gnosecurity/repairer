@@ -25,6 +25,7 @@ type fakeSys struct {
 	modules  map[string]string // name: "loadable" or "builtin"
 	sshPorts []int
 	listen   []Listen
+	runOut   map[string]string // output for a program and its args, joined by spaces
 	ephLo    int
 	ephHi    int
 	log      []string
@@ -200,6 +201,9 @@ func (f *fakeSys) Run(_ context.Context, stdin []byte, prog string, args ...stri
 		}
 		return nil, nil
 	}
+	if out, ok := f.runOut[line]; ok {
+		return []byte(out), nil
+	}
 	return nil, f.record(line)
 }
 
@@ -217,6 +221,27 @@ func (f *fakeSys) WriteFile(name string, data []byte, _ fs.FileMode) error {
 	}
 	f.files[name] = string(data)
 	return nil
+}
+
+// fakeInfo describes a file of the fake machine.
+type fakeInfo struct {
+	mode fs.FileMode
+	size int64
+}
+
+func (i fakeInfo) Name() string       { return "" }
+func (i fakeInfo) Size() int64        { return i.size }
+func (i fakeInfo) Mode() fs.FileMode  { return i.mode }
+func (i fakeInfo) ModTime() time.Time { return time.Time{} }
+func (i fakeInfo) IsDir() bool        { return false }
+func (i fakeInfo) Sys() any           { return nil }
+
+func (f *fakeSys) Stat(name string) (fs.FileInfo, error) {
+	s, ok := f.files[name]
+	if !ok {
+		return nil, fs.ErrNotExist
+	}
+	return fakeInfo{0o644, int64(len(s))}, nil
 }
 
 func (f *fakeSys) Remove(name string) error {

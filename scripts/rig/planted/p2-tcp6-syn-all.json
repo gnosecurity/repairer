@@ -1,0 +1,4 @@
+{"id": "planted/p2-tcp6-syn-all", "version": 1, "flaws": ["CVE-2099-902"],
+ "for": [{"os": "ubuntu", "releases": ["24.04"]}],
+ "blocks": [{"drop": {"family": "ipv6", "protocol": "tcp", "syn": true}}],
+ "breaks": "every new inbound TCP connection over IPv6"}

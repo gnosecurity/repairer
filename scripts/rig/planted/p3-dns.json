@@ -1,0 +1,4 @@
+{"id": "planted/p3-dns", "version": 1, "flaws": ["CVE-2099-903"],
+ "for": [{"os": "ubuntu", "releases": ["24.04"]}],
+ "blocks": [{"drop": {"family": "ipv4", "protocol": "udp", "ports": ["53"]}}],
+ "breaks": "DNS answers to this machine"}

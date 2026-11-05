@@ -1,0 +1,8 @@
+# planted guard	what the rig must do: caught (refused, or a check fails), or a gap a later rig closes
+p1-tcp-syn-all	caught
+p2-tcp6-syn-all	caught
+p3-dns	caught
+p4-ssh-port	caught
+p5-all-ports	caught
+p6-icmp-all	caught
+p7-mixed	caught

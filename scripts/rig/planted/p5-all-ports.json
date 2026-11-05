@@ -1,0 +1,4 @@
+{"id": "planted/p5-all-ports", "version": 1, "flaws": ["CVE-2099-905"],
+ "for": [{"os": "ubuntu", "releases": ["24.04"]}],
+ "blocks": [{"drop": {"family": "ipv4", "protocol": "tcp", "ports": ["1-65535"]}}],
+ "breaks": "every TCP port"}

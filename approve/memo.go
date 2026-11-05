@@ -26,12 +26,23 @@ type Yes struct {
 	Tiers []string  // tier names, such as A and B
 	Until time.Time // when the yes ends, to the second, in UTC
 	Mode  string    // "undo" or "keep"
+	// NoCanary lets this guard go on every machine of the tiers at once,
+	// without waiting for a canary's Healthy.
+	NoCanary bool
+}
+
+// mode is the Yes's mode as signed: "undo" or "keep", with "+nocanary".
+func (y Yes) mode() string {
+	if y.NoCanary {
+		return y.Mode + "+nocanary"
+	}
+	return y.Mode
 }
 
 // Args are the Yes's arguments as signed: hash, tiers joined by commas, the
 // end as Unix seconds, and the mode.
 func (y Yes) Args() []string {
-	return []string{y.Hash, strings.Join(y.Tiers, ","), strconv.FormatInt(y.Until.Unix(), 10), y.Mode}
+	return []string{y.Hash, strings.Join(y.Tiers, ","), strconv.FormatInt(y.Until.Unix(), 10), y.mode()}
 }
 
 // ParseYes reads a Yes from a statement's call, strictly.
@@ -39,7 +50,8 @@ func ParseYes(c Call) (Yes, error) {
 	if c.Func != "Yes" || len(c.Args) != 4 {
 		return Yes{}, errors.New("approve: not a Yes with four arguments")
 	}
-	y := Yes{Hash: c.Args[0], Mode: c.Args[3]}
+	mode, nocanary := strings.CutSuffix(c.Args[3], "+nocanary")
+	y := Yes{Hash: c.Args[0], Mode: mode, NoCanary: nocanary}
 	if !isHash(y.Hash) {
 		return Yes{}, fmt.Errorf("approve: %q is not a guard hash", y.Hash)
 	}
@@ -89,7 +101,7 @@ func MemoYes(g *guard.Guard, y Yes) (string, error) {
 	for _, bl := range g.Blocks {
 		b.WriteString(" " + bl.Describe() + ";")
 	}
-	fmt.Fprintf(&b, " tiers %s; until %s; mode %s", strings.Join(y.Tiers, ","), y.Until.UTC().Format(time.RFC3339), y.Mode)
+	fmt.Fprintf(&b, " tiers %s; until %s; mode %s", strings.Join(y.Tiers, ","), y.Until.UTC().Format(time.RFC3339), y.mode())
 	return checkMemo(b.String())
 }
 

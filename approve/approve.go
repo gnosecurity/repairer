@@ -147,9 +147,9 @@ type GnokeyTx struct {
 	} `json:"signatures"`
 }
 
-// Statement is a checked statement: who signed it, with which sequence, and
-// what it says.
-type Statement struct {
+// OwnerStatement is a checked statement from the owner's Ledger key: its
+// sequence and what it says.
+type OwnerStatement struct {
 	Seq  uint64
 	Call Call
 }
@@ -159,7 +159,7 @@ type Statement struct {
 // chainID, and the memo exactly wantMemo, which the agent wrote itself from
 // the file the statement is about. The signature is checked against bytes
 // the agent rebuilds, in both of gno's fee renderings.
-func VerifyGnokey(txJSON []byte, chainID string, seq uint64, pub []byte, wantMemo string) (*Statement, error) {
+func VerifyGnokey(txJSON []byte, chainID string, seq uint64, pub []byte, wantMemo string) (*OwnerStatement, error) {
 	var tx GnokeyTx
 	if err := json.Unmarshal(txJSON, &tx); err != nil {
 		return nil, fmt.Errorf("approve: reading the signed transaction: %w", err)
@@ -185,7 +185,7 @@ func VerifyGnokey(txJSON []byte, chainID string, seq uint64, pub []byte, wantMem
 			return nil, err
 		}
 		if VerifySecp256k1(pub, b, sg.Signature) {
-			return &Statement{Seq: seq, Call: c}, nil
+			return &OwnerStatement{Seq: seq, Call: c}, nil
 		}
 	}
 	return nil, errors.New("approve: the signature doesn't verify for this chain id, sequence and memo")

@@ -10,9 +10,9 @@ import (
 
 // The pool's vote (AUTOPATCH.md, the swarm's rule 3): the last word on a
 // dispute no panel decided or a panel's word appealed past the largest.
-// Every ticket staked MinTicketAge before the filing and not withdrawn
-// votes with its weight: its owner commits once, naming its tickets, then
-// reveals after the commit window. A transcript revealed with more than a
+// Every ticket staked MinTicketAge before the filing and not leaving when
+// the vote opens votes with its weight: its owner commits once, naming its
+// tickets, then reveals after the commit window. A transcript revealed with more than a
 // third of all that weight, when no other is, wins, and the dispute ends as
 // a panel's would (final) (round 11, new major 1). Liars under a third
 // can't make a transcript win alone, and honest runs agree byte for byte,
@@ -22,14 +22,18 @@ import (
 // No call walks every ticket or every voter (round 9, new major 6): the
 // total is the stake tree's sum, revealed weight is kept as it comes in,
 // winners claim their share of PoolFee by weight, and each ticket's charge
-// is settled when it is withdrawn: AbstainShare percent for a ticket that
-// didn't vote (decided or not: a stall is the abstainers'), WrongShare
-// percent, and at least the voter's share of Slash, for one that voted what
-// wasn't decided (round 9, minor 11), each to the fund (round 11, minor 3).
-// A ticket can't leave while a vote it may vote in is open. A vote that
-// stalls decides nothing: no level, every bond back, nobody paid or charged
-// for the dispute but the abstainers, and no panel's word settles any money
-// (round 11, new major 1). What winners leave unclaimed for PoolClaimWindow
+// is settled when it is withdrawn, or by anyone once the vote has closed
+// (round 12, minor 2): AbstainShare percent for a ticket that didn't vote
+// (decided or not: a stall is the abstainers'), WrongShare percent, and at
+// least the voter's share of Slash, for one that voted what wasn't decided
+// (round 9, minor 11), each to the fund (round 11, minor 3). A vote holds
+// the tickets in it: none can leave until it closes. A ticket leaving
+// before a vote opens isn't in it, so a leaving ticket waits only for votes
+// already open, which close within UnbondBlocks (round 12, new major 1). A
+// vote that stalls decides nothing: no level, every bond back but CheckFee
+// for each checker that answered, no seat paid, nobody charged but the
+// abstainers, and no panel's word settles any money (round 11, new major
+// 1; round 12, minor 3). What winners leave unclaimed for PoolClaimWindow
 // goes to the fund.
 var (
 	PoolCommitWindow int64 = 10000      // blocks (about 10 hours)

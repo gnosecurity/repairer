@@ -19,6 +19,7 @@
 set -euo pipefail
 B=${1:?the directory with gnodev, gnoland and gnokey}
 NODE=${NODE:-gnodev}
+POOL=${POOL:-0} # more owners, each staking a ticket, and a 31-seat panel: the gas of a large pool
 RPC=127.0.0.1:21757 # below the ephemeral range (32768 on), so no outgoing connection holds it
 REALM=gno.land/r/autopatch/guards
 repo=$(cd "$(dirname "$0")/.." && pwd)
@@ -39,7 +40,7 @@ cp "$repo"/gno/r/guards/*.gno "$repo"/gno/r/guards/gnomod.toml "$ws/r/guards/"
 find "$ws" -name '*_test.gno' -delete
 # The test build: windows of a few blocks (gnodev makes a block per
 # transaction), a floor of 1 ugnot, a draw three beacon rounds out.
-python3 -I - "$ws/r/guards" <<'PY'
+python3 -I - "$ws/r/guards" "$POOL" <<'PY'
 import re, sys
 for f, sets in [("guards.gno", [("MinTicketAge", "3"), ("RevealWindow", "50"), ("CheckWindow", "50"), ("DrawDeadline", "40"),
                                 ("UnbondBlocks", "60"), ("DrawDelay", "3"), ("ObjectionWindow", "2"), ("LevelFloor", "1")]),
@@ -52,6 +53,9 @@ for f, sets in [("guards.gno", [("MinTicketAge", "3"), ("RevealWindow", "50"), (
     if f == "dispute.gno":
         s, n = re.subn(r"(\n\tReruns\s+= )2", r"\g<1>0", s)
         assert n == 1, "Reruns"
+        if sys.argv[2] != "0":
+            s, n = re.subn(r"(\n\tPanelSizes\s+= )\[\]int\{7, 15, 31\}", r"\g<1>[]int{31}", s)
+            assert n == 1, "PanelSizes"
     open(p, "w").write(s)
 PY
 # up HEIGHT waits for the node to answer at HEIGHT or later. A gnoland
@@ -123,6 +127,22 @@ qeval() { "$B/gnokey" query vm/qeval -remote "$RPC" -data "$REALM.$1" 2>&1; }
 worker=$(addr test1)
 for k in c1 c2 c3 c4 c5 c6 c7; do send test1 "$(addr $k)" 100000000ugnot; done
 for k in c1 c2 c3 c4 c5 c6 c7; do call "$k" StakeTicket -send 10000000ugnot; done
+if [ "$POOL" -gt 0 ]; then
+  # POOL more owners: keys from test1's seed at other indexes, funded by one
+  # MsgRun, each staking a ticket.
+  seed="source bonus chronic canvas draft south burst lottery vacant surface solve popular case indicate oppose farm nothing bullet exhibit title speed wink action roast"
+  for i in $(seq 1 "$POOL"); do
+    printf '%s\n\n\n' "$seed" | "$B/gnokey" add -home "$D/kb" -recover -index "$i" -insecure-password-stdin "p$i" >/dev/null 2>&1
+  done
+  "$B/gnokey" list -home "$D/kb" > "$D/keys"
+  { printf 'package main\n\nimport (\n\t"chain"\n\t"chain/banker"\n)\n\nfunc main(cur realm) {\n\tb := banker.NewBanker(banker.BankerTypeRealmSend, cur)\n'
+    for i in $(seq 1 "$POOL"); do printf '\tb.SendCoins(cur.Address(), address("%s"), chain.Coins{chain.NewCoin("ugnot", 25000000)})\n' "$(addr "p$i")"; done
+    printf '}\n'; } > "$D/fund.gno"
+  echo "" | "$B/gnokey" maketx run -gas-fee 100000000ugnot -gas-wanted 2900000000 -send "$(( POOL * 25000000 ))ugnot" -broadcast -chainid dev \
+    -remote "$RPC" -home "$D/kb" -insecure-password-stdin test1 "$D/fund.gno" > "$D/fund.out" 2>&1 || { echo "funding: $(tail -5 "$D/fund.out")"; exit 1; }
+  for i in $(seq 1 "$POOL"); do call "p$i" StakeTicket -send 10000000ugnot; done
+  echo "a pool of $(( POOL + 7 )) owners"
+fi
 call test1 Fund -send 1000000ugnot # blocks pass; the tickets age
 call test1 Fund -send 1000000ugnot
 call test1 Fund -send 1000000ugnot
@@ -149,7 +169,7 @@ call test1 Draw -args 0
 drawn=$(qeval 'State(0)' | grep -oE 'g1[a-z0-9]{38}')
 echo "drawn: $(echo $drawn)"
 [ "$(echo "$drawn" | wc -l)" = 3 ] || { echo "not three checkers: $drawn"; exit 1; }
-keyof() { for k in c1 c2 c3 c4 c5 c6 c7; do [ "$(addr $k)" = "$1" ] && { echo "$k"; return 0; }; done; return 1; }
+keyof() { k=$(grep -F "addr: $1 " "$D/keys" | head -1 | sed -E 's/^[0-9]+\. ([^ ]+) .*/\1/'); [ -n "$k" ] && echo "$k"; }
 for a in $drawn; do call "$(keyof "$a")" CommitCheck -args 0 -args "$(C "$a" check "$tr" "c-$a")"; done
 call test1 RevealCheck -args 0 -args "$tr" -args t
 for a in $drawn; do call "$(keyof "$a")" RevealCheck -args 0 -args "$tr" -args "c-$a"; done
@@ -212,7 +232,8 @@ call test1 Fund -send 1ugnot
 call test1 Fund -send 1ugnot
 call test1 Settle -args 1
 qeval 'State(1)' | grep -q '"tested"' || { echo "the last word: $(qeval 'State(1)')"; exit 1; }
-ltid=$(( $(keyof "$liar" | tr -d c) - 1 ))
+lk=$(keyof "$liar")
+case $lk in c*) ltid=$(( ${lk#c} - 1 ));; p*) ltid=$(( ${lk#p} + 6 ));; esac # c1-c7 staked tickets 0-6, then p1...
 lstake=$(qeval "TicketOf($ltid)" | grep -oE '\([0-9]+ int64\)' | head -1 | grep -oE '[0-9]+' | head -1)
 [ "$lstake" = 9000000 ] || { echo "the liar's stake is $lstake"; exit 1; }
 echo "the liar lost Slash: its ticket holds $lstake ugnot"

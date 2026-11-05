@@ -333,7 +333,8 @@ func roundSig(f *filing) []byte {
 // Draw draws a revealed filing's checkers from its beacon round, by weight,
 // from the pool as it was when the round was fixed (tickets.gno), within
 // DrawDeadline of then, and pays the caller DrawFee. Too few eligible
-// owners: the filing is abandoned at once, its bond back less FundFee.
+// owners: the filing is abandoned at once, its bond back less FundFee and
+// the DrawFee paid.
 // Anyone may call it.
 func Draw(cur realm, id int) string {
 	who := caller(cur)

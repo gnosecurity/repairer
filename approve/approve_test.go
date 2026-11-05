@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jaekwon/autopatch/guard"
+	"github.com/jaekwon/autopatch/policy"
 )
 
 // The fixture is a real statement: gnokey v1.7.0 signed it offline on the
@@ -185,7 +186,7 @@ func guardOne(t *testing.T) *guard.Guard {
 }
 
 // yes-guard-one.json is a Yes to guard one on tier A until 2026-11-06, mode
-// undo, with the memo MemoYes writes (TestPrintMemo made it), signed by
+// undo, with the memo MemoYes writes (TestPrintFixtures wrote it), signed by
 // gnokey v1.7.0 with the public test key "owner" for that key's fleet
 // "test", sequence 7.
 func TestVerifyYes(t *testing.T) {
@@ -242,7 +243,7 @@ func TestMemoLimits(t *testing.T) {
 		long.Blocks = append(long.Blocks, guard.Block{Drop: &guard.Drop{Family: "ipv4", Protocol: "udp", Ports: []string{"1000-1999", "3000-3010"}}})
 	}
 	y.Hash = long.Hash()
-	if _, err := MemoYes(&long, y); err == nil || !strings.Contains(err.Error(), "split the guard") {
+	if _, err := MemoYes(&long, y); err == nil || !strings.Contains(err.Error(), "smaller steps") {
 		t.Fatalf("a too-long memo: %v", err)
 	}
 	for _, bad := range []Call{
@@ -255,5 +256,63 @@ func TestMemoLimits(t *testing.T) {
 		if _, err := ParseYes(bad); err == nil {
 			t.Errorf("%v accepted", bad.Args)
 		}
+	}
+}
+
+// policy-change.json is the owner's Policy statement for fixturePolicies'
+// change (TestPrintFixtures wrote its memo), signed by gnokey v1.7.0 with
+// the test key "owner", sequence 8.
+func TestVerifyPolicy(t *testing.T) {
+	b := read(t, "policy-change.json")
+	var tx GnokeyTx
+	if err := json.Unmarshal(b, &tx); err != nil {
+		t.Fatal(err)
+	}
+	pub := tx.Signatures[0].PubKey.Value
+	chain := ChainID(pub, "test")
+	old, new := fixturePolicies(t)
+	if err := VerifyPolicy(b, chain, 8, pub, old, new); err != nil {
+		t.Fatal(err)
+	}
+	if want := "autopatch/1 Policy test " + new.Hash()[:16] + " replaces " + old.Hash()[:16] + ": delay 86400s->172800s; vetters +v2 3333333333333333333333333333333333333333333333333333333333333333; vetters needed 1->2"; tx.Memo != want {
+		t.Fatalf("memo %q", tx.Memo)
+	}
+	// The same signature can't carry a different change.
+	other := *new
+	other.DelaySeconds = 3600
+	if err := VerifyPolicy(b, chain, 8, pub, old, &other); err == nil {
+		t.Error("accepted for another policy")
+	}
+	if err := VerifyPolicy(b, chain, 9, pub, old, new); err == nil {
+		t.Error("accepted at another sequence")
+	}
+	if err := VerifyPolicy(b, chain, 8, pub, new, old); err == nil {
+		t.Error("accepted backwards")
+	}
+}
+
+func TestMemoPolicyRefusals(t *testing.T) {
+	old, new := fixturePolicies(t)
+	if _, err := MemoPolicy(old, old); err == nil {
+		t.Error("a policy replacing nothing it names")
+	}
+	same := *new
+	same.Signers = old.Signers
+	same.DelaySeconds = old.DelaySeconds
+	if _, err := MemoPolicy(old, &same); err == nil || !strings.Contains(err.Error(), "changes nothing") {
+		t.Errorf("no change: %v", err)
+	}
+	moved := *new
+	moved.Fleet = "prod"
+	if _, err := MemoPolicy(old, &moved); err == nil {
+		t.Error("moved to another fleet")
+	}
+	big := *new
+	big.Signers.Vetters = nil
+	for i := 0; i < 9; i++ {
+		big.Signers.Vetters = append(big.Signers.Vetters, policy.Key{Name: "vetter" + strings.Repeat("x", i), Hex: strings.Repeat(string(rune('a'+i)), 64)})
+	}
+	if _, err := MemoPolicy(old, &big); err == nil || !strings.Contains(err.Error(), "smaller steps") {
+		t.Errorf("a diff too big for a Ledger: %v", err)
 	}
 }

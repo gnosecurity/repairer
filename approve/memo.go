@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jaekwon/autopatch/guard"
+	"github.com/jaekwon/autopatch/policy"
 )
 
 // MaxMemo caps a memo, so that every statement stays small enough for a
@@ -84,7 +85,7 @@ func MemoYes(g *guard.Guard, y Yes) (string, error) {
 		return "", errors.New("approve: the Yes names another guard")
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "autopatch Yes %s %s:", g.Name(), y.Hash[:16])
+	fmt.Fprintf(&b, "%s Yes %s %s:", MemoVersion, g.Name(), y.Hash[:16])
 	for _, bl := range g.Blocks {
 		b.WriteString(" " + bl.Describe() + ";")
 	}
@@ -94,12 +95,12 @@ func MemoYes(g *guard.Guard, y Yes) (string, error) {
 
 // MemoOff writes the memo for taking a guard off.
 func MemoOff(g *guard.Guard) (string, error) {
-	return checkMemo(fmt.Sprintf("autopatch Off %s %s", g.Name(), g.Hash()[:16]))
+	return checkMemo(fmt.Sprintf("%s Off %s %s", MemoVersion, g.Name(), g.Hash()[:16]))
 }
 
 func checkMemo(m string) (string, error) {
 	if len(m) > MaxMemo {
-		return "", fmt.Errorf("approve: the memo is %d bytes, more than a Ledger statement allows (%d); split the guard", len(m), MaxMemo)
+		return "", fmt.Errorf("approve: the memo is %d bytes, more than a Ledger statement allows (%d); split it into smaller steps", len(m), MaxMemo)
 	}
 	for i := 0; i < len(m); i++ {
 		if m[i] < 0x20 || m[i] > 0x7e {
@@ -130,4 +131,154 @@ func VerifyYes(txJSON []byte, chainID string, seq uint64, ownerPub []byte, g *gu
 		return Yes{}, err
 	}
 	return y, nil
+}
+
+// MemoVersion starts every memo, so that a release can change the memo
+// format without the agents and signing tools of one fleet disagreeing.
+const MemoVersion = "autopatch/1"
+
+// MemoPolicy writes a policy change's memo: the full diff, field by field,
+// against the policy it replaces. A key the change adds shows its owner's
+// name for it and all of its hex; the signing tool also checks every key
+// against its own address book and warns when a name or key is unknown.
+// A diff too big for a Ledger is refused, so a big change goes in steps.
+func MemoPolicy(old, new *policy.Policy) (string, error) {
+	if new.Replaces != old.Hash() {
+		return "", errors.New("approve: the new policy doesn't replace this one")
+	}
+	if new.Fleet != old.Fleet {
+		return "", errors.New("approve: a policy can't move to another fleet")
+	}
+	var d []string
+	if old.DelaySeconds != new.DelaySeconds {
+		d = append(d, fmt.Sprintf("delay %ds->%ds", old.DelaySeconds, new.DelaySeconds))
+	}
+	d = append(d, keysDiff("me", []policy.Key{old.Signers.Me}, []policy.Key{new.Signers.Me})...)
+	d = append(d, keysDiff("rig", old.Signers.Rig, new.Signers.Rig)...)
+	d = append(d, keysDiff("vetters", old.Signers.Vetters, new.Signers.Vetters)...)
+	if old.Signers.VettersNeeded != new.Signers.VettersNeeded {
+		d = append(d, fmt.Sprintf("vetters needed %d->%d", old.Signers.VettersNeeded, new.Signers.VettersNeeded))
+	}
+	d = append(d, keysDiff("model", old.Signers.Model, new.Signers.Model)...)
+	d = append(d, keysDiff("builders", old.Signers.Builders, new.Signers.Builders)...)
+	d = append(d, keysDiff("agents", old.Signers.Agents, new.Signers.Agents)...)
+	d = append(d, listDiff("tier", tierLines(old), tierLines(new))...)
+	d = append(d, listDiff("protected", flowLines(old), flowLines(new))...)
+	d = append(d, listDiff("health", healthLines(old), healthLines(new))...)
+	if len(d) == 0 {
+		return "", errors.New("approve: the new policy changes nothing")
+	}
+	return checkMemo(fmt.Sprintf("%s Policy %s %s replaces %s: %s", MemoVersion, new.Fleet, new.Hash()[:16], old.Hash()[:16], strings.Join(d, "; ")))
+}
+
+func keyLine(k policy.Key) string {
+	s := k.Name + " " + k.Hex
+	if k.Host != "" {
+		s += " host " + k.Host
+	}
+	return s
+}
+
+// keysDiff names keys removed (by name and the first 8 hex digits) and
+// added (by name and all of its hex).
+func keysDiff(role string, old, new []policy.Key) []string {
+	in := func(ks []policy.Key, k policy.Key) bool {
+		for _, x := range ks {
+			if x == k {
+				return true
+			}
+		}
+		return false
+	}
+	var d []string
+	for _, k := range old {
+		if !in(new, k) {
+			d = append(d, fmt.Sprintf("%s -%s %s", role, k.Name, k.Hex[:8]))
+		}
+	}
+	for _, k := range new {
+		if !in(old, k) {
+			d = append(d, fmt.Sprintf("%s +%s", role, keyLine(k)))
+		}
+	}
+	return d
+}
+
+func listDiff(what string, old, new []string) []string {
+	has := func(xs []string, x string) bool {
+		for _, y := range xs {
+			if y == x {
+				return true
+			}
+		}
+		return false
+	}
+	var d []string
+	for _, x := range old {
+		if !has(new, x) {
+			d = append(d, what+" -"+x)
+		}
+	}
+	for _, x := range new {
+		if !has(old, x) {
+			d = append(d, what+" +"+x)
+		}
+	}
+	return d
+}
+
+func tierLines(p *policy.Policy) []string {
+	var out []string
+	for _, t := range p.Tiers {
+		line := fmt.Sprintf("%s hosts %s admit %s", t.Name, strings.Join(t.Hosts, ","), strings.Join(t.Admit, ","))
+		if len(t.Canaries) > 0 {
+			line += " canaries " + strings.Join(t.Canaries, ",")
+		}
+		if t.Critical {
+			line += " critical"
+		}
+		if t.SpacingSeconds > 0 {
+			line += fmt.Sprintf(" spacing %ds", t.SpacingSeconds)
+		}
+		out = append(out, line)
+	}
+	return out
+}
+
+func flowLines(p *policy.Policy) []string {
+	var out []string
+	for _, f := range p.Protected {
+		out = append(out, fmt.Sprintf("%s %s/%d", strings.Join(f.Hosts, ","), f.Proto, f.Port))
+	}
+	return out
+}
+
+func healthLines(p *policy.Policy) []string {
+	var out []string
+	for _, h := range p.Health {
+		line := fmt.Sprintf("%s %s %s", strings.Join(h.Hosts, ","), h.Kind, h.Target)
+		if h.Want != "" {
+			line += " " + h.Want
+		}
+		out = append(out, line)
+	}
+	return out
+}
+
+// VerifyPolicy checks the owner's signature on a policy change: its two
+// arguments are the new policy's hash and the hash it replaces, and its memo
+// must be the diff MemoPolicy writes from the two policies.
+func VerifyPolicy(txJSON []byte, chainID string, seq uint64, ownerPub []byte, old, new *policy.Policy) error {
+	memo, err := MemoPolicy(old, new)
+	if err != nil {
+		return err
+	}
+	st, err := VerifyGnokey(txJSON, chainID, seq, ownerPub, memo)
+	if err != nil {
+		return err
+	}
+	if st.Call.Func != "Policy" || len(st.Call.Args) != 2 || st.Call.Args[0] != new.Hash() || st.Call.Args[1] != old.Hash() {
+		return errors.New("approve: not a Policy statement for these two policies")
+	}
+	return nil
 }

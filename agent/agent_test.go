@@ -28,9 +28,11 @@ func guardOne(t *testing.T) *guard.Guard {
 	return g
 }
 
+// parse reads a guard written readably in a test; files the agent acts on
+// must be canonical (guard.Parse).
 func parse(t *testing.T, js string) *guard.Guard {
 	t.Helper()
-	g, err := guard.Parse([]byte(js))
+	g, err := guard.Decode([]byte(js))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,6 +1,7 @@
 // Command autopatch-agent puts guards (stopgaps written as data) on this
 // machine and takes them off.
 //
+//	autopatch-agent fmt     GUARD.json   print the guard in the canonical form the agent accepts
 //	autopatch-agent plan    GUARD.json   what the guard would do here; changes nothing
 //	autopatch-agent apply   GUARD.json   put it on, pending, with its undo armed
 //	autopatch-agent confirm HASH|ID      keep it on across reboots
@@ -26,6 +27,7 @@ import (
 
 const usage = `usage: autopatch-agent <command> [flags] [args]
 
+  fmt     GUARD.json   print the guard in canonical form, the only form apply accepts
   plan    GUARD.json   what the guard would do here; changes nothing
   apply   GUARD.json   put it on, pending; -confirm-within 10m (0: confirm once its probe passes)
   confirm HASH|ID      keep a pending guard on, across reboots
@@ -83,7 +85,7 @@ func run(ctx context.Context, cmd string, args []string) error {
 		Timer:    agent.SystemdTimer{Sys: sys, Self: self, StateDir: *stateDir, Root: *root},
 		StateDir: *stateDir,
 	}
-	changes := cmd != "plan" && cmd != "status" && !(cmd == "check" && !*repair)
+	changes := cmd != "fmt" && cmd != "plan" && cmd != "status" && !(cmd == "check" && !*repair)
 	if changes && os.Geteuid() != 0 && *root == "" {
 		return errors.New(cmd + " changes the machine; run it as root")
 	}
@@ -95,6 +97,22 @@ func run(ctx context.Context, cmd string, args []string) error {
 	}
 
 	switch cmd {
+	case "fmt":
+		path, err := arg()
+		if err != nil {
+			return err
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		g, err := guard.Decode(b)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("%s\n", g.Canonical())
+		fmt.Fprintf(os.Stderr, "%s, hash %s\n", g.Name(), g.Hash())
+		return nil
 	case "plan", "apply":
 		path, err := arg()
 		if err != nil {

@@ -128,9 +128,28 @@ var (
 	pathRe    = regexp.MustCompile(`^(/[A-Za-z0-9._+-]+)+$`)
 )
 
-// Parse reads a guard strictly: no unknown fields, nothing after it, and
-// every field valid.
+// Parse reads a guard file as the agent acts on it: the file must be the
+// guard's canonical form exactly (Canonical), with at most one trailing
+// newline, so that the hash a signature covers is the hash of the file's
+// bytes. Unknown fields, repeated keys, data after the guard, and any other
+// spelling of the same guard are refused. Use Decode, then Canonical, to
+// write a guard file from a looser one.
 func Parse(data []byte) (*Guard, error) {
+	g, err := Decode(data)
+	if err != nil {
+		return nil, err
+	}
+	body := bytes.TrimSuffix(data, []byte("\n"))
+	if !bytes.Equal(body, g.Canonical()) {
+		return nil, errors.New("reading guard: the file isn't in canonical form; write it with `autopatch-agent fmt`")
+	}
+	return g, nil
+}
+
+// Decode reads a guard strictly by field (no unknown fields, nothing after
+// it, every field valid) but in any spelling of JSON. Parse is what the agent
+// uses for files it acts on.
+func Decode(data []byte) (*Guard, error) {
 	if len(data) > MaxSize {
 		return nil, fmt.Errorf("guard is %d bytes; the limit is %d", len(data), MaxSize)
 	}
@@ -149,15 +168,22 @@ func Parse(data []byte) (*Guard, error) {
 	return &g, nil
 }
 
-// Hash is the guard's identity for signatures: the hex sha256 of its
-// canonical form, the JSON the agent writes back from what it parsed. What a
-// signature covers is exactly what the agent applies.
-func (g *Guard) Hash() string {
+// Canonical is the guard's canonical form: compact JSON, its fields in the
+// order this package declares them, empty optional fields left out. It is a
+// frozen format: TestCanonicalIsFrozen pins guard one's bytes and hash, so
+// that no release can change a guard's hash and void the signatures on it.
+func (g *Guard) Canonical() []byte {
 	b, err := json.Marshal(g)
 	if err != nil {
 		panic("guard: encoding a guard: " + err.Error()) // only plain fields
 	}
-	sum := sha256.Sum256(b)
+	return b
+}
+
+// Hash is the guard's identity for signatures: the hex sha256 of its
+// canonical form, which for a file Parse accepted is the file's own bytes.
+func (g *Guard) Hash() string {
+	sum := sha256.Sum256(g.Canonical())
 	return hex.EncodeToString(sum[:])
 }
 

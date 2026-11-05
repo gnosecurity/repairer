@@ -28,6 +28,10 @@ A never-touch list built into the agent keeps these out of reach: the
 firewall, ssh, sudo and doas, logging, time, the update path, and the agent
 itself. Settings and modules are checked against allow-lists in the release.
 
+A guard file must be in canonical form (compact JSON, fields in a fixed
+order), so that the hash a signature covers is the hash of the file's own
+bytes. `fmt` writes that form from a readable one.
+
 Guard number one is
 [guard/testdata/cve-2026-98432.json](guard/testdata/cve-2026-98432.json), the
 stopgap for CVE-2026-98432. It drops inbound IPv4 TCP carrying IP options, and
@@ -90,6 +94,7 @@ before putting a guard on, at every boot, and in `check`:
 ## Use
 
 ```
+autopatch-agent fmt     guard.json   # print it in canonical form, the only form apply takes
 autopatch-agent plan    guard.json   # what it would do here; changes nothing
 autopatch-agent apply   guard.json   # on, pending, undo armed
 autopatch-agent confirm <hash|id>

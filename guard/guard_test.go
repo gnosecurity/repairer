@@ -1,12 +1,24 @@
 package guard
 
 import (
+	"bytes"
 	"os"
 	"strings"
 	"testing"
 )
 
+// readOne returns guard one in a readable spelling, for edits; the
+// canonical file the agent acts on is testdata/cve-2026-98432.json.
 func readOne(t *testing.T) []byte {
+	t.Helper()
+	b, err := os.ReadFile("testdata/cve-2026-98432.pretty.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func readCanonical(t *testing.T) []byte {
 	t.Helper()
 	b, err := os.ReadFile("testdata/cve-2026-98432.json")
 	if err != nil {
@@ -15,8 +27,47 @@ func readOne(t *testing.T) []byte {
 	return b
 }
 
+// The canonical form is frozen: if a change to this package changed guard
+// one's bytes or hash, every signature on every guard would be void.
+func TestCanonicalIsFrozen(t *testing.T) {
+	file := readCanonical(t)
+	g, err := Parse(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h := g.Hash(); h != "3526eb39300e2ad5f8b5fdc25e34ad32ef1c05a8391e1536e84043ec917c1583" {
+		t.Fatalf("guard one's hash changed: %s", h)
+	}
+	if string(g.Canonical())+"\n" != string(file) {
+		t.Fatal("guard one's canonical bytes changed")
+	}
+	if p, err := Decode(readOne(t)); err != nil || p.Hash() != g.Hash() {
+		t.Fatalf("the readable file is another guard: %v", err)
+	}
+}
+
+// Parse takes only the canonical spelling: a readable one, one with a
+// repeated key (encoding/json would keep the last silently), or one with
+// extra white space is refused, though Decode reads them.
+func TestParseRequiresCanonical(t *testing.T) {
+	file := readCanonical(t)
+	repeated := strings.Replace(string(file), `"version":1,`, `"version":2,"version":1,`, 1)
+	spaced := strings.Replace(string(file), `"version":1,`, `"version": 1,`, 1)
+	for name, b := range map[string][]byte{"readable": readOne(t), "repeated key": []byte(repeated), "white space": []byte(spaced), "two newlines": append(append([]byte(nil), file...), '\n')} {
+		if _, err := Parse(b); err == nil || !strings.Contains(err.Error(), "canonical") {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	if _, err := Decode([]byte(repeated)); err != nil {
+		t.Errorf("Decode refused a readable spelling: %v", err)
+	}
+	if _, err := Parse(bytes.TrimSuffix(file, []byte("\n"))); err != nil {
+		t.Errorf("no trailing newline: %v", err)
+	}
+}
+
 func TestParseGuardOne(t *testing.T) {
-	g, err := Parse(readOne(t))
+	g, err := Parse(readCanonical(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,11 +89,11 @@ func TestParseGuardOne(t *testing.T) {
 // way (spacing, key order) has the same hash, and any change of meaning
 // changes it.
 func TestHashCanonical(t *testing.T) {
-	a, err := Parse(readOne(t))
+	a, err := Decode(readOne(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := Parse([]byte(`{"version":1,"id":"cve-2026-98432/linux-ipv4-ipopt","flaws":["CVE-2026-98432"],` +
+	b, err := Decode([]byte(`{"version":1,"id":"cve-2026-98432/linux-ipv4-ipopt","flaws":["CVE-2026-98432"],` +
 		`"for":[{"releases":["22.04","24.04","26.04"],"os":"ubuntu"},{"os":"debian","releases":["12","13"]}],` +
 		`"blocks":[{"drop":{"protocol":"tcp","family":"ipv4","ip_options":true}},{"setting":{"value":"0","name":"net.mptcp.enabled"}}],` +
 		`"breaks":"IP Record Route and Timestamp on TCP; nothing common uses them",` +
@@ -125,7 +176,7 @@ func TestRefusals(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			_, err := Parse(edit(t, c.from, c.to))
+			_, err := Decode(edit(t, c.from, c.to))
 			if err == nil {
 				t.Fatal("accepted")
 			}
@@ -137,7 +188,7 @@ func TestRefusals(t *testing.T) {
 }
 
 func TestNoBlocks(t *testing.T) {
-	g, err := Parse(readOne(t))
+	g, err := Decode(readOne(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,14 +199,14 @@ func TestNoBlocks(t *testing.T) {
 }
 
 func TestTrailingData(t *testing.T) {
-	if _, err := Parse(append(readOne(t), []byte(`{"id":"x"}`)...)); err == nil {
+	if _, err := Decode(append(readOne(t), []byte(`{"id":"x"}`)...)); err == nil {
 		t.Fatal("accepted a second guard after the first")
 	}
 }
 
 func TestTooBig(t *testing.T) {
 	b := append(readOne(t), make([]byte, MaxSize)...)
-	if _, err := Parse(b); err == nil || !strings.Contains(err.Error(), "limit") {
+	if _, err := Decode(b); err == nil || !strings.Contains(err.Error(), "limit") {
 		t.Fatalf("err %v", err)
 	}
 }
@@ -180,7 +231,7 @@ func TestAutoLists(t *testing.T) {
 }
 
 func TestFitsAndFixRunning(t *testing.T) {
-	g, err := Parse(readOne(t))
+	g, err := Parse(readCanonical(t))
 	if err != nil {
 		t.Fatal(err)
 	}

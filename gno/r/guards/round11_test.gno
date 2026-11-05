@@ -1,6 +1,7 @@
 package guards
 
 import (
+	"strings"
 	"testing"
 
 	"gno.land/p/nt/testutils/v0"
@@ -293,7 +294,7 @@ func TestLiarCantStallThePool(cur realm, t *testing.T) {
 // the losing side (round 11, minor 6).
 func TestDrawPaysTheDrawer(cur realm, t *testing.T) {
 	reset()
-	DrawFee = 200_000
+	DrawFee, AppealBond = 200_000, 0
 	owners := ownersN(8)
 	for _, w := range owners {
 		testing.SetRealm(u(w))
@@ -307,6 +308,11 @@ func TestDrawPaysTheDrawer(cur realm, t *testing.T) {
 	drawer := testutils.TestAddress("drawer")
 	before := balances(append([]address{worker, drawer}, owners...)...)
 	testing.SetRealm(u(worker))
+	FilingBond = 3*CheckFee + FundFee + DrawFee - 1
+	send(FilingBond)
+	refuses(t, "the bond can't pay its checkers, its draw", func() { Commit(cross(cur), strings.Repeat("0", 64)) })
+	send(0)
+	FilingBond = 1_000_000
 	id := file(t, cur, ok, 1001)
 	testing.SetRealm(u(drawer))
 	drawn := draw(t, cur, id, 1001, sig1001)
@@ -350,6 +356,9 @@ func TestDrawPaysTheDrawer(cur realm, t *testing.T) {
 	}
 	testing.SetRealm(u(anyone))
 	Settle(cross(cur), id)
+	if c := AppealCost(id); c != panelCost(1) {
+		t.Errorf("an appeal costs %d, not the next panel's seats and draw, %d", c, panelCost(1))
+	}
 	testing.SkipHeights(AppealWindow + 1)
 	if s := Settle(cross(cur), id); s != Tested {
 		t.Fatalf("the last word: %s", s)

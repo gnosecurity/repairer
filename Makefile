@@ -1,7 +1,7 @@
 # One gate before anything ships: format, vet, unit tests, builds.
 # The integration test needs root and a Linux kernel: make integration.
 # The signing test needs gnokey and a test keybase: make golden (see below).
-.PHONY: qa fmt vet test build integration golden gnotest site-e2e lookout-browser realm-e2e
+.PHONY: qa fmt vet test build integration golden gnotest site-e2e lookout-browser realm-e2e realm-e2e-gnoland
 
 qa: fmt vet test build
 
@@ -55,6 +55,10 @@ site-e2e:
 # the level param, a withdrawal; prints the gas each call used.
 realm-e2e:
 	GNOROOT=$(GNOROOT) scripts/realm-e2e.sh $(GNO_BIN_DIR)
+
+# The same on a gnoland node making a block every 3.5 seconds, as gno.land does.
+realm-e2e-gnoland:
+	NODE=gnoland GNOROOT=$(GNOROOT) scripts/realm-e2e.sh $(GNO_BIN_DIR)
 
 # The lookout's page in headless Chrome with a stand-in Adena: sign-in, the
 # cookie, upload, downloads, sign-out ending every session, and the refusals,

@@ -1,8 +1,10 @@
 #!/bin/bash
 # realm-e2e.sh BIN: the Guards realm on a local chain, end to end. Starts
-# gnodev (BIN holds gnodev and gnokey built from gno 5d7d8f5f9) with the
-# beacon package and a test build of the realm whose windows are blocks, not
-# hours; funds five checkers' accounts from gnodev's public test1 key; each
+# gnodev (BIN holds gnodev, gnoland and gnokey built from gno 5d7d8f5f9)
+# with the beacon package and a test build of the realm whose windows are
+# blocks, not hours; or, with NODE=gnoland, a gnoland node making a block
+# every 3.5 seconds, as gno.land does, where test1 deploys both (a dev
+# chain doesn't check namespaces); funds five checkers' accounts from gnodev's public test1 key; each
 # stakes a ticket; test1 files guard one's drop for ubuntu 24.04; the draw
 # waits for drand evmnet's real round and submits its signature; the three
 # drawn checkers commit and open their transcripts; the agreement waits out
@@ -15,7 +17,10 @@
 # used. Touches only a temporary
 # directory, 127.0.0.1, and api.drand.sh (to read public beacon rounds).
 set -euo pipefail
-B=${1:?the directory with gnodev and gnokey}
+B=${1:?the directory with gnodev, gnoland and gnokey}
+NODE=${NODE:-gnodev}
+RPC=127.0.0.1:21757 # below the ephemeral range (32768 on), so no outgoing connection holds it
+REALM=gno.land/r/autopatch/guards
 repo=$(cd "$(dirname "$0")/.." && pwd)
 D=$(mktemp -d)
 trap 'kill $(cat "$D/pid" 2>/dev/null) 2>/dev/null || true; rm -rf "$D"' EXIT
@@ -49,12 +54,50 @@ for f, sets in [("guards.gno", [("MinTicketAge", "3"), ("RevealWindow", "50"), (
         assert n == 1, "Reruns"
     open(p, "w").write(s)
 PY
-"$B/gnodev" local -no-watch -node-rpc-listener 127.0.0.1:36657 -web-listener 127.0.0.1:38888 \
-  -extra-root "$ws" > "$D/gnodev.log" 2>&1 &
-echo $! > "$D/pid"
-for i in $(seq 1 90); do curl -sf -m 2 127.0.0.1:36657/status 2>/dev/null | python3 -c "import json,sys; json.load(sys.stdin)" 2>/dev/null && break; sleep 1; done
-printf '%s\n\n\n' "source bonus chronic canvas draft south burst lottery vacant surface solve popular case indicate oppose farm nothing bullet exhibit title speed wink action roast" \
-  | "$B/gnokey" add -home "$D/kb" -recover -insecure-password-stdin test1 >/dev/null
+# up HEIGHT waits for the node to answer at HEIGHT or later. A gnoland
+# node needs its second block first: a transaction signed before then
+# fails its signature check. gnodev makes a block only for a transaction.
+up() {
+  for i in $(seq 1 240); do
+    h=$(curl -sf -m 2 "$RPC/status" 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['result']['sync_info']['latest_block_height'])" 2>/dev/null || true)
+    [ -n "$h" ] && [ "$h" -ge "$1" ] && return 0
+    sleep 1
+  done
+  echo "the node never came up"; tail -20 "$D/node.log"; exit 1
+}
+key1() {
+  printf '%s\n\n\n' "source bonus chronic canvas draft south burst lottery vacant surface solve popular case indicate oppose farm nothing bullet exhibit title speed wink action roast" \
+    | "$B/gnokey" add -home "$D/kb" -recover -insecure-password-stdin test1 >/dev/null
+}
+if [ "$NODE" = gnoland ]; then
+  : > "$D/empty.jsonl"
+  "$B/gnoland" secrets init -data-dir "$D/node/secrets" >/dev/null 2>&1
+  "$B/gnoland" config init -config-path "$D/node/config/config.toml" >/dev/null 2>&1
+  c=(-config-path "$D/node/config/config.toml")
+  "$B/gnoland" config set "${c[@]}" rpc.laddr "tcp://$RPC" >/dev/null
+  "$B/gnoland" config set "${c[@]}" p2p.laddr tcp://127.0.0.1:21767 >/dev/null
+  "$B/gnoland" config set "${c[@]}" p2p.pex false >/dev/null
+  "$B/gnoland" config set "${c[@]}" consensus.timeout_commit 3500ms >/dev/null
+  # The genesis' example packages are signed by keys this chain doesn't have.
+  "$B/gnoland" start -lazy -skip-genesis-sig-verification -data-dir "$D/node" -genesis "$D/genesis.json" \
+    -genesis-txs-file "$D/empty.jsonl" > "$D/node.log" 2>&1 &
+  echo $! > "$D/pid"
+  up 2
+  key1
+  for p in "p/drandbn254 gno.land/p/autopatch/drandbn254" "r/guards $REALM"; do
+    set -- $p
+    echo "" | "$B/gnokey" maketx addpkg -home "$D/kb" -insecure-password-stdin -pkgdir "$ws/$1" -pkgpath "$2" \
+      -gas-fee 10000000ugnot -gas-wanted 900000000 -max-deposit 1000000000ugnot -broadcast -chainid dev -remote "$RPC" test1 > "$D/addpkg.out" 2>&1 \
+      || { echo "addpkg $2: $(grep -iE 'Data:|error' "$D/addpkg.out" | head -3)"; exit 1; }
+  done
+  echo "deployed $REALM on a gnoland node, a block every 3.5 s"
+else
+  "$B/gnodev" local -no-watch -node-rpc-listener "$RPC" -web-listener 127.0.0.1:21788 \
+    -extra-root "$ws" > "$D/node.log" 2>&1 &
+  echo $! > "$D/pid"
+  up 0
+  key1
+fi
 addr_of() { "$B/gnokey" list -home "$D/kb" | awk -v k="$1" '$2 == k {print $3}' | tr -d '(),' | sed 's/^addr://'; }
 # Five checkers' keys, each funded from test1.
 for k in c1 c2 c3 c4 c5 c6 c7; do
@@ -66,17 +109,17 @@ addr() { grep -E "^[0-9]+\. $1 " "$D/keys" | grep -oE 'g1[a-z0-9]{38}' | head -1
 gaslog=$D/gas
 call() { # key func [-send N] args...
   local key=$1 fn=$2; shift 2
-  echo "" | "$B/gnokey" maketx call -home "$D/kb" -insecure-password-stdin -pkgpath gno.land/r/autopatch/guards \
-    -func "$fn" -gas-fee 10000000ugnot -gas-wanted 900000000 -broadcast -chainid dev -remote 127.0.0.1:36657 "$@" "$key" > "$D/call.out" 2>&1 \
-    || { echo "call $key $fn: $(tail -8 "$D/call.out")"; tail -20 "$D/gnodev.log"; exit 1; }
+  echo "" | "$B/gnokey" maketx call -home "$D/kb" -insecure-password-stdin -pkgpath "$REALM" \
+    -func "$fn" -gas-fee 10000000ugnot -gas-wanted 900000000 -broadcast -chainid dev -remote "$RPC" "$@" "$key" > "$D/call.out" 2>&1 \
+    || { echo "call $key $fn: $(tail -8 "$D/call.out")"; tail -20 "$D/node.log"; exit 1; }
   printf '%-14s %s\n' "$fn" "$(grep -oE 'GAS USED: +[0-9]+' "$D/call.out" | grep -oE '[0-9]+')" >> "$gaslog"
 }
 send() { # key to amount
   echo "" | "$B/gnokey" maketx send -home "$D/kb" -insecure-password-stdin -to "$2" -send "$3" \
-    -gas-fee 1000000ugnot -gas-wanted 2000000 -broadcast -chainid dev -remote 127.0.0.1:36657 "$1" > "$D/send.out" 2>&1 \
+    -gas-fee 1000000ugnot -gas-wanted 2000000 -broadcast -chainid dev -remote "$RPC" "$1" > "$D/send.out" 2>&1 \
     || { echo "send: $(tail -5 "$D/send.out")"; exit 1; }
 }
-qeval() { "$B/gnokey" query vm/qeval -remote 127.0.0.1:36657 -data "gno.land/r/autopatch/guards.$1" 2>&1; }
+qeval() { "$B/gnokey" query vm/qeval -remote "$RPC" -data "$REALM.$1" 2>&1; }
 worker=$(addr test1)
 for k in c1 c2 c3 c4 c5 c6 c7; do send test1 "$(addr $k)" 100000000ugnot; done
 for k in c1 c2 c3 c4 c5 c6 c7; do call "$k" StakeTicket -send 10000000ugnot; done
@@ -123,9 +166,9 @@ for k in c1 c2 c3 c4 c5 c6 c7; do echo "$drawn" | grep -q "$(addr $k)" || { free
 tid=$(( ${free#c} - 1 ))
 call "$free" Unstake -args "$tid"
 for i in $(seq 1 61); do call test1 Fund -send 1ugnot; done
-before=$("$B/gnokey" query bank/balances/"$(addr $free)" -remote 127.0.0.1:36657 | grep -oE '[0-9]+ugnot' | grep -oE '[0-9]+')
+before=$("$B/gnokey" query bank/balances/"$(addr $free)" -remote "$RPC" | grep -oE '[0-9]+ugnot' | grep -oE '[0-9]+')
 call "$free" Withdraw -args "$tid"
-after=$("$B/gnokey" query bank/balances/"$(addr $free)" -remote 127.0.0.1:36657 | grep -oE '[0-9]+ugnot' | grep -oE '[0-9]+')
+after=$("$B/gnokey" query bank/balances/"$(addr $free)" -remote "$RPC" | grep -oE '[0-9]+ugnot' | grep -oE '[0-9]+')
 echo "withdrew $(( after - before + 10000000 )) ugnot with the fee added back"
 # A dispute: guard one's MPTCP block, where the first checker drawn lies.
 waitround() { # round: its signature, once drand has it

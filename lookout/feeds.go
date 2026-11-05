@@ -26,6 +26,9 @@ const (
 type Feeds struct {
 	Dir     string // <Dir>/feeds, <Dir>/osv-ubuntu, <Dir>/osv-debian, <Dir>/ubuntu-cves, <Dir>/findings.json
 	Fetcher *Fetcher
+	// Tracker is the whole copy of Ubuntu's CVE tracker, where Ubuntu's own
+	// per-flaw records are read; nil reads them only from <Dir>/ubuntu-cves.
+	Tracker *UbuntuTracker
 	// Base addresses, for tests; empty means the real ones.
 	KEV, Debian, OSV string
 }
@@ -45,11 +48,16 @@ func (f *Feeds) osv(eco string) *OSVSync {
 // whatever the fleet runs: whole feeds, and every changed OSV record. It
 // never asks for one flaw's record because it matters here; that would
 // tell the feed what the fleet runs. Ubuntu's own per-flaw records, which
-// know a fix in -proposed, are read when present in <Dir>/ubuntu-cves (put
-// there from a whole copy of Ubuntu's tracker); fetching that whole copy
-// is still to come.
+// know a fix in -proposed, come from a whole copy of Ubuntu's tracker
+// (Tracker), kept up to date here, and are read from that copy, never from
+// ubuntu.com one by one.
 func (f *Feeds) Refresh(ctx context.Context) []error {
 	var errs []error
+	if f.Tracker != nil {
+		if err := f.Tracker.Sync(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("Ubuntu's tracker: %w", err))
+		}
+	}
 	if _, err := f.Fetcher.Get(ctx, "kev.json", f.url(f.KEV, KEVURL), 64<<20); err != nil {
 		errs = append(errs, fmt.Errorf("CISA's list: %w", err))
 	}
@@ -93,6 +101,9 @@ func (f *Feeds) Problems(now time.Time) []string {
 		for _, sk := range f.osv(eco).Skipped() {
 			out = append(out, fmt.Sprintf("OSV %s: record %s skipped after failing twice (%s)", eco, sk.ID, sk.Why))
 		}
+	}
+	if f.Tracker != nil {
+		age("Ubuntu's tracker", f.Tracker.Synced())
 	}
 	age("the findings", filepath.Join(f.Dir, "findings.json"))
 	return out
@@ -160,12 +171,8 @@ func (f *Feeds) Find(ms []Machine, watch []string, now time.Time) ([]Finding, er
 	// a fix in -proposed.
 	ubuntu := map[string]bool{}
 	for _, id := range watch {
-		b, err := os.ReadFile(filepath.Join(f.Dir, "ubuntu-cves", id+".json"))
-		if err != nil {
-			continue
-		}
-		c, err := ParseUbuntuCVE(b)
-		if err != nil {
+		c := f.ubuntuRecord(id)
+		if c == nil {
 			continue
 		}
 		ubuntu[c.ID] = true
@@ -214,6 +221,28 @@ func (f *Feeds) Find(ms []Machine, watch []string, now time.Time) ([]Finding, er
 		return nil, err
 	}
 	return out, nil
+}
+
+// ubuntuRecord is Ubuntu's own record of a flaw: from the tracker's copy,
+// else from <Dir>/ubuntu-cves, else nil.
+func (f *Feeds) ubuntuRecord(id string) *UbuntuCVE {
+	if f.Tracker != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		c, err := f.Tracker.Record(ctx, id)
+		cancel()
+		if err == nil && c != nil {
+			return c
+		}
+	}
+	b, err := os.ReadFile(filepath.Join(f.Dir, "ubuntu-cves", id+".json"))
+	if err != nil {
+		return nil
+	}
+	c, err := ParseUbuntuCVE(b)
+	if err != nil {
+		return nil
+	}
+	return c
 }
 
 // Findings reads the last findings Find kept.

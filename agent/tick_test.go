@@ -129,3 +129,64 @@ func TestProcessSpool(t *testing.T) {
 		t.Fatalf("a jump: %+v", res)
 	}
 }
+
+// Off names its hosts (gnokey-signed fixtures, sequences 10, 11 and 13):
+// mail takes guard one off and keeps it off; backup, which the Off doesn't
+// name, keeps it; the owner's later Yes lifts the Off on mail.
+func TestOffByHost(t *testing.T) {
+	old, _ := tickPolicies(t)
+	g := guardOne(t)
+	run := func(host string) (*Agent, func(...Message) *TickResult) {
+		a, _, _ := newAgent(t)
+		clock := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+		a.Now = func() time.Time { clock = clock.Add(time.Minute); return clock }
+		if _, err := a.Init(host, old.Canonical(), 9); err != nil {
+			t.Fatal(err)
+		}
+		return a, func(msgs ...Message) *TickResult {
+			if len(msgs) > 0 {
+				if _, err := Intake(filepath.Join(a.StateDir, spoolDir), strings.NewReader(string(bundleOf(t, msgs, g, nil)))); err != nil {
+					t.Fatal(err)
+				}
+			}
+			res, err := a.Tick(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return res
+		}
+	}
+	on := func(a *Agent) bool {
+		for _, e := range load(t, a).Guards {
+			if e.Hash == g.Hash() {
+				return true
+			}
+		}
+		return false
+	}
+	yes := Message{Seq: 10, Tx: fixtureTx(t, "yes-keep-nocanary.json")}
+	off := Message{Seq: 11, Tx: fixtureTx(t, "off-mail.json")}
+	again := Message{Seq: 13, Tx: fixtureTx(t, "yes-after-off.json")}
+
+	mail, tick := run("mail")
+	if res := tick(yes); len(res.Applied) != 1 || !on(mail) {
+		t.Fatalf("the keep didn't go on: %+v", res)
+	}
+	if res := tick(off); len(res.Off) != 1 || on(mail) {
+		t.Fatalf("the Off for mail: %+v", res)
+	}
+	for i := 0; i < 3; i++ {
+		if res := tick(); len(res.Applied)+len(res.Baseline) != 0 || on(mail) {
+			t.Fatalf("back on after an Off: %+v", res)
+		}
+	}
+	if res := tick(again); len(res.Accepted) != 1 || len(res.Applied) != 1 || !on(mail) {
+		t.Fatalf("the later Yes didn't lift the Off: %+v", res)
+	}
+
+	backup, btick := run("backup")
+	btick(yes)
+	if res := btick(off); len(res.Off) != 0 || !on(backup) || !strings.Contains(strings.Join(res.Accepted, " "), "for other hosts") {
+		t.Fatalf("an Off for mail took it off backup: %+v", res)
+	}
+}

@@ -209,6 +209,27 @@ func (g *Guard) Later() bool {
 	return false
 }
 
+// Timing says when the guard bites, in words: "bites now", "bites later",
+// or "mixes blocks that bite now with ones that bite later", which the rig
+// and the realm refuse.
+func (g *Guard) Timing() string {
+	now, later := false, false
+	for _, b := range g.Blocks {
+		if b.Effect().Later() {
+			later = true
+		} else {
+			now = true
+		}
+	}
+	switch {
+	case now && later:
+		return "mixes blocks that bite now with ones that bite later"
+	case later:
+		return "bites later"
+	}
+	return "bites now"
+}
+
 // BitesAtBoot reports whether some block bites when a boot brings things up:
 // a module at its next load, a setting for new sockets or processes. A
 // strip bites at a program's next run, which a boot may not bring.

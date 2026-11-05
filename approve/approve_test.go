@@ -140,17 +140,6 @@ func TestVerifySecp256k1Edges(t *testing.T) {
 	}
 }
 
-func TestCheckSeq(t *testing.T) {
-	for _, c := range []struct {
-		last, seq uint64
-		ok        bool
-	}{{0, 1, true}, {5, 6, true}, {5, 5, false}, {5, 4, false}, {5, 1005, true}, {5, 1006, false}, {0, ^uint64(0), false}} {
-		if err := CheckSeq(c.last, c.seq); (err == nil) != c.ok {
-			t.Errorf("CheckSeq(%d, %d) = %v", c.last, c.seq, err)
-		}
-	}
-}
-
 func TestVerifyEd25519(t *testing.T) {
 	pub, priv, err := ed25519.GenerateKey(nil)
 	if err != nil {

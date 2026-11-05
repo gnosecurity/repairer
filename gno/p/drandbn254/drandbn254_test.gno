@@ -32,6 +32,10 @@ func TestRound1000(t *testing.T) {
 	if Verify(pub, 1000, bad) {
 		t.Fatal("a changed signature verified")
 	}
+	// The point at infinity, as all zeros, verifies nothing.
+	if Verify(make([]byte, 128), 1000, make([]byte, 64)) || Verify(pub, 1000, make([]byte, 64)) {
+		t.Fatal("an all-zero key or signature verified")
+	}
 }
 
 func hexOf(b []byte) string {

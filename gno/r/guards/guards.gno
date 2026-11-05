@@ -14,10 +14,13 @@
 //   - Three checkers are drawn in proportion to stake, distinct owners, never
 //     the filer. They commit their transcripts, and once all are in, every
 //     transcript is opened, the worker's too.
-//   - Every transcript matches: the guard is "tested", written to the param
-//     lvl_<hash> that light clients prove. Each checker is paid CheckFee from
-//     the bond and the rest goes back. One differs: "disputed", for the panels
-//     (F2), with the bond and the drawn tickets held.
+//   - A transcript is opened as its hash and its verdict, "<hash> pass" or
+//     "<hash> fail". Every transcript matches, passing: the guard is
+//     "tested", written to the param lvl_<hash> that light clients prove.
+//     Matching but failing: "failed", with no level. Either way each checker
+//     is paid CheckFee from the bond and the rest goes back. One differs:
+//     "disputed", for the panels (F2), with the bond and the drawn tickets
+//     held.
 //   - A drawn checker who stays silent is fined NoShowFine and replaced from a
 //     later round. A worker who stays silent loses its bond: the checkers who
 //     answered are paid from it and the rest is locked here for good (a realm
@@ -69,6 +72,7 @@ const (
 	Revealed  = "revealed"  // waiting for its beacon round and the draw
 	Drawn     = "drawn"     // the checkers' commitments and reveals
 	Tested    = "tested"
+	Failed    = "failed"    // every transcript agrees the guard fails the rig
 	Disputed  = "disputed"  // to a panel (F2)
 	Forfeited = "forfeited" // the worker went silent
 	Abandoned = "abandoned" // too few staked checkers to draw; the bond went back
@@ -109,6 +113,7 @@ type filing struct {
 // Record is an address's public record (rule 7).
 type Record struct {
 	Passed    int // its filings tested
+	Failed    int // its filings every transcript failed
 	Forfeited int // its filings lost for silence
 	Checked   int // checks it answered that settled
 	Silent    int // draws it never answered
@@ -330,7 +335,7 @@ func CommitCheck(cur realm, id int, commitment string) {
 
 // RevealCheck opens a transcript, a drawn checker's or the worker's, once
 // every drawn checker has committed, so nobody can wait to see which way the
-// others went.
+// others went: "<64-hex hash of the rig's transcript> pass|fail".
 func RevealCheck(cur realm, id int, transcript, salt string) {
 	who := caller(cur)
 	f := get(id)
@@ -339,6 +344,8 @@ func RevealCheck(cur realm, id int, transcript, salt string) {
 		panic("guards: wait until every drawn checker has committed")
 	case now() > f.allIn+RevealWindow:
 		panic("guards: the reveal window has passed")
+	case verdict(transcript) == "":
+		panic("guards: a transcript is its 64-hex hash and pass or fail")
 	}
 	ch, kind := f.checks[0], "transcript"
 	if who != f.filer {
@@ -417,8 +424,12 @@ func Settle(cur realm, id int) string {
 		return f.state
 	}
 	f.state = Tested
-	levels.Set(f.guardHash, Tested)
-	params.SetString("lvl_"+f.guardHash, Tested)
+	if verdict(f.checks[0].transcript) == "fail" {
+		f.state = Failed // the rig fails it, by every account: no level
+	} else {
+		levels.Set(f.guardHash, Tested)
+		params.SetString("lvl_"+f.guardHash, Tested)
+	}
 	bond := f.bond
 	for _, c := range f.checks[1:] {
 		pay(cur, c.owner, CheckFee)
@@ -428,6 +439,11 @@ func Settle(cur realm, id int) string {
 	}
 	pay(cur, f.filer, bond)
 	f.bond = 0
+	if f.state == Failed {
+		rec(f.filer).Failed++
+		chain.Emit("GuardFailed", "filing", strconv.Itoa(id), "hash", f.guardHash)
+		return f.state
+	}
 	rec(f.filer).Passed++
 	chain.Emit("GuardTested", "filing", strconv.Itoa(id), "hash", f.guardHash)
 	return f.state
@@ -657,6 +673,16 @@ func rec(a address) *Record {
 func key(n uint64) string {
 	s := strconv.FormatUint(n, 10)
 	return strings.Repeat("0", 20-len(s)) + s
+}
+
+// verdict reads a revealed transcript: "pass" or "fail", or "" if it isn't
+// "<64-hex hash> pass|fail".
+func verdict(transcript string) string {
+	h, v, ok := strings.Cut(transcript, " ")
+	if !ok || !isHex(h, 64) || (v != "pass" && v != "fail") {
+		return ""
+	}
+	return v
 }
 
 func isHex(s string, n int) bool {

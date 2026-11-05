@@ -26,11 +26,6 @@ import (
 // Realm is the path every statement's MsgCall names. Nothing runs there.
 const Realm = "gno.land/r/autopatch/approve"
 
-// MaxSeqJump is the most a signer's sequence may rise in one step. A larger
-// jump is refused, so a hijacked lookout can't spend a signer's sequence
-// numbers to the top and lock out everything the signer signs after.
-const MaxSeqJump = 1000
-
 // ChainID returns the chain id of an owner's statements for one fleet:
 // "autopatch:" and the first 16 hex digits of the owner key's sha256, a "/",
 // and the fleet's name. Two owners who both call a fleet "home" don't accept
@@ -191,14 +186,6 @@ func VerifyGnokey(txJSON []byte, chainID string, seq uint64, pub []byte, wantMem
 	return nil, errors.New("approve: the signature doesn't verify for this chain id, sequence and memo")
 }
 
-// CheckSeq applies the sequence rule: a statement's sequence must be above
-// the last one accepted from its signer, by at most MaxSeqJump.
-func CheckSeq(last, seq uint64) error {
-	if seq <= last {
-		return fmt.Errorf("approve: sequence %d is not above the last accepted, %d", seq, last)
-	}
-	if seq-last > MaxSeqJump {
-		return fmt.Errorf("approve: sequence %d jumps more than %d past the last accepted, %d", seq, MaxSeqJump, last)
-	}
-	return nil
-}
+// The sequence rule lives in the agent: statements are taken in strict
+// order, the next number only, and one that doesn't check out for its
+// number plants no wait (agent/tick.go, applyBundle).

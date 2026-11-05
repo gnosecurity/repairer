@@ -33,7 +33,7 @@ func TestBundleInOrderOfNeed(t *testing.T) {
 		if _, err := store.AddGuard(g.Canonical()); err != nil {
 			t.Fatal(err)
 		}
-		sg, _ := approve.SignStatement(rig, approve.Statement{Version: approve.MemoVersion, Kind: approve.KindTested, Chain: "autopatch:vet", Guard: g.Hash(), Rig: strings.Repeat("0", 64)})
+		sg, _ := approve.SignStatement(rig, approve.Statement{Version: approve.MemoVersion, Kind: approve.KindTested, Image: "ubuntu 24.04", Chain: "autopatch:vet", Guard: g.Hash(), Rig: strings.Repeat("0", 64)})
 		b, _ := json.Marshal(sg)
 		if err := store.AddSigned(b); err != nil {
 			t.Fatal(err)
@@ -125,7 +125,7 @@ func TestBundleInOrderOfNeed(t *testing.T) {
 	if _, err := store.AddGuard(old.Canonical()); err != nil {
 		t.Fatal(err)
 	}
-	sg, _ := approve.SignStatement(rig, approve.Statement{Version: approve.MemoVersion, Kind: approve.KindTested, Chain: "autopatch:vet", Guard: old.Hash(), Rig: strings.Repeat("0", 64)})
+	sg, _ := approve.SignStatement(rig, approve.Statement{Version: approve.MemoVersion, Kind: approve.KindTested, Image: "ubuntu 24.04", Chain: "autopatch:vet", Guard: old.Hash(), Rig: strings.Repeat("0", 64)})
 	raw, _ := json.Marshal(sg)
 	if err := store.AddSigned(raw); err != nil {
 		t.Fatal(err)

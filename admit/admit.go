@@ -37,6 +37,9 @@ type Machine struct {
 	// ModelGuards are the guards on this machine that the model admitted,
 	// with their flaws.
 	ModelGuards [][]string
+	// OS and Release are the machine's os-release ID and VERSION_ID: a
+	// Tested counts only for the system it ran on. Unknown, none counts.
+	OS, Release string
 }
 
 // Decision says whether the guard may go on, which role admitted it, and if
@@ -78,13 +81,13 @@ func Admit(p *policy.Policy, host string, g *guard.Guard, ev Evidence, m Machine
 				why = append(why, "no yes from the owner for tier "+tier.Name+" in force")
 			}
 		case "rig":
-			if n := countKeys(ev.Signed, approve.KindTested, h, p.Signers.Rig); n > 0 {
+			if n := countKeys(testedOn(ev.Signed, m), approve.KindTested, h, p.Signers.Rig); n > 0 {
 				by = "rig"
 			} else {
-				why = append(why, "the rig hasn't signed Tested")
+				why = append(why, "the rig hasn't signed Tested on "+m.image())
 			}
 		case "vetters":
-			if n := countKeys(ev.Signed, approve.KindTested, h, p.Signers.Vetters); n >= p.Signers.VettersNeeded {
+			if n := countKeys(testedOn(ev.Signed, m), approve.KindTested, h, p.Signers.Vetters); n >= p.Signers.VettersNeeded {
 				by = "vetters"
 			} else {
 				why = append(why, fmt.Sprintf("%d of %d vetters", n, p.Signers.VettersNeeded))
@@ -157,6 +160,20 @@ func modelRefuses(tier *policy.Tier, g *guard.Guard, m Machine) string {
 	}
 	return ""
 }
+
+// testedOn keeps the statements that count on this machine: a Tested only
+// for the system it ran on (round 8, minor 9); other kinds as they are.
+func testedOn(ss []Signed, m Machine) []Signed {
+	var out []Signed
+	for _, s := range ss {
+		if s.Statement.Kind != approve.KindTested || (m.OS != "" && s.Statement.Image == m.image()) {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func (m Machine) image() string { return m.OS + " " + m.Release }
 
 // countKeys counts the distinct keys of a role that signed a statement of
 // this kind for this guard. A key counts once however many statements it

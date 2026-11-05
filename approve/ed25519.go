@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"regexp"
 )
 
 // Kinds of Ed25519 statement, and the role that may sign each.
@@ -47,8 +48,11 @@ type Statement struct {
 	Kind    string `json:"kind"`  // KindTested, KindHealthy or KindModel
 	Chain   string `json:"chain"` // autopatch:vet for Tested, the fleet's chain id otherwise
 	Guard   string `json:"guard"` // the guard's hash
-	// Rig is the pinned rig's hash, for Tested.
-	Rig string `json:"rig,omitempty"`
+	// Rig is the pinned rig's hash, for Tested, and Image the system it ran,
+	// such as "ubuntu 24.04": a Tested counts only on machines of that
+	// system (round 8, minor 9).
+	Rig   string `json:"rig,omitempty"`
+	Image string `json:"image,omitempty"`
 	// Host, State (StateOn, StateBooted or StateRefused) and Why (a refusal
 	// code), for Healthy; Nonce is the fresh number the waiting agent chose,
 	// so an old Healthy can't be replayed.
@@ -74,6 +78,9 @@ func SignStatement(priv ed25519.PrivateKey, st Statement) (Signed, error) {
 	return Signed{Statement: st, Key: hex.EncodeToString(priv.Public().(ed25519.PublicKey)), Sig: hex.EncodeToString(ed25519.Sign(priv, b))}, nil
 }
 
+// imageRe is a system as a Tested names it: an os-release ID and VERSION_ID.
+var imageRe = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31} [0-9][0-9.]{0,15}$`)
+
 func (st Statement) bytes() ([]byte, error) {
 	if st.Version != MemoVersion {
 		return nil, fmt.Errorf("approve: statement version %q", st.Version)
@@ -83,16 +90,16 @@ func (st Statement) bytes() ([]byte, error) {
 	}
 	switch st.Kind {
 	case KindTested:
-		if st.Chain != "autopatch:vet" || !isHash(st.Rig) || st.Host != "" || st.State != "" {
-			return nil, errors.New("approve: a Tested statement names the rig and no fleet")
+		if st.Chain != "autopatch:vet" || !isHash(st.Rig) || !imageRe.MatchString(st.Image) || st.Host != "" || st.State != "" {
+			return nil, errors.New("approve: a Tested statement names the rig, the system it ran (\"ubuntu 24.04\") and no fleet")
 		}
 	case KindHealthy:
 		okState := st.State == StateOn || st.State == StateBooted || (st.State == StateRefused && IsRefusalCode(st.Why))
-		if st.Host == "" || !okState || (st.State != StateRefused && st.Why != "") || len(st.Nonce) != 32 {
+		if st.Host == "" || !okState || (st.State != StateRefused && st.Why != "") || len(st.Nonce) != 32 || st.Image != "" {
 			return nil, errors.New("approve: a Healthy statement names a host; on, booted, or refused with a listed reason; and a nonce")
 		}
 	case KindModel:
-		if st.Rig != "" || st.Host != "" || st.State != "" {
+		if st.Rig != "" || st.Image != "" || st.Host != "" || st.State != "" {
 			return nil, errors.New("approve: a model's yes names only the guard")
 		}
 	default:

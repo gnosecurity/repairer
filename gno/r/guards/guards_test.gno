@@ -19,6 +19,13 @@ const (
 	sig1002 = "1ed7f88d4317f7fc378d6eece9dde7d6b3a4f6956c12450a9fdb843df146715d0ea34a65b09f1363b2b69fe532fd78979816ff876ee49d59514fdcbc09bd27fb"
 )
 
+// Revealed transcripts: the rig's transcript's hash and its verdict.
+const (
+	ok    = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa pass"
+	lie   = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb pass"
+	fails = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa fail"
+)
+
 const guardText = `{"flaw":"CVE-2026-98432","drop":{"ip_options":true}}` + "\n"
 
 var (
@@ -162,7 +169,7 @@ func TestHonest(cur realm, t *testing.T) {
 	testing.SetRealm(u(worker))
 	send(FilingBond - 1)
 	refuses(t, "send at least", func() { Commit(cross(cur), Commitment(worker, "guard", "x", "s")) })
-	id := file(t, cur, "tr", 1001)
+	id := file(t, cur, ok, 1001)
 	testing.SetRealm(u(anyone))
 	refuses(t, "submit beacon round 1001 first", func() { Draw(cross(cur), id) })
 	SubmitBeacon(cross(cur), 1002, sig1002)
@@ -181,21 +188,21 @@ func TestHonest(cur realm, t *testing.T) {
 	}
 	refuses(t, "not waiting for a draw", func() { Draw(cross(cur), id) })
 	testing.SetRealm(u(worker))
-	refuses(t, "wait until every drawn checker has committed", func() { RevealCheck(cross(cur), id, "tr", "t") })
+	refuses(t, "wait until every drawn checker has committed", func() { RevealCheck(cross(cur), id, ok, "t") })
 	testing.SetRealm(u(eve))
-	refuses(t, "you weren't drawn", func() { CommitCheck(cross(cur), id, Commitment(eve, "check", "tr", "x")) })
+	refuses(t, "you weren't drawn", func() { CommitCheck(cross(cur), id, Commitment(eve, "check", ok, "x")) })
 	for _, c := range drawn {
 		testing.SetRealm(u(c))
-		CommitCheck(cross(cur), id, Commitment(c, "check", "tr", salt(c)))
+		CommitCheck(cross(cur), id, Commitment(c, "check", ok, salt(c)))
 	}
-	refuses(t, "already committed", func() { CommitCheck(cross(cur), id, Commitment(drawn[2], "check", "tr", "y")) })
+	refuses(t, "already committed", func() { CommitCheck(cross(cur), id, Commitment(drawn[2], "check", ok, "y")) })
 	testing.SetRealm(u(anyone))
 	refuses(t, "still waiting for reveals", func() { Settle(cross(cur), id) })
 	testing.SetRealm(u(drawn[0]))
-	refuses(t, "that isn't what was committed", func() { RevealCheck(cross(cur), id, "tr", "wrong") })
+	refuses(t, "that isn't what was committed", func() { RevealCheck(cross(cur), id, ok, "wrong") })
 	for _, c := range append([]address{worker}, drawn...) {
 		testing.SetRealm(u(c))
-		RevealCheck(cross(cur), id, "tr", salt(c))
+		RevealCheck(cross(cur), id, ok, salt(c))
 	}
 	testing.SetRealm(u(anyone))
 	if s := Settle(cross(cur), id); s != Tested || Level(GuardHash(guardText)) != Tested {
@@ -243,19 +250,19 @@ func TestLazyChecker(cur realm, t *testing.T) {
 	testing.SkipHeights(MinTicketAge)
 	before := balances(worker, alice, bob, carol, dave)
 	testing.SetRealm(u(worker))
-	id := file(t, cur, "tr", 1001)
+	id := file(t, cur, ok, 1001)
 	testing.SetRealm(u(anyone))
 	drawn := draw(t, cur, id, 1001, sig1001)
 	lazy := drawn[0]
 	for _, c := range drawn[1:] {
 		testing.SetRealm(u(c))
-		CommitCheck(cross(cur), id, Commitment(c, "check", "tr", salt(c)))
+		CommitCheck(cross(cur), id, Commitment(c, "check", ok, salt(c)))
 	}
 	testing.SetRealm(u(anyone))
 	refuses(t, "still waiting for commitments", func() { Settle(cross(cur), id) })
 	testing.SkipHeights(CheckWindow + 1)
 	testing.SetRealm(u(lazy))
-	refuses(t, "not taking checks", func() { CommitCheck(cross(cur), id, Commitment(lazy, "check", "tr", salt(lazy))) })
+	refuses(t, "not taking checks", func() { CommitCheck(cross(cur), id, Commitment(lazy, "check", ok, salt(lazy))) })
 	aim(1002)
 	testing.SetRealm(u(anyone))
 	if s := Settle(cross(cur), id); s != Revealed {
@@ -275,10 +282,10 @@ func TestLazyChecker(cur realm, t *testing.T) {
 		}
 	}
 	testing.SetRealm(u(fresh))
-	CommitCheck(cross(cur), id, Commitment(fresh, "check", "tr", salt(fresh)))
+	CommitCheck(cross(cur), id, Commitment(fresh, "check", ok, salt(fresh)))
 	for _, c := range append([]address{worker}, drawn2...) {
 		testing.SetRealm(u(c))
-		RevealCheck(cross(cur), id, "tr", salt(c))
+		RevealCheck(cross(cur), id, ok, salt(c))
 	}
 	testing.SetRealm(u(anyone))
 	if s := Settle(cross(cur), id); s != Tested {
@@ -313,17 +320,17 @@ func TestLiar(cur realm, t *testing.T) {
 	testing.SkipHeights(MinTicketAge)
 	before := balances(worker, alice, bob, carol, dave)
 	testing.SetRealm(u(worker))
-	id := file(t, cur, "tr", 1001)
+	id := file(t, cur, ok, 1001)
 	testing.SetRealm(u(anyone))
 	drawn := draw(t, cur, id, 1001, sig1001)
-	says := map[address]string{drawn[0]: "a lie"}
+	says := map[address]string{drawn[0]: lie}
 	for _, c := range drawn {
 		testing.SetRealm(u(c))
-		CommitCheck(cross(cur), id, Commitment(c, "check", or(says[c], "tr"), salt(c)))
+		CommitCheck(cross(cur), id, Commitment(c, "check", or(says[c], ok), salt(c)))
 	}
 	for _, c := range append([]address{worker}, drawn...) {
 		testing.SetRealm(u(c))
-		RevealCheck(cross(cur), id, or(says[c], "tr"), salt(c))
+		RevealCheck(cross(cur), id, or(says[c], ok), salt(c))
 	}
 	testing.SetRealm(u(anyone))
 	if s := Settle(cross(cur), id); s != Disputed || Level(GuardHash(guardText)) != "" {
@@ -370,17 +377,17 @@ func TestLiarAndSilent(cur realm, t *testing.T) {
 	testing.SkipHeights(MinTicketAge)
 	before := balances(worker, alice, bob, carol, dave)
 	testing.SetRealm(u(worker))
-	id := file(t, cur, "tr", 1001)
+	id := file(t, cur, ok, 1001)
 	testing.SetRealm(u(anyone))
 	drawn := draw(t, cur, id, 1001, sig1001)
-	says := map[address]string{drawn[0]: "a lie"}
+	says := map[address]string{drawn[0]: lie}
 	for _, c := range drawn {
 		testing.SetRealm(u(c))
-		CommitCheck(cross(cur), id, Commitment(c, "check", or(says[c], "tr"), salt(c)))
+		CommitCheck(cross(cur), id, Commitment(c, "check", or(says[c], ok), salt(c)))
 	}
 	for _, c := range []address{worker, drawn[0], drawn[2]} { // drawn[1] stays silent
 		testing.SetRealm(u(c))
-		RevealCheck(cross(cur), id, or(says[c], "tr"), salt(c))
+		RevealCheck(cross(cur), id, or(says[c], ok), salt(c))
 	}
 	testing.SkipHeights(RevealWindow + 1)
 	testing.SetRealm(u(anyone))
@@ -412,22 +419,22 @@ func TestSilentWorker(cur realm, t *testing.T) {
 	testing.SkipHeights(MinTicketAge)
 	before := balances(worker, alice, bob, carol, dave)
 	testing.SetRealm(u(worker))
-	id := file(t, cur, "tr", 1001)
+	id := file(t, cur, ok, 1001)
 	testing.SetRealm(u(anyone))
 	drawn := draw(t, cur, id, 1001, sig1001)
 	for _, c := range drawn {
 		testing.SetRealm(u(c))
-		CommitCheck(cross(cur), id, Commitment(c, "check", "tr", salt(c)))
+		CommitCheck(cross(cur), id, Commitment(c, "check", ok, salt(c)))
 	}
 	for _, c := range drawn {
 		testing.SetRealm(u(c))
-		RevealCheck(cross(cur), id, "tr", salt(c))
+		RevealCheck(cross(cur), id, ok, salt(c))
 	}
 	testing.SetRealm(u(anyone))
 	refuses(t, "still waiting for reveals", func() { Settle(cross(cur), id) })
 	testing.SkipHeights(RevealWindow + 1)
 	testing.SetRealm(u(worker))
-	refuses(t, "the reveal window has passed", func() { RevealCheck(cross(cur), id, "tr", "t") })
+	refuses(t, "the reveal window has passed", func() { RevealCheck(cross(cur), id, ok, "t") })
 	testing.SetRealm(u(anyone))
 	if s := Settle(cross(cur), id); s != Forfeited {
 		t.Fatalf("settled %s", s)
@@ -447,7 +454,7 @@ func TestSilentWorker(cur realm, t *testing.T) {
 // after its window. The worker's filing goes on.
 func TestCopierAndFlood(cur realm, t *testing.T) {
 	reset()
-	tr := Commitment(worker, "transcript", "tr", "t")
+	tr := Commitment(worker, "transcript", ok, "t")
 	commit := Commitment(worker, "guard", GuardHash(guardText)+"\x00"+tr, "s")
 	testing.SetRealm(u(eve))
 	send(FilingBond)
@@ -502,7 +509,7 @@ func TestYoungTickets(cur realm, t *testing.T) {
 	testing.SetRealm(u(carol))
 	Unstake(cross(cur), 2) // leaving: never drawn
 	before := bal(worker)
-	tc := Commitment(worker, "transcript", "tr", "t")
+	tc := Commitment(worker, "transcript", ok, "t")
 	testing.SetRealm(u(worker))
 	send(FilingBond)
 	id := Commit(cross(cur), Commitment(worker, "guard", GuardHash(guardText)+"\x00"+tc, "s"))
@@ -533,4 +540,43 @@ func or(s, d string) string {
 		return d
 	}
 	return s
+}
+
+// Every transcript agrees the guard fails the rig: no level, the checkers
+// are paid, the rest of the bond goes back; a transcript that isn't a hash
+// and a verdict is refused.
+func TestEveryoneSaysItFails(cur realm, t *testing.T) {
+	reset()
+	for _, w := range []address{alice, bob, carol, dave} {
+		testing.SetRealm(u(w))
+		stakeOne(t, cur)
+	}
+	testing.SkipHeights(MinTicketAge)
+	before := balances(worker, alice, bob, carol, dave)
+	testing.SetRealm(u(worker))
+	id := file(t, cur, fails, 1001)
+	testing.SetRealm(u(anyone))
+	drawn := draw(t, cur, id, 1001, sig1001)
+	for _, c := range drawn {
+		testing.SetRealm(u(c))
+		CommitCheck(cross(cur), id, Commitment(c, "check", fails, salt(c)))
+	}
+	testing.SetRealm(u(drawn[0]))
+	refuses(t, "a transcript is its 64-hex hash and pass or fail", func() { RevealCheck(cross(cur), id, "it passed", salt(drawn[0])) })
+	for _, c := range append([]address{worker}, drawn...) {
+		testing.SetRealm(u(c))
+		RevealCheck(cross(cur), id, fails, salt(c))
+	}
+	testing.SetRealm(u(anyone))
+	if s := Settle(cross(cur), id); s != Failed || Level(GuardHash(guardText)) != "" {
+		t.Fatalf("settled %s, level %q", s, Level(GuardHash(guardText)))
+	}
+	for _, c := range drawn {
+		if got := bal(c) - before[c]; got != CheckFee {
+			t.Errorf("checker paid %d", got)
+		}
+	}
+	if got := bal(worker) - before[worker]; got != FilingBond-int64(Checkers)*CheckFee || RecordOf(worker).Failed != 1 {
+		t.Errorf("worker got back %d, record %+v", got, RecordOf(worker))
+	}
 }

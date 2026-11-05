@@ -142,6 +142,7 @@ func (a *Agent) answerWants(ctx context.Context, f *Fleet, p *policy.Policy, sam
 	chain := approve.ChainID(owner, p.Fleet)
 	var priv []byte
 	var listening map[string]bool
+	var info guard.System
 	keys := make([]string, 0, len(wants))
 	for k := range wants {
 		keys = append(keys, k)
@@ -169,9 +170,12 @@ func (a *Agent) answerWants(ctx context.Context, f *Fleet, p *policy.Policy, sam
 					if listening, err = a.Sys.ListeningAll(); err != nil {
 						return err
 					}
+					if info, err = a.Sys.Info(); err != nil {
+						return err
+					}
 				}
 				d := admit.Admit(p, f.Host, g, admit.Evidence{Yes: ev.yesFor(tier.Name), Signed: admitSigned(ev.Signed)},
-					admit.Machine{Listening: listening, ModelGuards: modelGuards}, ev.Nonce, a.now())
+					admit.Machine{Listening: listening, ModelGuards: modelGuards, OS: info.OS, Release: info.Release}, ev.Nonce, a.now())
 				if d.OK {
 					state, why = approve.StateRefused, ev.RefusedCode
 				}

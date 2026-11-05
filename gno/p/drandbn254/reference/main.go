@@ -83,9 +83,15 @@ func main() {
 		var pk bn254.G2Affine
 		c := func(i int) []byte { return pkb[i*32 : (i+1)*32] }
 		if order[0:4] == "x1x0" {
-			pk.X.A1.SetBytes(c(0)); pk.X.A0.SetBytes(c(1)); pk.Y.A1.SetBytes(c(2)); pk.Y.A0.SetBytes(c(3))
+			pk.X.A1.SetBytes(c(0))
+			pk.X.A0.SetBytes(c(1))
+			pk.Y.A1.SetBytes(c(2))
+			pk.Y.A0.SetBytes(c(3))
 		} else {
-			pk.X.A0.SetBytes(c(0)); pk.X.A1.SetBytes(c(1)); pk.Y.A0.SetBytes(c(2)); pk.Y.A1.SetBytes(c(3))
+			pk.X.A0.SetBytes(c(0))
+			pk.X.A1.SetBytes(c(1))
+			pk.Y.A0.SetBytes(c(2))
+			pk.Y.A1.SetBytes(c(3))
 		}
 		if !pk.IsOnCurve() {
 			fmt.Println(order, ": the key isn't on the curve")

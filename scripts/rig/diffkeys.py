@@ -1,14 +1,17 @@
 # diffkeys.py BEFORE.json AFTER.json GUARD.json|-: which facts changed between two
 # snapshots that the guard doesn't explain (with "-", every change counts).
 # Prints them comma-separated; nothing when all is explained.
-import json, sys
+import json, re, sys
 a, b = json.load(open(sys.argv[1])), json.load(open(sys.argv[2]))
 blocks = json.load(open(sys.argv[3]))["blocks"] if sys.argv[3] != "-" else []
 kinds = {k for blk in blocks for k in blk}
 settings = {blk["setting"]["name"] for blk in blocks if "setting" in blk}
 strips = {blk["strip"]["path"] for blk in blocks if "strip" in blk}
+# The agent's own files: /etc/sysctl.d/99-zz-autopatch.conf and
+# /etc/modprobe.d/autopatch-<hash>-<module>.conf (round 8, minor 9).
+OURS = re.compile(r"(^|/)(99-zz-autopatch|autopatch-[0-9a-f]{64}-[A-Za-z0-9_-]+)\.conf$")
 def ours(paths):
-    return all(p.endswith("autopatch.conf") for p in paths)
+    return all(OURS.search(p) for p in paths)
 bad = []
 for k in sorted(set(a) | set(b)):
     x, y = a.get(k), b.get(k)

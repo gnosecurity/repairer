@@ -6,19 +6,36 @@
 # that need a client VM and a router are listed as not run.
 #
 # Needs: RIG (the rig directory: images/, seed.iso, rig_ed25519) and AGENT
-# (the autopatch-agent binary). Touches nothing outside $RIG/runs.
+# (the autopatch-agent binary). Touches nothing outside $RIG/runs. QEMU's
+# version is pinned (RIG_QEMU), so the rig hash names a rig anyone can rerun
+# on other hardware; the CPU and QEMU go beside the transcript in OUT.env.json.
 set -euo pipefail
 guard=$(readlink -f "${1:?guard file}"); outfile=${2:?transcript file}
 R=${RIG:?the rig directory}; AGENT=$(readlink -f "${AGENT:?the agent binary}")
 here=$(dirname "$(readlink -f "$0")")
 img=$R/images/ubuntu-24.04-server-cloudimg-amd64.img
+export RIG_IMAGE="ubuntu 24.04"
+qv=$(qemu-system-x86_64 --version | head -1 | awk '{print $4}')
+if [ "$qv" != "${RIG_QEMU:-8.2.2}" ]; then echo "rig.sh: QEMU $qv, but the rig pins ${RIG_QEMU:-8.2.2}" >&2; exit 1; fi
+python3 -I -c 'import json,sys; print(json.dumps({"cpu": next((l.split(":",1)[1].strip() for l in open("/proc/cpuinfo") if l.startswith("model name")), ""), "qemu": sys.argv[1]}, sort_keys=True))' "$qv" > "$outfile.env.json"
 w=$(mktemp -d "$R/runs/rig-XXXXXX")
 port=$((2600 + RANDOM % 300))
+# A drop narrowed by ports is probed from outside: a forwarded port on this
+# machine leads to the first port it drops (round 8, minor 9).
+read -r pproto pport < <(python3 -I -c 'import json,sys
+for b in json.load(open(sys.argv[1]))["blocks"]:
+    d = b.get("drop")
+    if d and d.get("ports") and not d.get("ip_options"):
+        print(d["protocol"], str(d["ports"][0]).split("-")[0]); break
+else:
+    print("- -")' "$guard")
+fwd=""; pfwd=$((2900 + RANDOM % 300))
+[ "$pproto" != "-" ] && fwd=",hostfwd=$pproto:127.0.0.1:$pfwd-:$pport"
 qemu-img create -q -f qcow2 -F qcow2 -b "$img" "$w/disk.qcow2" 8G
 boot() {
   qemu-system-x86_64 -enable-kvm -cpu host -m 2048 -smp 2 \
     -drive file="$w/disk.qcow2",if=virtio -drive file="$R/seed.iso",if=virtio,format=raw,readonly=on \
-    -nic user,model=virtio,restrict=on,hostfwd=tcp:127.0.0.1:$port-:22 \
+    -nic user,model=virtio,restrict=on,hostfwd=tcp:127.0.0.1:$port-:22$fwd \
     -display none -serial file:"$w/console.log" -daemonize -pidfile "$w/qemu.pid"
 }
 cleanup() { kill "$(cat "$w/qemu.pid" 2>/dev/null)" 2>/dev/null || true; rm -rf "$w"; }
@@ -35,8 +52,16 @@ A="sudo /usr/local/sbin/autopatch-agent"
 G=/home/rig/$(basename "$guard")
 declare -A pass ev
 check() { pass[$1]=$2; ev[$1]=$3; }
+# A guard that mixes blocks that bite now with ones that bite later fails
+# here, so no honest transcript passes it (AUTOPATCH.md rule 4).
+timing=$("$AGENT" fmt "$guard" 2>&1 >/dev/null | sed 's/.*, //')
+if [[ $timing == mixes* ]]; then check one_timing false "$timing; file them as two guards"; else check one_timing true "$timing"; fi
 snap > "$w/s0.json"
 if out=$("${S[@]}" "$A apply -confirm-within 0 $G" 2>&1); then check applies true "applied"; else check applies false "$out"; fi
+case "$pproto" in
+  tcp) timeout 5 bash -c "exec 3<>/dev/tcp/127.0.0.1/$pfwd; head -c1 <&3" >/dev/null 2>&1 || true ;;
+  udp) for i in 1 2 3; do echo probe > "/dev/udp/127.0.0.1/$pfwd" 2>/dev/null || true; sleep 1; done ;;
+esac
 st=$("${S[@]}" "$A status" 2>&1 || true)
 if echo "$st" | grep -q "stopped [1-9]"; then check probe_blocked true "the guard's rule stopped the probe"
 elif ! grep -q '"drop"' "$guard"; then check probe_blocked true "no drop to probe"

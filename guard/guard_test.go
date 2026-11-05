@@ -262,3 +262,25 @@ func TestFitsAndFixRunning(t *testing.T) {
 		}
 	}
 }
+
+// Timing names when a guard bites; a mix is what the rig and the realm
+// refuse (round 8, minor 9).
+func TestTiming(t *testing.T) {
+	for name, want := range map[string]string{
+		"cve-2026-98432-ipopt.json": "bites now",
+		"cve-2026-98432-mptcp.json": "bites later",
+		"cve-2026-98432.json":       "mixes blocks that bite now with ones that bite later",
+	} {
+		b, err := os.ReadFile("testdata/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		g, err := Parse(b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := g.Timing(); got != want {
+			t.Errorf("%s: %q", name, got)
+		}
+	}
+}

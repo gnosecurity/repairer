@@ -5,12 +5,16 @@
 //	autopatch-gnosh judge  -socket MODEL.sock -model NAME -weights HASH < ASK.json   (what launch runs, sandboxed)
 //
 // launch holds the model's key and never lets it into the sandbox: it runs
-// judge in a new network namespace with no interfaces (unshare), where the
-// only way out is the model's UNIX socket, then checks the answer against
-// rule 6 itself and signs the model's yes only for a drop-only guard that
-// isn't one of the model's own drafts. In: advisories and a guard, never the
-// inventory. Out: the reading, the verdict, the prompt's and the model's
-// hashes, and the signed yes if any, within ten minutes.
+// judge in new user, network and mount namespaces (unshare), in a jail whose
+// whole filesystem is an empty in-memory root holding the model's UNIX
+// socket and nothing else, with no network interfaces; then it checks the
+// answer against rule 6 itself and signs the model's yes only for a drop
+// narrowed by IP options that isn't one of the model's own drafts (-drafts
+// is required: the list of what the model drafted, empty if nothing). In:
+// advisories and a guard, never the inventory. Out: the reading, the
+// verdict, the prompt's and the model's hashes, and the signed yes if any,
+// within ten minutes. On Ubuntu 24.04 an unprivileged launcher needs an
+// AppArmor profile that allows user namespaces.
 package main
 
 import (
@@ -25,6 +29,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -61,6 +66,7 @@ func run(ctx context.Context, cmd string, args []string, stdin io.Reader, stdout
 	chain := fs.String("chain", "", "launch: the fleet's chain id")
 	drafts := fs.String("drafts", "", "launch: a file of guard hashes the model drafted, one a line")
 	sandbox := fs.String("sandbox", "unshare", "launch: how judge is cut off (unshare; none only for tests)")
+	root := fs.String("root", "", "jail: the empty directory that becomes judge's whole filesystem")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -76,13 +82,21 @@ func run(ctx context.Context, cmd string, args []string, stdin io.Reader, stdout
 		return fmt.Errorf("the ask: %w", err)
 	}
 	switch cmd {
-	case "judge":
+	case "jail", "judge":
+		if cmd == "jail" {
+			if *socket, err = enterJail(*root, *socket); err != nil {
+				return fmt.Errorf("the jail: %w", err)
+			}
+		}
 		ans, err := gnosh.Judge(ctx, gnosh.SocketModel{Socket: *socket, Name: *model, Weight: *weights}, ask)
 		if err != nil {
 			return err
 		}
 		return json.NewEncoder(stdout).Encode(ans)
 	case "launch":
+		if *drafts == "" {
+			return errors.New("launch needs -drafts: a file of the guard hashes the model drafted, empty if none, so its yes never counts for its own draft")
+		}
 		k, err := os.ReadFile(*keyFile)
 		if err != nil {
 			return err
@@ -95,15 +109,24 @@ func run(ctx context.Context, cmd string, args []string, stdin io.Reader, stdout
 		if err != nil {
 			return err
 		}
-		judgeArgs := []string{self, "judge", "-socket", *socket, "-model", *model, "-weights", *weights}
+		sock, err := filepath.Abs(*socket)
+		if err != nil {
+			return err
+		}
 		var c *exec.Cmd
 		switch *sandbox {
 		case "unshare":
-			// A user and a network namespace: no interfaces, not even up
-			// loopback. A UNIX socket on the filesystem still reaches the model.
-			c = exec.CommandContext(ctx, "unshare", append([]string{"--user", "--map-root-user", "--net", "--"}, judgeArgs...)...)
+			// User, network and mount namespaces: no interfaces, not even up
+			// loopback, and a filesystem that holds only the model's socket.
+			jail, err := os.MkdirTemp("", "gnosh-jail-")
+			if err != nil {
+				return err
+			}
+			defer os.Remove(jail)
+			c = exec.CommandContext(ctx, "unshare", "--user", "--map-root-user", "--net", "--mount", "--",
+				self, "jail", "-root", jail, "-socket", sock, "-model", *model, "-weights", *weights)
 		case "none":
-			c = exec.CommandContext(ctx, judgeArgs[0], judgeArgs[1:]...)
+			c = exec.CommandContext(ctx, self, "judge", "-socket", sock, "-model", *model, "-weights", *weights)
 		default:
 			return fmt.Errorf("sandbox %q", *sandbox)
 		}
@@ -119,14 +142,12 @@ func run(ctx context.Context, cmd string, args []string, stdin io.Reader, stdout
 		}
 		out := Out{Answer: &ans}
 		ds := map[string]bool{}
-		if *drafts != "" {
-			b, err := os.ReadFile(*drafts)
-			if err != nil {
-				return err
-			}
-			for _, l := range strings.Fields(string(b)) {
-				ds[l] = true
-			}
+		b, err := os.ReadFile(*drafts)
+		if err != nil {
+			return err
+		}
+		for _, l := range strings.Fields(string(b)) {
+			ds[l] = true
 		}
 		sg, err := gnosh.SignYes(ed25519.NewKeyFromSeed(seed), *chain, ask, &ans, ds)
 		if err != nil {

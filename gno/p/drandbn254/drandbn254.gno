@@ -42,6 +42,13 @@ func Verify(pub []byte, round uint64, sig []byte) bool {
 	if len(pub) != 128 || len(sig) != 64 {
 		return false
 	}
+	// EIP-197 reads all zeros as the point at infinity: e(0, -g2) * e(H, 0)
+	// is 1 for every message, so a zero key with a zero signature would
+	// verify anything, and a ticket's draw would be known ahead (round 8,
+	// minor 11).
+	if allZero(pub) || allZero(sig) {
+		return false
+	}
 	var r [8]byte
 	for i := 0; i < 8; i++ {
 		r[7-i] = byte(round >> (8 * i))
@@ -186,4 +193,13 @@ func unhex(c byte) byte {
 func keccak256Sum(b []byte) []byte {
 	s := keccak256.Sum256(b)
 	return s[:]
+}
+
+func allZero(b []byte) bool {
+	for _, c := range b {
+		if c != 0 {
+			return false
+		}
+	}
+	return true
 }

@@ -1,9 +1,12 @@
 // Command autopatch-rig signs what the rig found. scripts/rig/rig.sh runs a
 // guard's checks in a fresh VM and writes a transcript; this command names
-// the rig that ran (a hash of its scripts, the image, the agent binary,
-// QEMU's version and the CPU model) and, when every check that ran passed,
-// signs Tested(guard, rig) with the rig's Ed25519 key. The rig's real key
-// stays off the devbox; development uses a test key.
+// the rig that ran (a hash of its scripts, the image and the agent binary;
+// rig.sh pins QEMU's version, and the CPU is recorded beside the transcript,
+// so anyone can rerun the same rig on other hardware) and, when every check
+// that ran passed, signs Tested(guard, rig, image) with the rig's Ed25519
+// key: the image's system, such as "ubuntu 24.04", is the only one the
+// Tested counts on. The rig's real key stays off the devbox; development
+// uses a test key.
 //
 //	autopatch-rig hash -image IMG -agent BIN
 //	autopatch-rig sign -key RIG.key -rig HASH -guard GUARD.json TRANSCRIPT.json
@@ -20,7 +23,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -102,7 +104,7 @@ type Transcript struct {
 
 // required are the checks every rig runs; a transcript missing one, or
 // failing one, is never signed.
-var required = []string{"applies", "probe_blocked", "twice_no_change", "traffic", "survives", "undo_exact", "nothing_else"}
+var required = []string{"applies", "one_timing", "probe_blocked", "twice_no_change", "traffic", "survives", "undo_exact", "nothing_else"}
 
 // Sign checks a transcript and, when every check that ran passed, signs
 // Tested for the guard with the rig's key.
@@ -117,6 +119,18 @@ func Sign(seedHex []byte, rig string, guardFile, transcript []byte) (approve.Sig
 	}
 	if t.Guard != g.Hash() { // a guard is named by its canonical form's hash
 		return approve.Signed{}, errors.New("the transcript is about another guard")
+	}
+	// The system the rig ran must be one the guard is written for; the
+	// Tested counts only there (round 8, minor 9).
+	osID, release, _ := strings.Cut(t.Image, " ")
+	if !writtenFor(g, osID, release) {
+		return approve.Signed{}, fmt.Errorf("the rig ran %q, which the guard isn't written for", t.Image)
+	}
+	// A guard that mixes blocks that bite now with ones that bite later is
+	// refused: an agent treats it as later, so an urgent drop would wait for
+	// a canary's boot (AUTOPATCH.md rule 4).
+	if strings.HasPrefix(g.Timing(), "mixes") {
+		return approve.Signed{}, errors.New("the guard mixes blocks that bite now with ones that bite later; file them as two guards")
 	}
 	var failed []string
 	for _, name := range required {
@@ -142,7 +156,16 @@ func Sign(seedHex []byte, rig string, guardFile, transcript []byte) (approve.Sig
 		return approve.Signed{}, errors.New("the rig key is a 32-byte seed in hex")
 	}
 	return approve.SignStatement(ed25519.NewKeyFromSeed(seed), approve.Statement{Version: approve.MemoVersion,
-		Kind: approve.KindTested, Chain: "autopatch:vet", Guard: g.Hash(), Rig: rig})
+		Kind: approve.KindTested, Chain: "autopatch:vet", Guard: g.Hash(), Rig: rig, Image: t.Image})
+}
+
+func writtenFor(g *guard.Guard, osID, release string) bool {
+	for _, t := range g.For {
+		if t.OS == osID && contains(t.Releases, release) {
+			return true
+		}
+	}
+	return false
 }
 
 func contains(xs []string, x string) bool {
@@ -154,9 +177,9 @@ func contains(xs []string, x string) bool {
 	return false
 }
 
-// rigHash names the rig that ran: its scripts, the image, the agent
-// binary, QEMU's version and the CPU model, so a Tested says exactly which
-// rig passed the guard.
+// rigHash names the rig that ran: its scripts (which pin QEMU's version),
+// the image and the agent binary, so a Tested says exactly which rig passed
+// the guard, and anyone can rerun it on other hardware (round 8, minor 9).
 func rigHash(scripts, image, agentBin string) (string, error) {
 	if image == "" || agentBin == "" {
 		return "", errors.New("hash needs -image and -agent")
@@ -179,21 +202,6 @@ func rigHash(scripts, image, agentBin string) (string, error) {
 			return "", err
 		}
 		fmt.Fprintf(h, "%s %x\n", filepath.Base(f), fsum.Sum(nil))
-	}
-	q, err := exec.Command("qemu-system-x86_64", "--version").Output()
-	if err != nil {
-		return "", fmt.Errorf("QEMU's version: %w", err)
-	}
-	fmt.Fprintf(h, "qemu %s\n", strings.SplitN(string(q), "\n", 2)[0])
-	cpu, err := os.ReadFile("/proc/cpuinfo")
-	if err != nil {
-		return "", err
-	}
-	for _, line := range strings.Split(string(cpu), "\n") {
-		if strings.HasPrefix(line, "model name") {
-			fmt.Fprintf(h, "cpu %s\n", strings.TrimSpace(strings.SplitN(line, ":", 2)[1]))
-			break
-		}
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }

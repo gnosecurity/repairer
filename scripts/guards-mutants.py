@@ -42,6 +42,8 @@ M = [
     ("double settle", 'if f.state != Drawn {\n\t\tpanic("guards: nothing to settle")', 'if false {\n\t\tpanic("guards: nothing to settle")'),
     ("checkers unpaid when tested", "\tfor _, c := range f.checks[1:] {\n\t\tpay(cur, c.owner, CheckFee)\n\t\tbond -= CheckFee\n\t\trelease(c)\n\t\trec(c.owner).Checked++", "\tfor _, c := range f.checks[1:] {\n\t\tbond -= CheckFee\n\t\trelease(c)\n\t\trec(c.owner).Checked++"),
     ("silent checkers redrawn after a lie", "\t\tif match {\n\t\t\treturn redraw(f, id)\n\t\t}", "\t\treturn redraw(f, id)"),
+    ("failing guards tested", 'if verdict(f.checks[0].transcript) == "fail" {', "if false {"),
+    ("any transcript accepted", 'case verdict(transcript) == "":', "case false:"),
     ("draw half-applied", "\tfor _, p := range picks {\n\t\tp.open++", "\tfor _, p := range picks[:0] {\n\t\tp.open++"),
 ]
 

@@ -124,7 +124,7 @@ func TestProcessSpool(t *testing.T) {
 		t.Fatal("the new policy isn't in force")
 	}
 
-	// A sequence that jumps more than 1,000 is refused before anything else.
+	// A statement numbered far ahead waits for the ones before it.
 	jump := bundleOf(t, []Message{{Seq: 5000, Tx: fixtureTx(t, "yes-guard-one.json")}}, g, nil)
 	if _, err := Intake(spool, strings.NewReader(string(jump))); err != nil {
 		t.Fatal(err)

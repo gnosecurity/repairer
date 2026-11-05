@@ -140,7 +140,7 @@ func run(ctx context.Context, cmd string, args []string) error {
 			return err
 		}
 		fmt.Printf("%s\n", g.Canonical())
-		fmt.Fprintf(os.Stderr, "%s, hash %s\n", g.Name(), g.Hash())
+		fmt.Fprintf(os.Stderr, "%s, hash %s, %s\n", g.Name(), g.Hash(), g.Timing())
 		return nil
 	case "plan", "apply":
 		path, err := arg()
@@ -187,7 +187,7 @@ func run(ctx context.Context, cmd string, args []string) error {
 		if e != nil {
 			fmt.Printf("%s is off\n", e.Guard.Name())
 			if !*ifUnconfirmed && err == nil {
-				// A hand took it off: tick leaves it off until the owner's next Yes.
+				// A hand took it off: tick leaves it off until the owner's On names this host.
 				err = a.Hold(e.Hash, "taken off by hand")
 			}
 		}

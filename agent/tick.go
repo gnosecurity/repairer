@@ -60,7 +60,8 @@ type Evidence struct {
 	Trial *Trial `json:"trial,omitempty"`
 	// Tries counts windows that failed here; RetryAt is when the next try
 	// may start; Ask is set once the retries are spent, for the owner, and
-	// cleared by the owner's next Yes. Last is the last verdict, in words.
+	// cleared by the owner's next Yes for this tier, or On. Last is the last
+	// verdict, in words.
 	Tries   int       `json:"tries,omitempty"`
 	RetryAt time.Time `json:"retry_at,omitzero"`
 	Ask     bool      `json:"ask,omitempty"`
@@ -555,6 +556,11 @@ func (a *Agent) next(ctx context.Context, f *Fleet, p *policy.Policy, entries []
 		res.Refused = append(res.Refused, "listening sockets: "+err.Error())
 		return
 	}
+	info, err := a.Sys.Info()
+	if err != nil {
+		res.Refused = append(res.Refused, "the system: "+err.Error())
+		return
+	}
 	type candidate struct {
 		h    string
 		ev   *Evidence
@@ -578,7 +584,7 @@ func (a *Agent) next(ctx context.Context, f *Fleet, p *policy.Policy, entries []
 		}
 		yes := ev.yesFor(tierName)
 		d := admit.Admit(p, f.Host, g, admit.Evidence{Yes: yes, Signed: admitSigned(ev.Signed)},
-			admit.Machine{Listening: listening, ModelGuards: modelGuards}, ev.Nonce, a.now())
+			admit.Machine{Listening: listening, ModelGuards: modelGuards, OS: info.OS, Release: info.Release}, ev.Nonce, a.now())
 		if !d.OK {
 			if d.Wait {
 				res.Waiting = append(res.Waiting, g.Name())
@@ -692,8 +698,9 @@ func (a *Agent) next(ctx context.Context, f *Fleet, p *policy.Policy, entries []
 	}
 }
 
-// Hold keeps a guard off until the owner's next Yes for this host: what a
-// hand that takes off a guard the agent put on is asking for.
+// Hold keeps a guard off until the owner's On names this host (a Yes
+// doesn't lift it): what a hand that takes off a guard the agent put on is
+// asking for.
 func (a *Agent) Hold(hash, why string) error {
 	ev, err := a.loadEvidence(hash)
 	if errors.Is(err, os.ErrNotExist) {

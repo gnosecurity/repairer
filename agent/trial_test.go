@@ -94,7 +94,7 @@ func (tr *trial) deliver(b Bundle) {
 func (tr *trial) tested(g *guard.Guard) {
 	tr.t.Helper()
 	sg, err := approve.SignStatement(tr.rig, approve.Statement{Version: approve.MemoVersion, Kind: approve.KindTested,
-		Chain: "autopatch:vet", Guard: g.Hash(), Rig: strings.Repeat("c", 64)})
+		Image: "ubuntu 24.04", Chain: "autopatch:vet", Guard: g.Hash(), Rig: strings.Repeat("c", 64)})
 	if err != nil {
 		tr.t.Fatal(err)
 	}

@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/gnolang/gno/tm2/pkg/bft/rpc/client"
@@ -26,10 +27,24 @@ type Client struct {
 	// Validators is the set the client trusts: from its pinned start (an
 	// owner-signed checkpoint), followed forward.
 	Validators *types.ValidatorSet
-	// MaxAge refuses a proof whose header is older than this, unless zero.
+	// MaxAge refuses a proof whose header is older than this (the plan's
+	// five minutes); it and Now are required.
 	MaxAge time.Duration
 	Now    func() time.Time
+
+	// The newest header accepted: a later answer may not be older, so a
+	// node can't walk the client back to an earlier state (round 8, minor
+	// 11).
+	mu   sync.Mutex
+	last *types.Header
 }
+
+// MaxSkew is how far in the future a header's time may be: the validators'
+// clocks and this machine's differ a little, never by more.
+const MaxSkew = time.Minute
+
+// Param asks the node for one key, which tells that node which guards
+// matter here: ask only nodes you run (rule 5).
 
 // ParamKey is where a realm param lives in the main store.
 func ParamKey(realm, key string) []byte { return []byte("/pv/vm:" + realm + ":" + key) }
@@ -92,8 +107,31 @@ func (c *Client) Header(ctx context.Context, h int64) (*types.Header, error) {
 	if err := c.Validators.VerifyCommit(c.ChainID, sh.Commit.BlockID, h, sh.Commit); err != nil {
 		return nil, fmt.Errorf("lightclient: the signatures: %w", err)
 	}
-	if c.MaxAge > 0 && c.Now != nil && c.Now().Sub(sh.Header.Time) > c.MaxAge {
-		return nil, fmt.Errorf("lightclient: header %d is from %s, older than %s", h, sh.Header.Time, c.MaxAge)
+	if err := c.fresh(sh.Header); err != nil {
+		return nil, err
 	}
 	return sh.Header, nil
+}
+
+// fresh refuses a header older than MaxAge, dated more than MaxSkew in the
+// future, or older than the newest one this client has accepted; otherwise
+// it becomes the newest.
+func (c *Client) fresh(hdr *types.Header) error {
+	if c.MaxAge <= 0 || c.Now == nil {
+		return errors.New("lightclient: set MaxAge and Now")
+	}
+	now := c.Now()
+	switch {
+	case now.Sub(hdr.Time) > c.MaxAge:
+		return fmt.Errorf("lightclient: header %d is from %s, older than %s", hdr.Height, hdr.Time, c.MaxAge)
+	case hdr.Time.Sub(now) > MaxSkew:
+		return fmt.Errorf("lightclient: header %d is dated %s, in the future", hdr.Height, hdr.Time)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.last != nil && (hdr.Height < c.last.Height || hdr.Time.Before(c.last.Time)) {
+		return fmt.Errorf("lightclient: header %d is older than header %d, already seen", hdr.Height, c.last.Height)
+	}
+	c.last = hdr
+	return nil
 }

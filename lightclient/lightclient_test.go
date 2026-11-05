@@ -68,3 +68,35 @@ func TestParamOnALocalChain(t *testing.T) {
 		t.Fatal("a header from validators the client doesn't trust")
 	}
 }
+
+// A header must be recent, not dated in the future, and never older than
+// one already accepted; and the client won't run without an age limit
+// (round 8, minor 11).
+func TestFresh(t *testing.T) {
+	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+	hdr := func(h int64, at time.Time) *types.Header { return &types.Header{Height: h, Time: at} }
+	if err := (&Client{Now: func() time.Time { return now }}).fresh(hdr(1, now)); err == nil {
+		t.Fatal("no MaxAge: accepted")
+	}
+	c := &Client{MaxAge: 5 * time.Minute, Now: func() time.Time { return now }}
+	for name, h := range map[string]*types.Header{
+		"an old header":   hdr(10, now.Add(-6*time.Minute)),
+		"a future header": hdr(10, now.Add(2*time.Minute)),
+	} {
+		if err := c.fresh(h); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	if err := c.fresh(hdr(10, now.Add(-time.Minute))); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.fresh(hdr(9, now.Add(-30*time.Second))); err == nil {
+		t.Error("a lower height after a higher one: accepted")
+	}
+	if err := c.fresh(hdr(11, now.Add(-2*time.Minute))); err == nil {
+		t.Error("an earlier time after a later one: accepted")
+	}
+	if err := c.fresh(hdr(11, now.Add(30*time.Second))); err != nil {
+		t.Fatal(err)
+	}
+}

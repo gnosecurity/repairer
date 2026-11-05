@@ -99,6 +99,13 @@ function check(ok, what) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lookout-browser-"));
   for (const f of ["report.key", "intake.key", "known_hosts"]) fs.writeFileSync(path.join(dir, f), "", { mode: 0o600 });
   fs.writeFileSync(path.join(dir, "policy.json"), policy);
+  // The kernel's new network flaws, as the feeds command keeps them for the page.
+  fs.mkdirSync(path.join(dir, "state", "feeds"), { recursive: true });
+  fs.writeFileSync(path.join(dir, "state", "feeds", "kernel-new.json"), JSON.stringify([{ id: "CVE-2026-98432",
+    title: "ipv4: free inet_opt and ireq_opt after an RCU grace period", files: ["net/ipv4/af_inet.c", "net/ipv4/tcp_ipv4.c"],
+    cvss: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H", introduced: "4.4", mainline: "7.3",
+    fixed: { "5.10": "5.10.272", "5.15": "5.15.223", "6.1": "6.1.190", "6.6": "6.6.159", "6.12": "6.12.113", "6.18": "6.18.56", "7.2": "7.2.10" },
+    first_seen: new Date(Date.now() - 3 * 3600 * 1000).toISOString() }]));
   fs.writeFileSync(path.join(dir, "lookout.json"), JSON.stringify({ state: path.join(dir, "state"), policy: path.join(dir, "policy.json"),
     report_key: path.join(dir, "report.key"), intake_key: path.join(dir, "intake.key"), known_hosts: path.join(dir, "known_hosts"), hosts: {} }));
   const admin = newWallet(), stranger = newWallet();
@@ -152,6 +159,8 @@ function check(ok, what) {
     const body = await page.content();
     check(body.includes("<td>mail</td>") && body.includes("<td>web</td>") && body.includes("no agent key in the policy yet"),
       "both machines of the policy are on the page, each without an agent key yet");
+    check(body.includes("New kernel flaws a network can reach") && body.includes("6.1.190, 6.6.159") && body.includes("mainline 7.3"),
+      "the kernel's new network flaws are on the page, their fixes in order");
     await shot(page, "page-desktop-light");
 
     // A guard file uploaded through the page's form is kept; the form with no file says so.

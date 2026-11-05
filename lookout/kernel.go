@@ -263,6 +263,9 @@ func versionParts(v string) []int {
 	return out
 }
 
+// KernelReleaseLess orders kernel releases by their dotted numbers.
+func KernelReleaseLess(a, b string) bool { return versionLess(a, b) }
+
 // versionLess compares kernel releases by their dotted numbers; missing
 // parts are zeros ("7.3" is "7.3.0").
 func versionLess(a, b string) bool {

@@ -312,6 +312,9 @@ func TestLazyChecker(cur realm, t *testing.T) {
 		t.Errorf("the lazy checker kept %d", got)
 	}
 	drawn2 := draw(t, cur, id, 1002, sig1002)
+	if roundsWait() {
+		t.Error("after the redraw's draw a round still holds the tree") // fixRound let go of the first
+	}
 	var fresh address
 	for _, c := range drawn2 {
 		if c == lazy {

@@ -297,4 +297,8 @@ if [ "$POOL" -ge 80 ]; then
   echo "compacted the 64 tickets left pending"
 fi
 grep -v '^Fund' "$gaslog" | sort | awk '{n[$1]++; s[$1]+=$2; if ($2>m[$1]) m[$1]=$2} END {for (f in n) printf "%-14s %3d calls, most %11d gas, mean %11d\n", f, n[f], m[f], s[f]/n[f]}' | sort
-echo "realm-e2e: ok, level tested on chain at round $round; a dispute settled by a panel at round $round3"
+if [ "$POOL" -ge 80 ]; then
+  echo "realm-e2e: ok, level tested on chain at round $round; a dispute's panel drawn at round $round3, its word appealed to the pool's vote, which decided"
+else
+  echo "realm-e2e: ok, level tested on chain at round $round; a dispute settled by a panel at round $round3"
+fi

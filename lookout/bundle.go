@@ -261,13 +261,33 @@ func (s *Store) addAnswers(b *agent.Bundle, host string, me *agent.FleetReport, 
 }
 
 // addSignedFor adds signed statements (Tested, the model's yes) for guards
-// not yet confirmed on the machine, newest first, with their files.
+// not yet confirmed on the machine and written for its system, newest
+// first, with their files.
 func (s *Store) addSignedFor(b *agent.Bundle, me *agent.FleetReport, fits func(any) bool, addGuard func(string) bool) {
 	confirmed := map[string]bool{}
 	for _, g := range me.Guards {
 		if g.Status == agent.Confirmed {
 			confirmed[g.Hash] = true
 		}
+	}
+	// Statements for guards written for other systems would only crowd
+	// out the ones this machine needs: everything is kept now (Prune).
+	forOthers := map[string]bool{}
+	other := func(h string) bool {
+		if me.Facts == nil || me.Facts.OS.ID == "" {
+			return false
+		}
+		if v, ok := forOthers[h]; ok {
+			return v
+		}
+		v := false
+		if raw, err := s.Guard(h); err == nil {
+			if g, err := guard.Parse(raw); err == nil {
+				v = !writtenFor(g, me.Facts.OS.ID, me.Facts.OS.Version)
+			}
+		}
+		forOthers[h] = v
+		return v
 	}
 	files, _ := filepath.Glob(s.path("signed", "*.json"))
 	type kept struct {
@@ -276,7 +296,7 @@ func (s *Store) addSignedFor(b *agent.Bundle, me *agent.FleetReport, fits func(a
 	}
 	var ks []kept
 	for _, f := range files {
-		if confirmed[strings.SplitN(filepath.Base(f), "-", 2)[0]] {
+		if h := strings.SplitN(filepath.Base(f), "-", 2)[0]; confirmed[h] || other(h) {
 			continue
 		}
 		if fi, err := os.Stat(f); err == nil {
@@ -300,43 +320,67 @@ func (s *Store) addSignedFor(b *agent.Bundle, me *agent.FleetReport, fits func(a
 	}
 }
 
-// Prune forgets kept signed statements no machine needs: those for a guard
-// every machine of the policy reports confirmed, or has on its Off list.
-// It forgets nothing while any machine has no fresh report.
-func (s *Store) Prune(sts []HostStatus) (int, error) {
-	if len(sts) == 0 {
-		return 0, nil
-	}
-	for _, st := range sts {
-		if st.Report == nil || st.Silent {
-			return 0, nil
-		}
-	}
+// Prune forgets kept signed statements only for guards no machine can
+// still need: those whose vendors' fixed builds ("until") cover every
+// release they are written for. A guard every machine has confirmed is
+// kept: a machine added or rebuilt later needs its statements too, and so
+// does an On where an Off came before the guard did (round 8, new major 3).
+// Bundles go in order of need, so what is kept never crowds out what is
+// urgent.
+func (s *Store) Prune() (int, error) {
 	files, err := filepath.Glob(s.path("signed", "*.json"))
 	if err != nil {
 		return 0, err
 	}
+	retired := map[string]bool{}
 	n := 0
 	for _, f := range files {
 		h := strings.SplitN(filepath.Base(f), "-", 2)[0]
-		done := true
-		for _, st := range sts {
-			ok := contains(st.Report.Off, h)
-			for _, g := range st.Report.Guards {
-				if g.Hash == h && g.Status == agent.Confirmed {
-					ok = true
+		r, seen := retired[h]
+		if !seen {
+			if raw, err := s.Guard(h); err == nil {
+				if g, err := guard.Parse(raw); err == nil {
+					r = Retired(g)
 				}
 			}
-			if !ok {
-				done = false
-				break
-			}
+			retired[h] = r
 		}
-		if done && os.Remove(f) == nil {
+		if r && os.Remove(f) == nil {
 			n++
 		}
 	}
 	return n, nil
+}
+
+// Retired says whether a guard's fixed builds cover every release it is
+// written for: then a machine needs it only until it boots the vendor's
+// fix, which its own updates bring.
+func Retired(g *guard.Guard) bool {
+	if len(g.For) == 0 {
+		return false
+	}
+	for _, t := range g.For {
+		for _, r := range t.Releases {
+			fixed := false
+			for _, u := range g.Until {
+				fixed = fixed || (u.OS == t.OS && u.Release == r)
+			}
+			if !fixed {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// writtenFor says whether a guard is written for a system.
+func writtenFor(g *guard.Guard, os, release string) bool {
+	for _, t := range g.For {
+		if t.OS == os && contains(t.Releases, release) {
+			return true
+		}
+	}
+	return false
 }
 
 func contains(xs []string, x string) bool {

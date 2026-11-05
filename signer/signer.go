@@ -358,9 +358,12 @@ type reportBody struct {
 
 // Checked is what the reports say, for the owner to read before signing.
 type Checked struct {
-	Lines    []string // one per machine
-	Pending  bool     // some machine has a policy change pending
-	OwnerSeq uint64   // the highest owner sequence any agent has accepted
+	Lines   []string // one per machine
+	Pending bool     // some machine has a policy change pending
+	// PendingOn says, for each machine with a change pending, which policy
+	// and since when: a Cancel that arrives after the delay is too late.
+	PendingOn map[string]PendingSeen
+	OwnerSeq  uint64 // the highest owner sequence any agent has accepted
 	// Off holds, for each machine, the guards the owner took off there, and
 	// HeldByHand the guards root took off there by hand.
 	Off        map[string][]string
@@ -412,6 +415,10 @@ func CheckReports(dir string, keysFrom *policy.Policy, unchecked []string, now t
 		c.Lines = append(c.Lines, line)
 		if r.Pending != nil {
 			c.Pending = true
+			if c.PendingOn == nil {
+				c.PendingOn = map[string]PendingSeen{}
+			}
+			c.PendingOn[k.Host] = PendingSeen{Hash: r.Pending.Hash, FirstSeen: r.Pending.FirstSeen}
 		}
 		if len(r.Off) > 0 {
 			if c.Off == nil {
@@ -433,6 +440,13 @@ func CheckReports(dir string, keysFrom *policy.Policy, unchecked []string, now t
 		return nil, fmt.Errorf("signer: no fresh signed report from %s; fetch them, or name each machine in -unchecked", strings.Join(missing, ", "))
 	}
 	return c, nil
+}
+
+// PendingSeen is a policy change a machine reports pending, and when it
+// first saw it.
+type PendingSeen struct {
+	Hash      string
+	FirstSeen time.Time
 }
 
 func checkOne(dir string, k policy.Key, chains map[string]bool, now time.Time) (string, *reportBody, error) {

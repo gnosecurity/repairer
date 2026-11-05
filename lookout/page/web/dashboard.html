@@ -15,6 +15,7 @@
 {{else}}<p class="small">Nothing on its way.</p>{{end}}
 
 <h2>Flaws reaching your machines</h2>
+{{range .FeedProblems}}<p class="bad">Feeds: {{.}}</p>{{end}}
 {{if .Findings}}<table><tr><th>Machine</th><th>Flaw</th><th>Package</th><th>Where it stands</th></tr>
 {{range .Findings}}<tr><td>{{.Host}}</td><td{{if .Exploited}} class="bad"{{end}}>{{.Flaw}}{{if .Exploited}} (exploited){{end}}</td>
 <td>{{.Package}} {{.Version}}</td><td>{{.State}}{{if .Fix}} ({{.Fix}}){{end}}</td></tr>{{end}}</table>

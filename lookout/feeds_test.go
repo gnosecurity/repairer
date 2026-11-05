@@ -237,3 +237,92 @@ func logPaths(h http.Handler, paths *[]string) http.Handler {
 		h.ServeHTTP(w, r)
 	})
 }
+
+// An OSV record that fails with anything but a 404 is tried once more, then
+// skipped and listed, so it can't stall every record after it (round 8,
+// minor 8).
+func TestOSVSkipsARecordThatFailsTwice(t *testing.T) {
+	now := time.Now().UTC()
+	list := fmt.Sprintf("%s,REC-3\n%s,REC-2\n", now.Add(-time.Minute).Format(time.RFC3339Nano), now.Add(-2*time.Hour).Format(time.RFC3339Nano))
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/Ubuntu/modified_id.csv":
+			fmt.Fprint(w, list)
+		case "/Ubuntu/REC-2.json":
+			http.Error(w, "no", http.StatusForbidden)
+		default:
+			fmt.Fprintf(w, `{"id":%q}`, strings.TrimSuffix(filepath.Base(r.URL.Path), ".json"))
+		}
+	}))
+	defer ts.Close()
+	dir := t.TempDir()
+	f := &Feeds{Dir: dir, Fetcher: &Fetcher{Dir: filepath.Join(dir, "copies")}, OSV: ts.URL}
+	s := f.osv("Ubuntu")
+	if n, err := s.Sync(context.Background()); err == nil || n != 0 {
+		t.Fatalf("the first failure: %d %v", n, err)
+	}
+	if n, err := s.Sync(context.Background()); err != nil || n != 2 {
+		t.Fatalf("the second: %d %v", n, err)
+	}
+	if _, err := os.Stat(filepath.Join(s.Dir, "REC-3.json")); err != nil {
+		t.Fatal("the record after the failing one wasn't fetched")
+	}
+	if sk := s.Skipped(); len(sk) != 1 || sk[0].ID != "REC-2" {
+		t.Fatalf("skipped %+v", sk)
+	}
+	found := false
+	for _, p := range f.Problems(time.Now()) {
+		found = found || strings.Contains(p, "record REC-2 skipped")
+	}
+	if !found {
+		t.Fatalf("not listed: %v", f.Problems(time.Now()))
+	}
+}
+
+// A feed whose copy is more than a day old is a problem the page shows; a
+// copy the feed says is current (304) counts as fresh (round 8, minor 8).
+func TestFeedProblems(t *testing.T) {
+	dir := t.TempDir()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("If-None-Match") != "" {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Header().Set("ETag", `"v1"`)
+		fmt.Fprint(w, `{"vulnerabilities":[]}`)
+	}))
+	defer ts.Close()
+	f := &Feeds{Dir: dir, Fetcher: &Fetcher{Dir: filepath.Join(dir, "copies")}, KEV: ts.URL}
+	if _, err := f.Fetcher.Get(context.Background(), "kev.json", ts.URL, 1<<20); err != nil {
+		t.Fatal(err)
+	}
+	stale := func() bool {
+		for _, p := range f.Problems(time.Now()) {
+			if strings.HasPrefix(p, "CISA's list: the copy is") {
+				return true
+			}
+		}
+		return false
+	}
+	if stale() {
+		t.Fatal("a fresh copy counted as stale")
+	}
+	old := time.Now().Add(-48 * time.Hour)
+	os.Chtimes(filepath.Join(dir, "copies", "kev.json"), old, old)
+	if !stale() {
+		t.Fatalf("a copy two days old: %v", f.Problems(time.Now()))
+	}
+	if _, err := f.Fetcher.Get(context.Background(), "kev.json", ts.URL, 1<<20); err != nil { // 304
+		t.Fatal(err)
+	}
+	if stale() {
+		t.Fatal("a copy the feed says is current still counted as stale")
+	}
+	never := false
+	for _, p := range f.Problems(time.Now()) {
+		never = never || p == "Debian's tracker: never fetched"
+	}
+	if !never {
+		t.Fatalf("a feed never fetched: %v", f.Problems(time.Now()))
+	}
+}

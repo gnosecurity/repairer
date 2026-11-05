@@ -118,8 +118,11 @@ func Admit(p *policy.Policy, host string, g *guard.Guard, ev Evidence, m Machine
 }
 
 // modelRefuses applies rule 6: the model's yes counts only outside critical
-// tiers, for a guard made of drops each narrowed by a packet feature or by
-// ports nothing on this machine listens on, within the caps.
+// tiers, for a guard made of drops each narrowed by IP options, within the
+// caps. A drop narrowed only by ports needs the owner: what serves a port
+// can change after admission, in another network namespace or behind
+// forwarding, and nothing re-checks it every minute yet (round 8, new
+// major 2). Listening still refuses such a drop with its own reason.
 func modelRefuses(tier *policy.Tier, g *guard.Guard, m Machine) string {
 	if tier.Critical {
 		return "tier " + tier.Name + " is critical"
@@ -140,6 +143,7 @@ func modelRefuses(tier *policy.Tier, g *guard.Guard, m Machine) string {
 				}
 			}
 		}
+		return "a drop narrowed only by ports needs your yes (" + b.Describe() + ")"
 	}
 	if len(m.ModelGuards) >= MaxModelGuards {
 		return fmt.Sprintf("this machine already has %d guards the model admitted", len(m.ModelGuards))

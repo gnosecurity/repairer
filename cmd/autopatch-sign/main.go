@@ -9,6 +9,7 @@
 //	autopatch-sign off    -policy P.json -hosts mail,web GUARD.json
 //	autopatch-sign on     -policy P.json -hosts mail GUARD.json
 //	autopatch-sign policy -policy OLD.json NEW.json
+//	autopatch-sign standing -policy P.json
 package main
 
 import (
@@ -22,6 +23,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -31,7 +33,7 @@ import (
 	"github.com/jaekwon/autopatch/signer"
 )
 
-const usage = `usage: autopatch-sign <yes|off|on|policy|cancel> [flags] FILE|HASH
+const usage = `usage: autopatch-sign <yes|off|on|policy|cancel|standing> [flags] FILE|HASH
 
   yes    GUARD.json   the owner's yes to a guard: -tiers A,B -until RFC3339 [-mode undo|keep] [-nocanary] [-kev KEV.json]
   off    GUARD.json   take a guard off some hosts and keep it off there: -hosts mail,web
@@ -39,6 +41,9 @@ const usage = `usage: autopatch-sign <yes|off|on|policy|cancel> [flags] FILE|HAS
   cancel HASH         cancel a pending policy change (allowed even after you signed a change of key)
   policy NEW.json     a policy change, against the policy in force (-policy); its keys are checked
                       against your address book (-confirm-keys to accept the differences shown)
+  standing            list your Yeses still in force, from the statements this tool kept, with
+                      the command to sign each again: a machine added or rebuilt starts at the
+                      current sequence and has none of them (only -policy is needed)
 
 Every command needs:
   -policy FILE     the policy in force (for policy: the one NEW replaces)
@@ -94,6 +99,23 @@ func run(ctx context.Context, cmd string, args []string, stdout io.Writer) error
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if cmd == "standing" {
+		if *policyFile == "" {
+			return errors.New("standing needs -policy")
+		}
+		if *configDir == "" {
+			h, err := os.UserHomeDir()
+			if err != nil {
+				return err
+			}
+			*configDir = filepath.Join(h, ".config", "autopatch")
+		}
+		cur, err := readPolicy(*policyFile)
+		if err != nil {
+			return err
+		}
+		return standing(*configDir, cur, time.Now(), stdout)
 	}
 	if fs.NArg() != 1 || *policyFile == "" || *reports == "" || *key == "" {
 		fs.Usage()
@@ -212,6 +234,16 @@ func run(ctx context.Context, cmd string, args []string, stdout io.Writer) error
 		if !checked.Pending {
 			notes = append(notes, "no machine reports a pending policy change")
 		}
+		// A Cancel that reaches a machine after the change took effect there
+		// can't stop it (round 8, minor 7).
+		for host, pd := range checked.PendingOn {
+			if pd.Hash != fs.Arg(0) {
+				continue
+			}
+			if left := time.Until(pd.FirstSeen.Add(time.Duration(cur.DelaySeconds) * time.Second)); left < 2*time.Hour {
+				notes = append(notes, fmt.Sprintf("on %s the change takes effect in %s; if this Cancel reaches it later, that machine stays on the new policy and holds your statements until root installs the policy in force again", host, max(left, 0).Round(time.Minute)))
+			}
+		}
 	case "policy":
 		if newPolicy, err = readPolicy(fs.Arg(0)); err != nil {
 			return err
@@ -273,6 +305,14 @@ func run(ctx context.Context, cmd string, args []string, stdout io.Writer) error
 		return err
 	}
 	st.LastSeq = stmt.Seq
+	// Cancelling the newest policy this tool signed puts the one in force
+	// back as the newest: the old key signs again, and reports are checked
+	// against its agents (round 8, minor 7).
+	if cmd == "cancel" && st.NewestPolicy != nil {
+		if np, err := policy.Parse(st.NewestPolicy); err == nil && np.Hash() == fs.Arg(0) {
+			st.NewestPolicy = cur.Canonical()
+		}
+	}
 	if newPolicy != nil {
 		st.NewestPolicy = newPolicy.Canonical()
 		if err := addToBook(*configDir, bookAdd); err != nil {
@@ -283,6 +323,74 @@ func run(ctx context.Context, cmd string, args []string, stdout io.Writer) error
 		return err
 	}
 	fmt.Fprintf(stdout, "Signed. Upload %s to the lookout's page.\n", *out)
+	return nil
+}
+
+// standing lists the owner's Yeses still in force, from the statements this
+// tool kept: for each guard and tier, the newest Yes, if it hasn't ended.
+// A machine added or rebuilt starts at the current sequence, so it has none
+// of them until they are signed again (round 8, new major 3).
+func standing(configDir string, p *policy.Policy, now time.Time, stdout io.Writer) error {
+	files, err := filepath.Glob(filepath.Join(configDir, "statements", p.Fleet, "*.json"))
+	if err != nil {
+		return err
+	}
+	type kept struct {
+		seq uint64
+		y   approve.Yes
+	}
+	newest := map[string]kept{} // hash/tier
+	for _, f := range files {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			return err
+		}
+		var m signer.Message
+		var tx approve.GnokeyTx
+		if json.Unmarshal(b, &m) != nil || json.Unmarshal(m.Tx, &tx) != nil || len(tx.Msg) != 1 || tx.Msg[0].Func != "Yes" {
+			continue
+		}
+		y, err := approve.ParseYes(approve.Call{Func: "Yes", Args: tx.Msg[0].Args})
+		if err != nil {
+			continue
+		}
+		for _, t := range y.Tiers {
+			if k, ok := newest[y.Hash+"/"+t]; !ok || m.Seq > k.seq {
+				newest[y.Hash+"/"+t] = kept{m.Seq, y}
+			}
+		}
+	}
+	// One line per statement, with only the tiers it is still the newest for.
+	tiers := map[uint64][]string{}
+	yeses := map[uint64]approve.Yes{}
+	for k, v := range newest {
+		if v.y.Until.After(now) {
+			tiers[v.seq] = append(tiers[v.seq], k[strings.Index(k, "/")+1:])
+			yeses[v.seq] = v.y
+		}
+	}
+	seqs := make([]uint64, 0, len(tiers))
+	for s := range tiers {
+		seqs = append(seqs, s)
+	}
+	sort.Slice(seqs, func(i, j int) bool { return seqs[i] < seqs[j] })
+	if len(seqs) == 0 {
+		fmt.Fprintln(stdout, "No Yes of yours is in force.")
+		return nil
+	}
+	fmt.Fprintln(stdout, "Your Yeses in force; sign each again for a machine added or rebuilt:")
+	for _, s := range seqs {
+		y := yeses[s]
+		ts := tiers[s]
+		sort.Strings(ts)
+		nc := ""
+		if y.NoCanary {
+			nc = " -nocanary"
+		}
+		fmt.Fprintf(stdout, "  statement %d, guard %.16s, tiers %s, until %s, mode %s%s\n    autopatch-sign yes -policy P.json -tiers %s -until %s -mode %s%s GUARD.json\n",
+			s, y.Hash, strings.Join(ts, ","), y.Until.UTC().Format(time.RFC3339), y.Mode, nc,
+			strings.Join(ts, ","), y.Until.UTC().Format(time.RFC3339), y.Mode, nc)
+	}
 	return nil
 }
 

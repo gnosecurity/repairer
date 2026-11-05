@@ -9,7 +9,6 @@ import (
 	"os"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/jaekwon/autopatch/agent"
 	"github.com/jaekwon/autopatch/approve"
@@ -19,7 +18,7 @@ import (
 // A store of 300 kept Tested statements still carries, to a machine that
 // isn't a canary, the owner's next statement and the canary's Healthy for
 // its want, and the bundle stays under the agent's 1 MB (round 7, new
-// major 2). Pruning forgets statements once every machine has their guard.
+// major 2). Pruning keeps every statement a machine may still need.
 func TestBundleInOrderOfNeed(t *testing.T) {
 	fl := newFleet(t)
 	_, rig, _ := ed25519.GenerateKey(nil)
@@ -83,21 +82,64 @@ func TestBundleInOrderOfNeed(t *testing.T) {
 	if !found {
 		t.Fatal("the canary's Healthy didn't make the bundle")
 	}
-	// Pruning: every machine reports guard 0 confirmed, so its statement goes.
-	confirmed := []agent.GuardState{{Hash: hashes[0], Status: agent.Confirmed}}
-	full := []HostStatus{
-		{Host: "backup", Time: time.Now(), Report: &agent.FleetReport{Guards: confirmed}},
-		{Host: "mail", Time: time.Now(), Report: &agent.FleetReport{Guards: confirmed}},
-	}
-	if n, err := store.Prune(full); err != nil || n != 1 {
+	// Every machine reports guard 0 confirmed. Its statement stays: a
+	// machine added or rebuilt later needs it too (round 8, new major 3).
+	if n, err := store.Prune(); err != nil || n != 0 {
 		t.Fatalf("pruned %d: %v", n, err)
 	}
-	// Guard 1 is confirmed everywhere too, but a machine is silent: nothing goes.
-	confirmed = []agent.GuardState{{Hash: hashes[1], Status: agent.Confirmed}}
-	full[0].Report.Guards, full[1].Report.Guards = confirmed, confirmed
-	full[1].Silent = true
-	if n, _ := store.Prune(full); n != 0 {
-		t.Fatal("pruned while a machine was silent")
+	bundleBudget = agent.MaxBundle - 64<<10
+	tested := func(sts []HostStatus) map[string]bool {
+		b, err := store.Bundle("mail", sts, fl.p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var bun agent.Bundle
+		if err := json.Unmarshal(b, &bun); err != nil {
+			t.Fatal(err)
+		}
+		got := map[string]bool{}
+		for _, sg := range bun.Signed {
+			if sg.Statement.Kind == approve.KindTested {
+				got[sg.Statement.Guard] = true
+			}
+		}
+		return got
+	}
+	ubuntu := &agent.Report{OS: agent.OSFacts{ID: "ubuntu", Version: "24.04"}}
+	rebuilt := []HostStatus{{Host: "mail", Report: &agent.FleetReport{Host: "mail", Facts: ubuntu}}} // empty state
+	if got := tested(rebuilt); !got[hashes[0]] || len(got) != 300 {
+		t.Fatalf("a rebuilt machine got %d Tested, guard 0's: %v", len(got), got[hashes[0]])
+	}
+	// A machine of another system gets none of them.
+	debian := []HostStatus{{Host: "mail", Report: &agent.FleetReport{Host: "mail", Facts: &agent.Report{OS: agent.OSFacts{ID: "debian", Version: "12"}}}}}
+	if got := tested(debian); len(got) != 0 {
+		t.Fatalf("a Debian machine got %d statements for Ubuntu's guards", len(got))
+	}
+	// A guard whose vendor's fixes cover every release it names is forgotten.
+	old, err := guard.Decode([]byte(`{"id":"test/old","version":1,"flaws":["CVE-2099-999"],"for":[{"os":"ubuntu","releases":["22.04","24.04"]}],
+		"blocks":[{"drop":{"family":"ipv4","protocol":"udp","ports":["9999"]}}],"breaks":"x",
+		"until":[{"os":"ubuntu","release":"22.04","kernel":"5.15.0-200.210"},{"os":"ubuntu","release":"24.04","kernel":"6.8.0-200.210"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AddGuard(old.Canonical()); err != nil {
+		t.Fatal(err)
+	}
+	sg, _ := approve.SignStatement(rig, approve.Statement{Version: approve.MemoVersion, Kind: approve.KindTested, Chain: "autopatch:vet", Guard: old.Hash(), Rig: strings.Repeat("0", 64)})
+	raw, _ := json.Marshal(sg)
+	if err := store.AddSigned(raw); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := store.Prune(); err != nil || n != 1 {
+		t.Fatalf("pruned %d for a guard every release has a fix for: %v", n, err)
+	}
+	if !Retired(old) {
+		t.Fatal("not retired")
+	}
+	if g, _ := guard.Decode([]byte(`{"id":"test/half","version":1,"flaws":["CVE-2099-998"],"for":[{"os":"ubuntu","releases":["22.04","24.04"]}],
+		"blocks":[{"drop":{"family":"ipv4","protocol":"udp","ports":["9998"]}}],"breaks":"x",
+		"until":[{"os":"ubuntu","release":"24.04","kernel":"6.8.0-200.210"}]}`)); Retired(g) {
+		t.Fatal("retired with one release still unfixed")
 	}
 	_ = context.Background
 }

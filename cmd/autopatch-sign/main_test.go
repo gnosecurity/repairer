@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -129,5 +130,74 @@ func TestSignYes(t *testing.T) {
 	out.Reset()
 	if err := run(context.Background(), "yes", yesArgs, &out); err == nil || !strings.Contains(err.Error(), "change of your key") {
 		t.Fatalf("signed with the old key after a change of key: %v", err)
+	}
+
+	// Cancelling that change puts the old key back: the tool signs with it
+	// again. Mail shows the change nearly through its delay, and the tool
+	// warns that a Cancel arriving later can't stop it there (round 8,
+	// minor 7).
+	body, _ = json.Marshal(map[string]any{"kind": "report", "chain": chain, "host": "mail", "time": time.Now().UTC(), "policy": p.Hash(), "owner_seq": 45,
+		"pending": map[string]any{"hash": np.Hash(), "first_seen": time.Now().Add(-23 * time.Hour).UTC()}})
+	sr, _ = json.Marshal(approve.SignReport(mailKey, body))
+	os.WriteFile(filepath.Join(reports, "mail.json"), sr, 0o644)
+	out.Reset()
+	cancelArgs := append(append([]string{}, common...), "-out", filepath.Join(dir, "cancel.json"), np.Hash())
+	if err := run(context.Background(), "cancel", cancelArgs, &out); err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	if !strings.Contains(out.String(), "on mail the change takes effect in") {
+		t.Errorf("no warning that the delay is nearly over:\n%s", out.String())
+	}
+	out.Reset()
+	if err := run(context.Background(), "yes", yesArgs, &out); err != nil {
+		t.Fatalf("the old key after the Cancel: %v\n%s", err, out.String())
+	}
+}
+
+// standing lists the Yeses in force, each with only the tiers it is still
+// the newest for, and leaves out ended ones: what to sign again for a
+// machine added or rebuilt (round 8, new major 3).
+func TestStanding(t *testing.T) {
+	dir := t.TempDir()
+	p, err := policy.Decode([]byte(`{"fleet":"standtest","replaces":"","delay_seconds":86400,
+		"signers":{"me":{"name":"owner","key":"02db41e6e79a9f5fc6813df46202e996d245ef327e5ff3cc47c11bdb46071ab08e"}},
+		"tiers":[{"name":"A","hosts":["mail"],"admit":["me"]},{"name":"B","hosts":["web"],"admit":["me"]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pfile := filepath.Join(dir, "policy.json")
+	os.WriteFile(pfile, p.Canonical(), 0o644)
+	kept := filepath.Join(dir, "config", "statements", "standtest")
+	os.MkdirAll(kept, 0o700)
+	g1, g2 := strings.Repeat("a", 64), strings.Repeat("b", 64)
+	laterT := time.Now().Add(48 * time.Hour).UTC().Truncate(time.Second)
+	later := laterT.Format(time.RFC3339)
+	unix := func(t time.Time) string { return strconv.FormatInt(t.Unix(), 10) }
+	write := func(seq int, fn string, args ...string) {
+		tx, _ := json.Marshal(map[string]any{"msg": []map[string]any{{"func": fn, "args": args}}})
+		m, _ := json.Marshal(map[string]any{"seq": seq, "tx": json.RawMessage(tx)})
+		os.WriteFile(filepath.Join(kept, strconv.Itoa(seq)+".json"), m, 0o600)
+	}
+	write(1, "Yes", g1, "A,B", unix(laterT), "undo")
+	write(2, "Yes", g1, "A", unix(laterT), "keep+nocanary")
+	write(3, "Yes", g2, "A", unix(time.Now().Add(-time.Hour)), "undo")
+	write(4, "Off", g1, "mail")
+	var out bytes.Buffer
+	if err := run(context.Background(), "standing", []string{"-policy", pfile, "-config", filepath.Join(dir, "config")}, &out); err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	for _, want := range []string{
+		"statement 1, guard aaaaaaaaaaaaaaaa, tiers B,",
+		"-tiers B -until " + later + " -mode undo GUARD.json",
+		"statement 2, guard aaaaaaaaaaaaaaaa, tiers A,",
+		"-tiers A -until " + later + " -mode keep -nocanary GUARD.json",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "bbbbbbbbbbbbbbbb") || strings.Contains(got, "statement 4") {
+		t.Errorf("an ended Yes or an Off listed:\n%s", got)
 	}
 }

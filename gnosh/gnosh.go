@@ -106,8 +106,10 @@ func Rule6(g *guard.Guard) error {
 		if b.Drop == nil {
 			return fmt.Errorf("it has a block that isn't a drop (%s)", b.Describe())
 		}
-		if !b.Drop.IPOptions && len(b.Drop.Ports) == 0 {
-			return fmt.Errorf("a drop narrowed by neither IP options nor ports (%s)", b.Describe())
+		if !b.Drop.IPOptions {
+			// Ports alone don't count: what serves a port can change after
+			// admission (round 8, new major 2).
+			return fmt.Errorf("a drop not narrowed by IP options (%s)", b.Describe())
 		}
 	}
 	return nil

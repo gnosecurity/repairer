@@ -208,6 +208,7 @@ func (s *OSVSync) Sync(ctx context.Context) (int, error) {
 		max = 5000
 	}
 	n := 0
+	failures := s.failures()
 	for _, c := range todo {
 		if n >= max {
 			break
@@ -215,10 +216,20 @@ func (s *OSVSync) Sync(ctx context.Context) (int, error) {
 		fetcher := &Fetcher{Dir: s.Dir, Client: s.Fetcher.Client}
 		if _, err := fetcher.Get(ctx, c.id+".json", s.Base+"/"+s.Ecosystem+"/"+c.id+".json", 16<<20); err != nil {
 			if !errors.Is(err, ErrNotFound) {
-				return n, fmt.Errorf("lookout: OSV record %s: %w", c.id, err) // try again next time
+				// Tried again next time; a record that fails twice (too large,
+				// refused) is skipped and listed, so it can't stall every
+				// record after it (round 8, minor 8).
+				failures[c.id]++
+				if failures[c.id] < 2 || ctx.Err() != nil {
+					s.saveFailures(failures)
+					return n, fmt.Errorf("lookout: OSV record %s: %w", c.id, err)
+				}
+				s.addSkipped(c.id, err.Error())
 			}
 			// A record listed but gone: skip it rather than stop every sync after it.
 		}
+		delete(failures, c.id)
+		s.saveFailures(failures)
 		os.Remove(filepath.Join(s.Dir, c.id+".json.meta")) // records are fetched by time, not by ETag
 		if err := s.setLast(c.at); err != nil {
 			return n, err
@@ -226,6 +237,48 @@ func (s *OSVSync) Sync(ctx context.Context) (int, error) {
 		n++
 	}
 	return n, nil
+}
+
+// Skipped is an OSV record skipped after failing twice.
+type Skipped struct {
+	ID  string    `json:"id"`
+	Why string    `json:"why"`
+	At  time.Time `json:"at"`
+}
+
+const maxSkipped = 100
+
+func (s *OSVSync) failures() map[string]int {
+	m := map[string]int{}
+	if b, err := os.ReadFile(filepath.Join(s.Dir, ".failures.json")); err == nil {
+		json.Unmarshal(b, &m)
+	}
+	return m
+}
+
+func (s *OSVSync) saveFailures(m map[string]int) {
+	if b, err := json.Marshal(m); err == nil && os.MkdirAll(s.Dir, 0o700) == nil {
+		os.WriteFile(filepath.Join(s.Dir, ".failures.json"), b, 0o600)
+	}
+}
+
+// Skipped lists the records this sync skipped, newest last.
+func (s *OSVSync) Skipped() []Skipped {
+	var out []Skipped
+	if b, err := os.ReadFile(filepath.Join(s.Dir, ".skipped.json")); err == nil {
+		json.Unmarshal(b, &out)
+	}
+	return out
+}
+
+func (s *OSVSync) addSkipped(id, why string) {
+	out := append(s.Skipped(), Skipped{ID: id, Why: why, At: time.Now().UTC()})
+	if len(out) > maxSkipped {
+		out = out[len(out)-maxSkipped:]
+	}
+	if b, err := json.Marshal(out); err == nil && os.MkdirAll(s.Dir, 0o700) == nil {
+		os.WriteFile(filepath.Join(s.Dir, ".skipped.json"), b, 0o600)
+	}
 }
 
 func (s *OSVSync) last() time.Time {

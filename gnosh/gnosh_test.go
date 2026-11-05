@@ -119,4 +119,15 @@ func TestRule6(t *testing.T) {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
+	// A drop narrowed only by ports: the model never signs it (round 8, new
+	// major 2).
+	port, err := guard.Decode([]byte(`{"id": "test/tcp80", "version": 1, "flaws": ["CVE-2099-80"],
+		"for": [{"os": "ubuntu", "releases": ["24.04"]}],
+		"blocks": [{"drop": {"family": "ipv4", "protocol": "tcp", "ports": ["80"]}}], "breaks": "http"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Rule6(port); err == nil {
+		t.Error("rule 6 allowed a drop narrowed only by ports")
+	}
 }

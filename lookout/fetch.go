@@ -72,6 +72,10 @@ func (f *Fetcher) Get(ctx context.Context, name, url string, max int64) (bool, e
 	defer res.Body.Close()
 	switch res.StatusCode {
 	case http.StatusNotModified:
+		// Checked now and current: the copy's time says when it was last
+		// known good, which the stale-feed alert reads.
+		now := time.Now()
+		os.Chtimes(filepath.Join(f.Dir, name), now, now)
 		return false, nil
 	case http.StatusNotFound:
 		return false, fmt.Errorf("%w: %s", ErrNotFound, url)

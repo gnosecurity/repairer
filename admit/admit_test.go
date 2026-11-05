@@ -153,6 +153,12 @@ func TestModelRule6(t *testing.T) {
 	if d := Admit(p, "backup", port, modelYes(port), listening, nonce, now); d.OK || !strings.Contains(d.Why, "listens on tcp port 8080") {
 		t.Fatalf("a drop on a listening port: %+v", d)
 	}
+	// Nothing listens here now, but a port served later, in a container or
+	// another namespace, would be cut: the model's yes doesn't count for a
+	// drop narrowed only by ports (round 8, new major 2).
+	if d := Admit(p, "backup", port, modelYes(port), Machine{}, nonce, now); d.OK || !strings.Contains(d.Why, "narrowed only by ports needs your yes") {
+		t.Fatalf("a drop narrowed only by ports, on the model's yes: %+v", d)
+	}
 	full := Machine{ModelGuards: [][]string{{"a"}, {"b"}, {"c"}}}
 	if d := Admit(p, "backup", opts, modelYes(opts), full, nonce, now); d.OK {
 		t.Fatal("a fourth model guard")

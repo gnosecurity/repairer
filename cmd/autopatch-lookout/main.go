@@ -30,13 +30,16 @@ import (
 	"github.com/jaekwon/autopatch/policy"
 )
 
-const usage = `usage: autopatch-lookout <collect|deliver|run|add|match> -config lookout.json [args]
+const usage = `usage: autopatch-lookout <collect|deliver|run|serve|feeds|add|match> -config lookout.json [args]
 
   collect          fetch every machine's signed report (ssh, the report key), keep the newest that verifies
   deliver          carry each machine its bundle (ssh, the intake key)
   run              collect and deliver every minute until stopped
   serve            run, and serve the page on -listen (127.0.0.1:8794; put TLS in front): sign in with
                    Adena as one of -admin (Jae's g1ecsu... by default)
+  feeds            fetch the flaw feeds once, with a deadline, and match them against the reports kept:
+                   run it hourly from its own timer, as its own user (write access to <state>/feeds
+                   only), so a slow or hostile feed holds up no delivery and is parsed apart
   add FILE...      keep a message from autopatch-sign, a guard, a policy, or a signed Tested or model yes
   match            which machines flaws reach: -ubuntu CVE.json (repeat), -debian TRACKER.json with -cve ID
                    (repeat), -kev KEV.json
@@ -103,21 +106,16 @@ func run(ctx context.Context, cmd string, args []string, stdout io.Writer) error
 	store := &lookout.Store{Dir: filepath.Join(c.State, "store")}
 	feeds := &lookout.Feeds{Dir: filepath.Join(c.State, "feeds"), Fetcher: &lookout.Fetcher{Dir: filepath.Join(c.State, "feeds", "copies")}}
 	var lastFeeds time.Time
-	// refresh reads the feeds once an hour and matches them against the
-	// machines; every request is the same whatever the fleet runs.
-	refresh := func(sts []lookout.HostStatus) {
+	// feedProblems says, once an hour, what is wrong with the feeds: the
+	// feeds command fetches them, apart from the delivery loop (round 8,
+	// minor 8), and a feed a day old is an alert.
+	feedProblems := func() {
 		if time.Since(lastFeeds) < time.Hour {
 			return
 		}
 		lastFeeds = time.Now()
-		for _, err := range feeds.Refresh(ctx) {
-			fmt.Fprintf(stdout, "feeds: %v\n", err)
-		}
-		ms := lookout.Machines(sts)
-		if fs, err := feeds.Find(ms, feeds.Watch(store, ms), time.Now()); err != nil {
-			fmt.Fprintf(stdout, "feeds: %v\n", err)
-		} else {
-			fmt.Fprintf(stdout, "feeds: %d findings leave a machine exposed\n", len(fs))
+		for _, pr := range feeds.Problems(time.Now()) {
+			fmt.Fprintf(stdout, "ALERT feeds: %s\n", pr)
 		}
 	}
 
@@ -178,17 +176,35 @@ func run(ctx context.Context, cmd string, args []string, stdout io.Writer) error
 		}
 		for {
 			sts := collect()
-			if n, err := store.Prune(sts); err == nil && n > 0 {
-				fmt.Fprintf(stdout, "forgot %d signed statements every machine is past\n", n)
+			if n, err := store.Prune(); err == nil && n > 0 {
+				fmt.Fprintf(stdout, "forgot %d signed statements for guards whose fixes cover every release\n", n)
 			}
 			deliver(sts)
-			refresh(sts)
+			feedProblems()
 			select {
 			case <-ctx.Done():
 				return nil
 			case <-time.After(time.Minute):
 			}
 		}
+	case "feeds":
+		// Every request is the same whatever the fleet runs: whole feeds,
+		// and every changed OSV record.
+		fctx, cancel := context.WithTimeout(ctx, lookout.FeedDeadline)
+		defer cancel()
+		for _, err := range feeds.Refresh(fctx) {
+			fmt.Fprintf(stdout, "feeds: %v\n", err)
+		}
+		ms := lookout.Machines(col.Kept())
+		fs, err := feeds.Find(ms, feeds.Watch(store, ms), time.Now())
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "feeds: %d findings leave a machine exposed\n", len(fs))
+		for _, pr := range feeds.Problems(time.Now()) {
+			fmt.Fprintf(stdout, "ALERT feeds: %s\n", pr)
+		}
+		return nil
 	case "add":
 		for _, f := range fs.Args() {
 			b, err := os.ReadFile(f)

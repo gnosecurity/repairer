@@ -138,8 +138,10 @@ type view struct {
 	Machines []machineRow
 	Waiting  []waitRow
 	Findings []lookout.Finding
-	Notice   string
-	Problem  string
+	// FeedProblems: a feed a day old, or a record skipped (round 8, minor 8).
+	FeedProblems []string
+	Notice       string
+	Problem      string
 }
 
 type machineRow struct {
@@ -206,6 +208,7 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 		if fs, err := s.Feeds.Findings(); err == nil {
 			v.Findings = fs[:min(len(fs), 200)] // exploited first
 		}
+		v.FeedProblems = s.Feeds.Problems(s.Now())
 	}
 	s.render(w, "dashboard.html", v)
 }

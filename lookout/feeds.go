@@ -64,6 +64,40 @@ func (f *Feeds) Refresh(ctx context.Context) []error {
 	return errs
 }
 
+// StaleFeed is how old a feed's copy may grow before the lookout says so: a
+// feed that goes quiet looks just like a quiet day.
+const StaleFeed = 24 * time.Hour
+
+// FeedDeadline bounds one refresh: a slow or hostile feed can't hold it
+// longer.
+const FeedDeadline = 30 * time.Minute
+
+// Problems says what is wrong with the feeds now: copies more than a day
+// old (or never fetched), and OSV records skipped after failing twice
+// (round 8, minor 8).
+func (f *Feeds) Problems(now time.Time) []string {
+	var out []string
+	age := func(name, path string) {
+		fi, err := os.Stat(path)
+		switch {
+		case err != nil:
+			out = append(out, name+": never fetched")
+		case now.Sub(fi.ModTime()) > StaleFeed:
+			out = append(out, fmt.Sprintf("%s: the copy is %s old", name, now.Sub(fi.ModTime()).Round(time.Hour)))
+		}
+	}
+	age("CISA's list", filepath.Join(f.Fetcher.Dir, "kev.json"))
+	age("Debian's tracker", filepath.Join(f.Fetcher.Dir, "debian-tracker.json"))
+	for _, eco := range []string{"Ubuntu", "Debian"} {
+		age("OSV "+eco, filepath.Join(f.Fetcher.Dir, "osv-"+strings.ToLower(eco)+"-modified.csv"))
+		for _, sk := range f.osv(eco).Skipped() {
+			out = append(out, fmt.Sprintf("OSV %s: record %s skipped after failing twice (%s)", eco, sk.ID, sk.Why))
+		}
+	}
+	age("the findings", filepath.Join(f.Dir, "findings.json"))
+	return out
+}
+
 // LoadOSV loads one ecosystem's whole OSV set from its all.zip, the first
 // time; Refresh keeps it up to date after.
 func (f *Feeds) LoadOSV(eco, zipPath string) (int, error) {

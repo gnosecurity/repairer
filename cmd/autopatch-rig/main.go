@@ -177,16 +177,28 @@ func contains(xs []string, x string) bool {
 	return false
 }
 
-// rigHash names the rig that ran: its scripts (which pin QEMU's version),
-// the image and the agent binary, so a Tested says exactly which rig passed
-// the guard, and anyone can rerun it on other hardware (round 8, minor 9).
+// rigHash names the rig that ran: its scripts (which pin QEMU's version,
+// the images and the packages added to them), the image and the agent
+// binary, so a Tested says exactly which rig passed the guard, and anyone
+// can rerun it on other hardware (round 8, minor 9). The scripts are the
+// files directly in the scripts directory, the ones a run uses; folders in
+// it, such as planted/ (the rig's own test guards), aren't part of a run.
 func rigHash(scripts, image, agentBin string) (string, error) {
 	if image == "" || agentBin == "" {
 		return "", errors.New("hash needs -image and -agent")
 	}
 	h := sha256.New()
-	files, err := filepath.Glob(filepath.Join(scripts, "*"))
-	if err != nil || len(files) == 0 {
+	all, err := filepath.Glob(filepath.Join(scripts, "*"))
+	if err != nil {
+		return "", err
+	}
+	var files []string
+	for _, f := range all {
+		if fi, err := os.Stat(f); err == nil && fi.Mode().IsRegular() {
+			files = append(files, f)
+		}
+	}
+	if len(files) == 0 {
 		return "", fmt.Errorf("no rig scripts in %s", scripts)
 	}
 	sort.Strings(files)

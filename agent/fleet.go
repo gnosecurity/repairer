@@ -52,7 +52,21 @@ type Fleet struct {
 	// clears; Skipped lists the newest statements taken but not acted on.
 	Held    string    `json:"held,omitempty"`
 	Skipped []Skipped `json:"skipped,omitempty"`
+	// Reboots are the owner's signed Reboots for this host not yet spent
+	// (B3), oldest first: each lets it reboot into one kernel, once, before
+	// its deadline, whatever its tier says.
+	Reboots []RebootOrder `json:"reboots,omitempty"`
 }
+
+// RebootOrder is the owner's signed Reboot for this host.
+type RebootOrder struct {
+	Seq      uint64    `json:"seq"`
+	Kernel   string    `json:"kernel"`
+	NotAfter time.Time `json:"not_after"`
+}
+
+// maxReboots is how many of the owner's Reboots the fleet file keeps.
+const maxReboots = 4
 
 // Skipped is an owner statement this agent took but couldn't act on.
 type Skipped struct {

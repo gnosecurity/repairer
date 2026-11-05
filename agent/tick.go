@@ -210,6 +210,8 @@ type TickResult struct {
 	Held string
 	// Health holds the checks failing now, from this tick's one sample.
 	Health map[string]string
+	// Reboot says where a reboot into a newer kernel stands (B3).
+	Reboot string `json:",omitempty"`
 }
 
 // Tick is what the minute timer runs: take in the spool, take off what the
@@ -268,7 +270,18 @@ func (a *Agent) Tick(ctx context.Context) (*TickResult, error) {
 	if werr := a.answerWants(ctx, f, p, sample); werr != nil {
 		res.Refused = append(res.Refused, "answering canaries' wants: "+werr.Error())
 	}
-	return res, errors.Join(err, a.writeReport(ctx, f, p, res))
+	rb, reboot, rerr := a.rebootStep(ctx, f, p, sample)
+	res.Reboot = rb
+	if rerr != nil {
+		res.Refused = append(res.Refused, "reboot: "+rerr.Error())
+	}
+	werr := a.writeReport(ctx, f, p, res)
+	if reboot {
+		// Last, once the report and the fleet file are written; the reboot's
+		// own record is already on disk, so a failed report doesn't stop it.
+		err = errors.Join(err, a.rebootNow(ctx))
+	}
+	return res, errors.Join(err, werr)
 }
 
 // followKeep makes each guard's keep follow the owner's newest Yes for this
@@ -831,7 +844,7 @@ func (a *Agent) allEvidence() (map[string]*Evidence, error) {
 	return out, nil
 }
 
-func sortedKeys(m map[string]*Evidence) []string {
+func sortedKeys[V any](m map[string]V) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
 		out = append(out, k)
@@ -1182,6 +1195,22 @@ func (a *Agent) ownerMessage(ctx context.Context, f *Fleet, p *policy.Policy, bu
 			return what, "the pending change here is another policy", nil
 		}
 		f.Pending = nil
+		return what, "", nil
+	case "Reboot":
+		// A Reboot lets one host reboot into one kernel, once, before its
+		// deadline; the memo is rebuilt from its arguments.
+		r, err := approve.VerifyReboot(m.Tx, chain, m.Seq, owner)
+		if err != nil {
+			return what, err.Error(), nil
+		}
+		what = "Reboot " + r.Host + " into " + r.Kernel
+		if r.Host != f.Host {
+			return what + " for another host", "", nil
+		}
+		f.Reboots = append(f.Reboots, RebootOrder{Seq: m.Seq, Kernel: r.Kernel, NotAfter: time.Unix(r.NotAfter, 0).UTC()})
+		if n := len(f.Reboots); n > maxReboots {
+			f.Reboots = f.Reboots[n-maxReboots:]
+		}
 		return what, "", nil
 	}
 	return what, "not a kind of statement this release acts on", nil

@@ -9,6 +9,7 @@
 //	autopatch-sign off    -policy P.json -hosts mail,web GUARD.json
 //	autopatch-sign on     -policy P.json -hosts mail GUARD.json
 //	autopatch-sign policy -policy OLD.json NEW.json
+//	autopatch-sign reboot -policy P.json -kernel 6.8.0-149-generic -until 2026-11-06T09:00:00Z web
 //	autopatch-sign standing -policy P.json
 package main
 
@@ -33,12 +34,14 @@ import (
 	"github.com/jaekwon/autopatch/signer"
 )
 
-const usage = `usage: autopatch-sign <yes|off|on|policy|cancel|standing> [flags] FILE|HASH
+const usage = `usage: autopatch-sign <yes|off|on|policy|cancel|reboot|standing> [flags] FILE|HASH|HOST
 
   yes    GUARD.json   the owner's yes to a guard: -tiers A,B -until RFC3339 [-mode undo|keep] [-nocanary] [-kev KEV.json]
   off    GUARD.json   take a guard off some hosts and keep it off there: -hosts mail,web
   on     GUARD.json   lift an Off on some hosts: -hosts mail (a Yes never does)
   cancel HASH         cancel a pending policy change (allowed even after you signed a change of key)
+  reboot HOST         let one machine reboot into a newer kernel, once, whatever its tier says:
+                      -kernel RELEASE (as uname -r gives it) -until RFC3339 (rounded down to the minute)
   policy NEW.json     a policy change, against the policy in force (-policy); its keys are checked
                       against your address book (-confirm-keys to accept the differences shown)
   standing            list your Yeses still in force, from the statements this tool kept, with
@@ -90,11 +93,12 @@ func run(ctx context.Context, cmd string, args []string, stdout io.Writer) error
 	out := fs.String("out", "", "where to write the message for the lookout (default: <statement>-<seq>.json)")
 	assumeYes := fs.Bool("yes", false, "don't ask before signing (tests only)")
 	tiers := fs.String("tiers", "", "yes: the tiers, comma-separated")
-	until := fs.String("until", "", "yes: when the yes ends, RFC 3339 in UTC")
+	until := fs.String("until", "", "yes: when the yes ends; reboot: its deadline; RFC 3339 in UTC")
 	mode := fs.String("mode", "", "yes: undo or keep (default: keep for a flaw on CISA's list outside critical tiers, else undo)")
 	nocanary := fs.Bool("nocanary", false, "yes: every machine of the tiers at once, without waiting for a canary")
 	kevFile := fs.String("kev", "", "yes: CISA's known exploited list (JSON), for the default mode")
 	hosts := fs.String("hosts", "", "off: the hosts, comma-separated")
+	kernel := fs.String("kernel", "", "reboot: the kernel release to boot into, as uname -r gives it")
 	confirmKeys := fs.Bool("confirm-keys", false, "policy: accept the key differences shown, and add new names to your book")
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
 	if err := fs.Parse(args); err != nil {
@@ -243,6 +247,28 @@ func run(ctx context.Context, cmd string, args []string, stdout io.Writer) error
 			if left := time.Until(pd.FirstSeen.Add(time.Duration(cur.DelaySeconds) * time.Second)); left < 2*time.Hour {
 				notes = append(notes, fmt.Sprintf("on %s the change takes effect in %s; if this Cancel reaches it later, that machine stays on the new policy and holds your statements until root installs the policy in force again", host, max(left, 0).Round(time.Minute)))
 			}
+		}
+	case "reboot":
+		host := fs.Arg(0)
+		end, err := time.Parse(time.RFC3339, *until)
+		if err != nil {
+			return fmt.Errorf("-until: %w", err)
+		}
+		end = end.UTC().Truncate(time.Minute)
+		if !end.After(time.Now()) {
+			return fmt.Errorf("-until %s has passed", end.Format(time.RFC3339))
+		}
+		if end.After(time.Now().Add(7 * 24 * time.Hour)) {
+			notes = append(notes, "the deadline is more than a week away: until then, this machine reboots into "+*kernel+" whenever it is the newest kernel installed and the gates pass")
+		}
+		if stmt, err = signer.PrepareReboot(cur, host, *kernel, end, *seq); err != nil {
+			return err
+		}
+		switch said, ok := checked.Reboot[host]; {
+		case !ok:
+			notes = append(notes, host+"'s report says no reboot is owed")
+		case !strings.HasPrefix(said, "a reboot into "+*kernel+" is owed"):
+			notes = append(notes, host+"'s report says: "+said)
 		}
 	case "policy":
 		if newPolicy, err = readPolicy(fs.Arg(0)); err != nil {

@@ -14,6 +14,9 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"strconv"
+	"strings"
+	"time"
 )
 
 // MaxSize is the largest policy file the agent reads.
@@ -74,6 +77,70 @@ type Tier struct {
 	// Critical tiers (the sentry and validator) never count the model.
 	Critical       bool `json:"critical,omitempty"`
 	SpacingSeconds int  `json:"spacing_seconds,omitempty"`
+	// Reboot says who reboots this tier's hosts into a newer kernel (B3):
+	// "window", the agent itself inside RebootWindow, once the gates pass;
+	// "yes", only on the owner's signed Reboot (the default); or "never".
+	Reboot string `json:"reboot,omitempty"`
+	// RebootWindow is when a "window" tier may reboot: "HH:MM-HH:MM", UTC.
+	// It may wrap midnight ("23:30-00:30").
+	RebootWindow string `json:"reboot_window,omitempty"`
+	// RebootAfter names a host, in another tier, whose agent must have
+	// signed Healthy since its own last reboot before this tier's hosts
+	// reboot: the validator waits for the sentry.
+	RebootAfter string `json:"reboot_after,omitempty"`
+}
+
+// RebootMode is the tier's reboot mode, "yes" when it names none.
+func (t *Tier) RebootMode() string {
+	if t.Reboot == "" {
+		return "yes"
+	}
+	return t.Reboot
+}
+
+// ParseWindow reads "HH:MM-HH:MM" as minutes after midnight, UTC.
+func ParseWindow(s string) (start, end int, err error) {
+	a, b, ok := strings.Cut(s, "-")
+	if !ok {
+		return 0, 0, fmt.Errorf("policy: a reboot window is HH:MM-HH:MM, not %q", s)
+	}
+	clock := func(x string) (int, error) {
+		if len(x) != 5 || x[2] != ':' {
+			return 0, fmt.Errorf("policy: %q isn't HH:MM", x)
+		}
+		h, err1 := strconv.Atoi(x[:2])
+		m, err2 := strconv.Atoi(x[3:])
+		if err1 != nil || err2 != nil || h < 0 || h > 23 || m < 0 || m > 59 {
+			return 0, fmt.Errorf("policy: %q isn't HH:MM", x)
+		}
+		return h*60 + m, nil
+	}
+	if start, err = clock(a); err != nil {
+		return
+	}
+	if end, err = clock(b); err != nil {
+		return
+	}
+	if start == end {
+		return 0, 0, fmt.Errorf("policy: the reboot window %q is empty", s)
+	}
+	return start, end, nil
+}
+
+// InWindow says whether t falls in the tier's reboot window: from its
+// start, up to but not at its end, wrapping midnight when the end comes
+// first.
+func (t *Tier) InWindow(now time.Time) bool {
+	start, end, err := ParseWindow(t.RebootWindow)
+	if err != nil {
+		return false
+	}
+	u := now.UTC()
+	m := u.Hour()*60 + u.Minute()
+	if start < end {
+		return m >= start && m < end
+	}
+	return m >= start || m < end
 }
 
 // Flow is a protected flow: traffic no guard may block on these hosts.
@@ -284,6 +351,18 @@ func (p *Policy) Validate() error {
 		if len(t.Canaries) > 2 {
 			return fmt.Errorf("policy: tier %s names more than two canaries", t.Name)
 		}
+		switch t.Reboot {
+		case "window":
+			if _, _, err := ParseWindow(t.RebootWindow); err != nil {
+				return fmt.Errorf("policy: tier %s: %w", t.Name, err)
+			}
+		case "", "yes", "never":
+			if t.RebootWindow != "" {
+				return fmt.Errorf("policy: tier %s has a reboot window but reboots %s", t.Name, t.RebootMode())
+			}
+		default:
+			return fmt.Errorf("policy: tier %s: reboot is window, yes or never, not %q", t.Name, t.Reboot)
+		}
 		for _, c := range t.Canaries {
 			if hostTier[c] != t.Name {
 				return fmt.Errorf("policy: canary %s isn't in tier %s", c, t.Name)
@@ -300,6 +379,17 @@ func (p *Policy) Validate() error {
 			return errors.New("policy: a flow or check names no hosts")
 		}
 		return nil
+	}
+	for _, t := range p.Tiers {
+		if t.RebootAfter == "" {
+			continue
+		}
+		switch tier, ok := hostTier[t.RebootAfter]; {
+		case !ok:
+			return fmt.Errorf("policy: tier %s reboots after %s, which is in no tier", t.Name, t.RebootAfter)
+		case tier == t.Name:
+			return fmt.Errorf("policy: tier %s reboots after %s, one of its own hosts", t.Name, t.RebootAfter)
+		}
 	}
 	for _, f := range p.Protected {
 		if err := known(f.Hosts); err != nil {

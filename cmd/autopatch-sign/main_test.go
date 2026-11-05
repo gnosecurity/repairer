@@ -152,6 +152,31 @@ func TestSignYes(t *testing.T) {
 	if err := run(context.Background(), "yes", yesArgs, &out); err != nil {
 		t.Fatalf("the old key after the Cancel: %v\n%s", err, out.String())
 	}
+
+	// A Reboot for mail, whose report says no reboot is owed: the tool says
+	// so, and the agent's check accepts what it wrote.
+	out.Reset()
+	at := time.Now().Add(2 * time.Hour).UTC().Truncate(time.Minute)
+	rebootArgs := append(append([]string{}, common...), "-kernel", "6.8.0-149-generic", "-until", at.Add(30*time.Second).Format(time.RFC3339), "-out", filepath.Join(dir, "reboot.json"), "mail")
+	if err := run(context.Background(), "reboot", rebootArgs, &out); err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	if !strings.Contains(out.String(), "mail's report says no reboot is owed") || !strings.Contains(out.String(), "Reboot mail into 6.8.0-149-generic, once, not after "+at.Format("2006-01-02 15:04")+" UTC") {
+		t.Fatalf("output:\n%s", out.String())
+	}
+	b, _ = os.ReadFile(filepath.Join(dir, "reboot.json"))
+	var rm signer.Message
+	if err := json.Unmarshal(b, &rm); err != nil {
+		t.Fatal(err)
+	}
+	if r, err := approve.VerifyReboot(rm.Tx, chain, rm.Seq, owner); err != nil || r.Host != "mail" || r.NotAfter != at.Unix() {
+		t.Fatalf("the agent's check: %v %+v", err, r)
+	}
+	// A deadline that has passed is refused.
+	past := append(append([]string{}, common...), "-kernel", "6.8.0-149-generic", "-until", time.Now().Add(-time.Minute).UTC().Format(time.RFC3339), "mail")
+	if err := run(context.Background(), "reboot", past, &out); err == nil || !strings.Contains(err.Error(), "has passed") {
+		t.Fatalf("a past deadline: %v", err)
+	}
 }
 
 // standing lists the Yeses in force, each with only the tiers it is still

@@ -3,6 +3,7 @@ package policy
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 // example is a fleet's policy with test keys, written readably.
@@ -68,6 +69,13 @@ func TestRefusals(t *testing.T) {
 		{"a delay of a minute", `"delay_seconds": 86400`, `"delay_seconds": 60`, "delay"},
 		{"one builder", `"model": [`, `"builders": [{"name": "b1", "key": "8888888888888888888888888888888888888888888888888888888888888888"}], "model": [`, "two builders"},
 		{"an unknown field", `"fleet": "home",`, `"fleet": "home", "trust": "all",`, "unknown field"},
+		{"an unknown reboot mode", `"spacing_seconds": 900}`, `"spacing_seconds": 900, "reboot": "sometimes"}`, "window, yes or never"},
+		{"a window tier without a window", `"spacing_seconds": 900}`, `"spacing_seconds": 900, "reboot": "window"}`, "HH:MM-HH:MM"},
+		{"a window past 23:59", `"spacing_seconds": 900}`, `"spacing_seconds": 900, "reboot": "window", "reboot_window": "23:00-24:00"}`, "isn't HH:MM"},
+		{"an empty window", `"spacing_seconds": 900}`, `"spacing_seconds": 900, "reboot": "window", "reboot_window": "03:00-03:00"}`, "empty"},
+		{"a window on a yes tier", `"spacing_seconds": 900}`, `"spacing_seconds": 900, "reboot_window": "03:00-04:00"}`, "reboots yes"},
+		{"rebooting after an unknown host", `"critical": true}`, `"critical": true, "reboot_after": "kourt"}`, "in no tier"},
+		{"rebooting after its own host", `"critical": true}`, `"critical": true, "reboot_after": "sentry"}`, "its own hosts"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -101,5 +109,41 @@ func TestRigsPinned(t *testing.T) {
 	p.Tiers[0].Admit = []string{"me", "model"}
 	if err := p.RigsPinned(); err != nil {
 		t.Fatalf("neither rig nor vetters: %v", err)
+	}
+}
+
+// A tier's reboot fields: the mode defaults to "yes"; a window tier names
+// when, which may wrap midnight; an ordered tier names a host of another
+// tier.
+func TestRebootWindow(t *testing.T) {
+	p, err := Decode([]byte(strings.Replace(strings.Replace(example,
+		`"spacing_seconds": 900}`, `"spacing_seconds": 900, "reboot": "window", "reboot_window": "23:30-00:30"}`, 1),
+		`"critical": true}`, `"critical": true, "reboot_after": "backup"}`, 1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, b := p.Tiers[0], p.Tiers[1]
+	if a.RebootMode() != "window" || b.RebootMode() != "yes" || b.RebootAfter != "backup" {
+		t.Fatalf("modes %q %q, after %q", a.RebootMode(), b.RebootMode(), b.RebootAfter)
+	}
+	at := func(hm string) time.Time {
+		tm, _ := time.Parse("2006-01-02 15:04", "2026-11-05 "+hm)
+		return tm
+	}
+	for hm, want := range map[string]bool{"23:29": false, "23:30": true, "23:59": true, "00:00": true, "00:29": true, "00:30": false, "12:00": false} {
+		if got := a.InWindow(at(hm)); got != want {
+			t.Errorf("%s: in the window %v, want %v", hm, got, want)
+		}
+	}
+	day := Tier{Reboot: "window", RebootWindow: "03:00-04:00"}
+	if !day.InWindow(at("03:00")) || day.InWindow(at("04:00")) || day.InWindow(at("02:59")) {
+		t.Error("03:00-04:00")
+	}
+	if b.InWindow(at("03:00")) {
+		t.Error("a tier with no window is in one")
+	}
+	c, err := Parse(append(p.Canonical(), '\n'))
+	if err != nil || c.Hash() != p.Hash() || c.Tiers[0].RebootWindow != "23:30-00:30" {
+		t.Fatalf("canonical: %v", err)
 	}
 }

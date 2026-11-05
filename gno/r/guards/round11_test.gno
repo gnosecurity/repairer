@@ -29,16 +29,16 @@ func TestVoteThreshold(cur realm, t *testing.T) {
 	cases := []struct {
 		weights []int64
 		says    []string // what each owner votes; "" stays away
-		spare   bool     // a ticket withdrawn while the round waited: marked, not yet out of the tree
+		leaving int      // an owner unstaked before the filing: parked, and still in the vote; -1 for none
 		want    string
 	}{
-		{[]int64{100_000_000, 100_000_000, 100_000_000}, []string{ok, "", ""}, false, Undecided},
-		{[]int64{100_000_001, 100_000_000, 100_000_000}, []string{ok, "", ""}, false, Tested},
-		{[]int64{110_000_000, 110_000_000, 80_000_000}, []string{ok, lie, ""}, false, Undecided},
-		{[]int64{110_000_000, 100_000_000, 90_000_000}, []string{ok, lie, fails}, false, Tested},
-		{[]int64{100_000_001, 100_000_000, 100_000_000}, []string{ok, "", ""}, true, Tested},
+		{[]int64{100_000_000, 100_000_000, 100_000_000}, []string{ok, "", ""}, -1, Undecided},
+		{[]int64{100_000_001, 100_000_000, 100_000_000}, []string{ok, "", ""}, -1, Tested},
+		{[]int64{110_000_000, 110_000_000, 80_000_000}, []string{ok, lie, ""}, -1, Undecided},
+		{[]int64{110_000_000, 100_000_000, 90_000_000}, []string{ok, lie, fails}, -1, Tested},
+		{[]int64{100_000_001, 100_000_000, 100_000_000, 100_000_000}, []string{ok, "", "", ""}, 3, Undecided},
 	}
-	stranger, spare := testutils.TestAddress("stranger"), testutils.TestAddress("spare")
+	stranger := testutils.TestAddress("stranger")
 	for n, c := range cases {
 		reset()
 		Reruns, PanelSizes = 0, nil
@@ -47,22 +47,17 @@ func TestVoteThreshold(cur realm, t *testing.T) {
 			testing.SetRealm(u(w))
 			stakeAmount(t, cur, c.weights[i])
 		}
-		if c.spare {
-			testing.SetRealm(u(spare))
-			stakeAmount(t, cur, 100_000_000)
-			Unstake(cross(cur), len(owners))
+		if c.leaving >= 0 {
+			testing.SetRealm(u(owners[c.leaving]))
+			Unstake(cross(cur), c.leaving)
 		}
 		testing.SetRealm(u(anyone))
 		send(PoolFee)
 		Fund(cross(cur))
 		send(0)
-		testing.SkipHeights(UnbondBlocks)
+		testing.SkipHeights(MinTicketAge)
 		testing.SetRealm(u(worker))
 		id := file(t, cur, ok, 1001)
-		if c.spare { // withdrawn while the checkers' round waits: the vote mustn't count its weight
-			testing.SetRealm(u(spare))
-			Withdraw(cross(cur), len(owners))
-		}
 		testing.SetRealm(u(anyone))
 		drawn := draw(t, cur, id, 1001, sig1001)
 		for _, d := range drawn {
@@ -96,7 +91,7 @@ func TestVoteThreshold(cur realm, t *testing.T) {
 		}
 		testing.SetRealm(u(anyone))
 		if s := Tally(cross(cur), id); s != c.want {
-			t.Errorf("case %d (%v voting %v): %s, want %s", n, c.weights, c.says, s, c.want)
+			t.Errorf("case %d (%v voting %v, %d leaving): %s, want %s", n, c.weights, c.says, c.leaving, s, c.want)
 		}
 	}
 }
@@ -395,8 +390,8 @@ func TestDrainedTicketLeaves(cur realm, t *testing.T) {
 	if tk.leaving == 0 || LiveStake() != 0 {
 		t.Fatalf("under half: leaving %d, live %d", tk.leaving, LiveStake())
 	}
-	if sum, left, _ := below(nTickets); sum != 30_000_000 || left != 30_000_000 {
-		t.Fatalf("the tree: %d, %d leaving", sum, left)
+	if sum, left, _, parked := below(nTickets); sum != 0 || left != 0 || parked != 30_000_000 {
+		t.Fatalf("the tree: %d, %d leaving, %d parked", sum, left, parked) // no round waits: parked at once
 	}
 }
 
@@ -445,8 +440,11 @@ func TestFloorYoungStake(cur realm, t *testing.T) {
 	}
 	testing.SetRealm(u(eve))
 	stakeOne(t, cur)
-	Unstake(cross(cur), 3) // leaving before the filing: not in the floor either
 	testing.SkipHeights(MinTicketAge)
+	testing.SetRealm(u(worker))
+	file(t, cur, ok, 1001) // an earlier filing: its round waits, so eve's ticket stays where draws see it
+	testing.SetRealm(u(eve))
+	Unstake(cross(cur), 3) // leaving before the filing: not in the floor either
 	testing.SetRealm(u(dave))
 	stakeOne(t, cur) // too young for the filing: the live stake passes the floor, the draw's weight doesn't
 	testing.SetRealm(u(worker))
@@ -557,9 +555,11 @@ func TestShowersSaidItEveryRun(cur realm, t *testing.T) {
 	}
 }
 
-// Withdrawals while a round waits are marked, and Compact takes them out
-// MaxSettle at a time once no round waits; a withdrawal when none waits
-// takes its own weight out at once (round 11, new major 2).
+// Tickets that start leaving while a round waits are pending; withdrawals
+// of pending tickets while a round waits are marked; once no round waits, a
+// draw parks or takes out four of them, and Compact the rest, MaxSettle at
+// a time; a parked ticket's withdrawal takes it out of the parked weight at
+// once (round 11, new major 2).
 func TestCompactInSteps(cur realm, t *testing.T) {
 	reset()
 	MaxSettle = 2
@@ -569,38 +569,138 @@ func TestCompactInSteps(cur realm, t *testing.T) {
 		stakeOne(t, cur)
 	}
 	var spares []address
-	for i := 1; i <= 6; i++ {
+	for i := 1; i <= 8; i++ {
 		a := testutils.TestAddress("spare" + itoa(i))
 		spares = append(spares, a)
 		testing.SetRealm(u(a))
 		stakeOne(t, cur)
-		Unstake(cross(cur), len(owners)+i-1)
+	}
+	testing.SkipHeights(MinTicketAge)
+	testing.SetRealm(u(worker))
+	file(t, cur, ok, 1001) // its round waits while the spares leave
+	for i, a := range spares {
+		testing.SetRealm(u(a))
+		Unstake(cross(cur), len(owners)+i)
 	}
 	testing.SkipHeights(UnbondBlocks)
 	testing.SetRealm(u(worker))
 	id := file(t, cur, ok, 1001)
-	for i, a := range spares[:5] {
+	for i, a := range spares[:7] {
 		testing.SetRealm(u(a))
 		Withdraw(cross(cur), len(owners)+i)
 	}
-	if len(dead) != 5 {
-		t.Fatalf("%d marked", len(dead))
+	if len(pending) != 8 {
+		t.Fatalf("%d pending", len(pending))
 	}
 	testing.SetRealm(u(anyone))
-	draw(t, cur, id, 1001, sig1001)
-	for _, want := range []int{3, 1, 0} {
+	draw(t, cur, id, 1001, sig1001) // no round waits after it: it parks or takes out four
+	if len(pending) != 4 {
+		t.Fatalf("after the draw %d pending", len(pending))
+	}
+	for _, want := range []int{2, 0} {
 		if n := Compact(cross(cur)); n != want {
 			t.Fatalf("Compact left %d, want %d", n, want)
 		}
 	}
-	if sum, left, gone := below(nTickets); sum != 5*MinTicket || left != MinTicket || gone != 0 {
-		t.Fatalf("after Compact: %d, %d leaving, %d withdrawn", sum, left, gone)
+	if sum, left, gone, parked := below(nTickets); sum != 4*MinTicket || left != 0 || gone != 0 || parked != MinTicket {
+		t.Fatalf("after Compact: %d, %d leaving, %d withdrawn, %d parked", sum, left, gone, parked)
 	}
-	testing.SetRealm(u(spares[5]))
-	Withdraw(cross(cur), len(owners)+5) // no round waits now
-	if sum, left, gone := below(nTickets); sum != 4*MinTicket || left != 0 || gone != 0 || len(dead) != 0 {
-		t.Fatalf("a withdrawal with no round waiting: %d, %d leaving, %d withdrawn, %d marked", sum, left, gone, len(dead))
+	testing.SetRealm(u(spares[7]))
+	Withdraw(cross(cur), len(owners)+7) // parked: out at once
+	if sum, left, gone, parked := below(nTickets); sum != 4*MinTicket || left != 0 || gone != 0 || parked != 0 {
+		t.Fatalf("a parked ticket's withdrawal: %d, %d leaving, %d withdrawn, %d parked", sum, left, gone, parked)
 	}
+}
+
+// A ticket withdrawn while a round waits is marked, not yet out of the
+// tree; the vote leaves it out of its weight all the same (round 11, new
+// major 2): one owner's 100,000,001 of the 300,000,001 that can vote is over
+// a third, where the marked ticket's 100,000,000 more would make it not.
+func TestVoteLeavesOutWithdrawn(cur realm, t *testing.T) {
+	reset()
+	Reruns, PanelSizes = 0, nil
+	owners := ownersN(3)
+	for i, w := range owners {
+		testing.SetRealm(u(w))
+		stakeAmount(t, cur, []int64{100_000_001, 100_000_000, 100_000_000}[i])
+	}
+	spare := testutils.TestAddress("spare")
+	testing.SetRealm(u(spare))
+	stakeAmount(t, cur, 100_000_000) // ticket 3
+	testing.SetRealm(u(anyone))
+	send(PoolFee)
+	Fund(cross(cur))
+	send(0)
+	testing.SkipHeights(MinTicketAge)
+	testing.SetRealm(u(worker))
+	file(t, cur, ok, 1001) // an earlier filing: its round waits through the spare's leaving and the draw below
+	testing.SetRealm(u(spare))
+	Unstake(cross(cur), 3)
+	testing.SetRealm(u(worker))
+	id := file(t, cur, ok, 1001)
+	testing.SetRealm(u(anyone))
+	drawn := draw(t, cur, id, 1001, sig1001)
+	for _, c := range drawn {
+		testing.SetRealm(u(c))
+		CommitCheck(cross(cur), id, Commitment(c, "check", ok, salt(c)))
+	}
+	for _, c := range append([]address{worker}, drawn...) {
+		testing.SetRealm(u(c))
+		RevealCheck(cross(cur), id, ok, salt(c))
+	}
+	testing.SetRealm(u(anyone))
+	Settle(cross(cur), id)
+	stranger := testutils.TestAddress("stranger")
+	testing.SetRealm(u(stranger))
+	send(ObjectionBond)
+	Object(cross(cur), id, lie)
+	send(0)
+	testing.SkipHeights(UnbondBlocks)
+	testing.SetRealm(u(worker))
+	file(t, cur, ok, 1001) // a later filing, whose round waits while the spare withdraws
+	testing.SetRealm(u(spare))
+	Withdraw(cross(cur), 3)
+	if _, _, gone, _ := below(nTickets); gone != 100_000_000 {
+		t.Fatalf("the spare's withdrawal marked %d", gone)
+	}
+	testing.SetRealm(u(anyone))
+	OpenPool(cross(cur), id)
+	testing.SetRealm(u(owners[0]))
+	CommitVote(cross(cur), id, "0", Commitment(owners[0], "vote", ok, "v"))
+	testing.SkipHeights(PoolCommitWindow + 1)
+	RevealVote(cross(cur), id, ok, "v")
+	testing.SetRealm(u(anyone))
+	if s := Tally(cross(cur), id); s != Tested {
+		t.Errorf("the vote: %s", s)
+	}
+}
+
+// Stake unstaked and never withdrawn is parked out of what draws see, so a
+// whale's many leaving tickets can't make every draw run out of tries
+// (found building round 11): 120 tickets of 100 GNOT leave beside four
+// owners' 10 GNOT each, and the filing is still drawn.
+func TestLeavingStakeDoesntCrowdDraws(cur realm, t *testing.T) {
+	reset()
+	for _, w := range []address{alice, bob, carol, dave} {
+		testing.SetRealm(u(w))
+		stakeOne(t, cur)
+	}
+	whale := testutils.TestAddress("whale")
+	testing.SetRealm(u(whale))
+	for i := 0; i < 120; i++ {
+		stakeAmount(t, cur, 100_000_000)
+	}
+	testing.SkipHeights(MinTicketAge)
+	for i := 0; i < 120; i++ {
+		Unstake(cross(cur), 4+i)
+	}
+	if sum, _, _, parked := below(nTickets); sum != 4*MinTicket || parked != 120*100_000_000 {
+		t.Fatalf("the tree: %d drawn from, %d parked", sum, parked)
+	}
+	testing.SetRealm(u(worker))
+	id := file(t, cur, ok, 1001)
+	testing.SetRealm(u(anyone))
+	draw(t, cur, id, 1001, sig1001)
 }
 
 // zeroNodes counts nodes of the tree with nothing below them: the paths
@@ -610,7 +710,7 @@ func zeroNodes(n *sumNode) int {
 		return 0
 	}
 	z := zeroNodes(n.l) + zeroNodes(n.r)
-	if n.sum == 0 && n != sumRoot {
+	if n.sum == 0 && n.parked == 0 && n != sumRoot {
 		z++
 	}
 	return z
@@ -634,8 +734,8 @@ func TestTreeDropsEmptyPaths(cur realm, t *testing.T) {
 	if z := zeroNodes(sumRoot); z != 0 {
 		t.Errorf("%d empty nodes left in the tree", z)
 	}
-	if sum, left, _ := below(nTickets); sum != MinTicket || left != MinTicket {
-		t.Errorf("the tree holds %d, %d leaving", sum, left)
+	if sum, left, _, parked := below(nTickets); sum != 0 || left != 0 || parked != MinTicket {
+		t.Errorf("the tree holds %d, %d leaving, %d parked", sum, left, parked)
 	}
 }
 
@@ -727,5 +827,100 @@ func TestPanelNobodyEligible(cur realm, t *testing.T) {
 	DrawPanel(cross(cur), id)
 	if st, _, _ := State(id); st != Pool || FundBalance() != int64(PanelSizes[0])*PanelFee || get(id).panelCost != 0 {
 		t.Errorf("nobody to seat: %s, fund %d, the dispute's cost %d", st, FundBalance(), get(id).panelCost)
+	}
+}
+
+// One who showed the last word two ways, as the worker who said it and as
+// the appellant who brought it back, gets one share, as each other who
+// showed it does (round 11, minor 3): one checker lies, a panel says what
+// it said, the worker appeals, and the next panel says what the worker and
+// the two honest checkers said.
+func TestShowerCountedOnce(cur realm, t *testing.T) {
+	reset()
+	Reruns = 0
+	owners := ownersN(16)
+	for _, w := range owners {
+		testing.SetRealm(u(w))
+		stakeOne(t, cur)
+	}
+	testing.SetRealm(u(anyone))
+	send(10_000_000)
+	Fund(cross(cur))
+	send(0)
+	testing.SkipHeights(MinTicketAge)
+	before := balances(append([]address{worker}, owners...)...)
+	testing.SetRealm(u(worker))
+	id := file(t, cur, ok, 1001)
+	testing.SetRealm(u(anyone))
+	drawn := draw(t, cur, id, 1001, sig1001)
+	liar := drawn[0]
+	for _, c := range drawn {
+		testing.SetRealm(u(c))
+		CommitCheck(cross(cur), id, Commitment(c, "check", or(map[address]string{liar: lie}[c], ok), salt(c)))
+	}
+	for _, c := range append([]address{worker}, drawn...) {
+		testing.SetRealm(u(c))
+		RevealCheck(cross(cur), id, or(map[address]string{liar: lie}[c], ok), salt(c))
+	}
+	aim(1003)
+	testing.SetRealm(u(anyone))
+	if s := Settle(cross(cur), id); s != Panel {
+		t.Fatalf("without reruns: %s", s)
+	}
+	SubmitBeacon(cross(cur), 1003, sig1003)
+	DrawPanel(cross(cur), id)
+	first, _ := PanelOf(id)
+	seats1 := seatMap(id, first)
+	for _, p := range first { // the first panel says what the liar said
+		testing.SetRealm(u(p))
+		CommitCheck(cross(cur), id, Commitment(p, "check", lie, salt(p)))
+	}
+	for _, p := range first {
+		testing.SetRealm(u(p))
+		RevealCheck(cross(cur), id, lie, salt(p))
+	}
+	testing.SetRealm(u(anyone))
+	if s := Settle(cross(cur), id); s != Appealable {
+		t.Fatalf("the first panel's word: %s", s)
+	}
+	aim(1004)
+	testing.SetRealm(u(worker))
+	bond := AppealCost(id)
+	send(bond)
+	Appeal(cross(cur), id)
+	send(0)
+	testing.SetRealm(u(anyone))
+	SubmitBeacon(cross(cur), 1004, sig1004)
+	DrawPanel(cross(cur), id)
+	second, size2 := PanelOf(id)
+	seats2 := seatMap(id, second)
+	for _, p := range second {
+		testing.SetRealm(u(p))
+		CommitCheck(cross(cur), id, Commitment(p, "check", ok, salt(p)))
+	}
+	for _, p := range second {
+		testing.SetRealm(u(p))
+		RevealCheck(cross(cur), id, ok, salt(p))
+	}
+	testing.SetRealm(u(anyone))
+	Settle(cross(cur), id)
+	testing.SkipHeights(AppealWindow + 1)
+	if s := Settle(cross(cur), id); s != Tested {
+		t.Fatalf("the last word: %s", s)
+	}
+	taken := Slash * int64(1+sumSeats(seats1)) // the liar's check and every seat of the first panel
+	refill := least(taken, int64(size2)*PanelFee)
+	each := (taken - refill) * ShowShare / 100 / 3 // the worker once, and the two honest checkers
+	want := map[address]int64{worker: FilingBond - 2*CheckFee - FundFee + each + bond}
+	for _, c := range drawn[1:] {
+		want[c] += CheckFee + each
+	}
+	for _, o := range owners {
+		want[o] += PanelFee * int64(seats2[o])
+	}
+	for _, a := range append([]address{worker}, owners...) {
+		if got := bal(a) - before[a]; got != want[a] {
+			t.Errorf("%s: got %d, want %d", a, got, want[a])
+		}
 	}
 }

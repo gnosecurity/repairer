@@ -83,8 +83,8 @@ func OpenPool(cur realm, id int) string {
 	if f.state != Pool {
 		panic("guards: not waiting for the pool")
 	}
-	sum, _, gone := below(f.oldBelow)
-	total := sum - gone // tickets withdrawn by now can't vote
+	sum, _, gone, parked := below(f.oldBelow)
+	total := sum - gone + parked // tickets withdrawn by now can't vote; leaving ones can
 	if total <= 0 {
 		return undecided(cur, f, id) // round 9, minor 10
 	}

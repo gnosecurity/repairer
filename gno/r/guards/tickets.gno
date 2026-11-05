@@ -13,22 +13,29 @@ import (
 // A ticket's weight in every draw is the stake it was staked with, fixed;
 // fines and slashes lower what is left to charge, never the weight. A tree
 // of weight sums over ticket numbers draws a ticket in sumDepth reads, so
-// no call walks every ticket. The tree is changed in place, and each node
-// keeps the weight below it, how much of that is leaving, and how much is
-// withdrawn but not yet taken out. A draw takes tickets staked MinTicketAge
-// before the filing (a prefix of ticket numbers, found at Commit) and not
-// leaving when its round was fixed, and reads the tree as it is; nothing
-// changes the weight below that prefix while the round waits for its draw:
+// no call walks every ticket. The tree is changed in place. Each node keeps
+// the weight below it that draws see (sum), how much of that is leaving and
+// how much withdrawn but not yet taken out, and the weight parked: tickets
+// leaving, moved out of what draws see but still bonded and still voting. A
+// draw takes tickets staked MinTicketAge before the filing (a prefix of
+// ticket numbers, found at Commit) and not leaving when its round was
+// fixed, and reads the tree as it is; nothing changes what draws see below
+// that prefix while the round waits for its draw:
 //   - a stake appends a ticket above every prefix (ticket numbers only rise);
-//   - unstaking and charges never change a weight;
-//   - a withdrawal while some round waits only marks its weight withdrawn:
-//     the ticket was leaving UnbondBlocks before, longer than DrawDeadline,
-//     so every waiting draw sets it aside anyway. Its weight comes out once
-//     no round waits (Withdraw takes its own out at once when none does;
-//     Compact takes out the rest).
-// A draw must come within DrawDeadline of its round being fixed, so any
-// ticket it names is still there to charge, and a round nobody draws stops
-// holding the tree back.
+//   - charges never change a weight;
+//   - a ticket that starts leaving while some round waits stays where it is,
+//     marked leaving, and is parked once no round waits; one that starts
+//     leaving when none waits is parked at once. So stake unstaked and never
+//     withdrawn can't crowd the draws (found building round 11);
+//   - a withdrawal of a parked ticket takes it out of the parked weight,
+//     which draws don't see; of one not parked yet, while some round waits,
+//     only marks it withdrawn: it was leaving UnbondBlocks before, longer
+//     than DrawDeadline, so every waiting draw sets it aside anyway.
+// Whatever waits for no round to wait is done by Compact, MaxSettle tickets
+// at a time, by Withdraw, Draw and DrawPanel a few at a time, or at once
+// when nothing waits. A draw must come within DrawDeadline of its round
+// being fixed, so any ticket it names is still there to charge, and a round
+// nobody draws stops holding the tree back.
 
 type ticket struct {
 	id      int
@@ -39,6 +46,8 @@ type ticket struct {
 	leaving int64 // Unstake's height, or when charges left it under the floor; 0 while staked
 	open    int   // unsettled seats it holds: checks and panel seats it was drawn into
 	gone    bool  // withdrawn: its stake paid back; its weight out of the tree, or marked withdrawn there until Compact
+	parked  bool  // leaving, its weight moved out of what draws see
+	out     bool  // its weight is out of the tree altogether
 	votes   int   // the pool votes whose charges it has settled, in order (pool.gno)
 }
 
@@ -46,24 +55,25 @@ type ticket struct {
 const sumDepth = 32
 
 type sumNode struct {
-	sum  int64 // the weight of the tickets below, as draws see it
-	left int64 // how much of it is leaving (withdrawn ones too)
-	gone int64 // how much of it is withdrawn, waiting for Compact
-	l, r *sumNode
+	sum    int64 // the weight of the tickets below, as draws see it
+	left   int64 // how much of it is leaving (withdrawn ones too)
+	gone   int64 // how much of it is withdrawn, waiting for Compact
+	parked int64 // the weight of tickets leaving, out of what draws see
+	l, r   *sumNode
 }
 
 var (
 	sumRoot = &sumNode{}
 	active  int64           // the stake of every ticket not leaving, at what is left of it
-	dead    []int           // tickets withdrawn while a round waited: their weight is still in the tree, marked
+	pending []int           // tickets whose weight waits for no round to wait: to park, or to take out
 	waits   = avl.NewTree() // key(fixedAt)+key(filing) → true: rounds waiting for their draw
 )
 
 // addPath adds to the sums on ticket i's path, in place, and drops the rest
 // of the path where nothing is left below (round 11, new major 2).
-func addPath(i int, sum, left, gone int64) {
+func addPath(i int, sum, left, gone, parked int64) {
 	n := sumRoot
-	n.sum, n.left, n.gone = n.sum+sum, n.left+left, n.gone+gone
+	n.sum, n.left, n.gone, n.parked = n.sum+sum, n.left+left, n.gone+gone, n.parked+parked
 	for d := sumDepth - 1; d >= 0; d-- {
 		next := n.r
 		if i>>d&1 == 0 {
@@ -77,8 +87,8 @@ func addPath(i int, sum, left, gone int64) {
 				n.r = next
 			}
 		}
-		next.sum, next.left, next.gone = next.sum+sum, next.left+left, next.gone+gone
-		if next.sum == 0 { // nothing below: every node under it is on this path, and empty
+		next.sum, next.left, next.gone, next.parked = next.sum+sum, next.left+left, next.gone+gone, next.parked+parked
+		if next.sum == 0 && next.parked == 0 { // nothing below: every node under it is on this path, and empty
 			if i>>d&1 == 0 {
 				n.l = nil
 			} else {
@@ -91,16 +101,16 @@ func addPath(i int, sum, left, gone int64) {
 }
 
 // below sums the tickets numbered below k: their weight as draws see it,
-// how much of it is leaving, and how much is withdrawn.
-func below(k int) (sum, left, gone int64) {
+// how much of that is leaving, how much withdrawn, and the weight parked.
+func below(k int) (sum, left, gone, parked int64) {
 	n := sumRoot
 	if k >= 1<<sumDepth {
-		return n.sum, n.left, n.gone
+		return n.sum, n.left, n.gone, n.parked
 	}
 	for d := sumDepth - 1; d >= 0 && n != nil; d-- {
 		if k>>d&1 == 1 {
 			if n.l != nil {
-				sum, left, gone = sum+n.l.sum, left+n.l.left, gone+n.l.gone
+				sum, left, gone, parked = sum+n.l.sum, left+n.l.left, gone+n.l.gone, parked+n.l.parked
 			}
 			n = n.r
 		} else {
@@ -122,9 +132,9 @@ func roundsWait() bool {
 	return wait
 }
 
-// Compact takes the weight of tickets withdrawn while rounds waited out of
-// the tree, up to MaxSettle of them, once no round waits for its draw; it
-// says how many are left. Anyone may call it.
+// Compact, once no round waits for its draw, parks tickets that started
+// leaving while rounds waited and takes out those withdrawn meanwhile, up to
+// MaxSettle of them; it says how many are left. Anyone may call it.
 func Compact(cur realm) int {
 	caller(cur)
 	return compact(MaxSettle)
@@ -132,14 +142,22 @@ func Compact(cur realm) int {
 
 func compact(max int) int {
 	if roundsWait() {
-		return len(dead)
+		return len(pending)
 	}
-	for ; max > 0 && len(dead) > 0; max-- {
-		t := ticketAt(dead[len(dead)-1])
-		dead = dead[:len(dead)-1]
-		addPath(t.id, -t.weight, -t.weight, -t.weight)
+	for ; max > 0 && len(pending) > 0; max-- {
+		t := ticketAt(pending[len(pending)-1])
+		pending = pending[:len(pending)-1]
+		switch {
+		case t.out || t.parked: // done already
+		case t.gone:
+			addPath(t.id, -t.weight, -t.weight, -t.weight, 0)
+			t.out = true
+		default:
+			addPath(t.id, -t.weight, -t.weight, 0, t.weight)
+			t.parked = true
+		}
 	}
-	return len(dead)
+	return len(pending)
 }
 
 // LiveStake is the stake of every ticket not leaving, at what is left of it.
@@ -156,7 +174,7 @@ func StakeTicket(cur realm) int {
 	t := &ticket{id: nTickets, owner: who, weight: n, stake: n, height: now(), votes: len(allVotes)}
 	nTickets++
 	tickets.Set(key(uint64(t.id)), t)
-	addPath(t.id, t.weight, 0, 0)
+	addPath(t.id, t.weight, 0, 0, 0)
 	active += n
 	emitTicket("TicketStaked", t)
 	return t.id
@@ -173,10 +191,18 @@ func Unstake(cur realm, id int) {
 	leave(t)
 }
 
+// leave stops a ticket being drawn into rounds fixed from now on: parked at
+// once when no round waits, or marked leaving until none does.
 func leave(t *ticket) {
 	t.leaving = now()
 	active -= t.stake
-	addPath(t.id, 0, t.weight, 0)
+	if roundsWait() {
+		addPath(t.id, 0, t.weight, 0, 0)
+		pending = append(pending, t.id)
+	} else {
+		addPath(t.id, -t.weight, 0, 0, t.weight)
+		t.parked = true
+	}
 }
 
 // MaxSettle is how many pool votes one call settles for a ticket, so no
@@ -213,13 +239,17 @@ func Withdraw(cur realm, id int) {
 	settleVotes(t, MaxSettle)
 	n := t.stake
 	t.stake, t.gone = 0, true
-	if roundsWait() { // marked; out once no round waits (round 11, new major 2)
-		addPath(t.id, 0, 0, t.weight)
-		dead = append(dead, t.id)
-	} else {
-		addPath(t.id, -t.weight, -t.weight, 0)
-		compact(4)
+	switch {
+	case t.parked: // draws don't see it
+		addPath(t.id, 0, 0, 0, -t.weight)
+		t.parked, t.out = false, true
+	case roundsWait(): // marked; out once no round waits (round 11, new major 2); it is pending since it left
+		addPath(t.id, 0, 0, t.weight, 0)
+	default:
+		addPath(t.id, -t.weight, -t.weight, 0, 0)
+		t.out = true
 	}
+	compact(4)
 	pay(cur, t.owner, n)
 }
 
@@ -274,7 +304,7 @@ func eligibleFor(f *filing, t *ticket, fixed int64, seats bool) bool {
 // tries); it changes nothing. The weight below the filing's prefix is what
 // it was when the round was fixed (see the top of this file).
 func pick(sig []byte, what string, id, nth, n int, f *filing, seats bool) []*ticket {
-	total, _, _ := below(f.oldBelow)
+	total, _, _, _ := below(f.oldBelow)
 	if total != f.total {
 		panic("guards: the tree changed under a waiting round")
 	}
@@ -336,21 +366,15 @@ func setAside(aside map[int]int64, i int, w int64) {
 	}
 }
 
-// party says whether an owner has a stake in how a filing ends: its worker
-// (the first check, from the reveal on, before which nothing is drawn or
-// objected to), a checker, its objector or an appellant. A party is never
-// drawn as a checker; it may sit on panels, as anyone may.
+// party says whether an owner is the filing's worker (the first check,
+// from the reveal on, before which nothing is drawn or objected to) or one
+// of its checkers: it is never drawn as a checker, and can't object to the
+// agreement it made. Anyone, a party too, may sit on a panel or appeal
+// (round 11, new major 1); checkers are never drawn after an objection, so
+// an objector or appellant needn't be a party.
 func party(f *filing, a address) bool {
-	if f.objector != nil && f.objector.owner == a {
-		return true
-	}
 	for _, c := range f.checks {
 		if c.owner == a {
-			return true
-		}
-	}
-	for _, ap := range f.appeals {
-		if ap.who == a {
 			return true
 		}
 	}

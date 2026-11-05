@@ -241,7 +241,7 @@ func Reveal(cur realm, id int, guard, system, transcriptCommitment, salt string)
 	keepGuard(id, h, strings.TrimSuffix(guard, "\n"))
 	f.checks = []*check{{ticket: -1, owner: who, commitment: transcriptCommitment}}
 	fixRound(f, id)
-	sum, left, _ := below(f.oldBelow)
+	sum, left, _, _ := below(f.oldBelow)
 	f.floorAt = sum - left
 	f.state = Revealed
 	chain.Emit("GuardRevealed", "filing", strconv.Itoa(id), "hash", h, "system", system, "round", strconv.FormatUint(f.round, 10), "guard", strings.TrimSuffix(guard, "\n"))
@@ -257,7 +257,7 @@ func fixRound(f *filing, id int) {
 		r = (t-drandGenesis)/drandPeriod + 1
 	}
 	f.round, f.fixedAt = uint64(r+DrawDelay), now()
-	f.total, _, _ = below(f.oldBelow)
+	f.total, _, _, _ = below(f.oldBelow)
 	f.waiting = true
 	waits.Set(waitKey(f, id), true)
 }
@@ -337,6 +337,7 @@ func Draw(cur realm, id int) string {
 	}
 	picks := pick(roundSig(f), "draw", id, f.draws, Checkers-(len(f.checks)-1), f, false)
 	unwait(f, id)
+	compact(4)
 	payDrawer(cur, who, f)
 	if picks == nil {
 		return abandon(cur, f, id, true) // too few staked owners: nobody's fault

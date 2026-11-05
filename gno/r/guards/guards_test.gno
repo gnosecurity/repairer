@@ -52,7 +52,7 @@ var (
 func reset() {
 	tickets, nTickets, filings, nFilings = avl.NewTree(), 0, avl.NewTree(), 0
 	levels, records, beacon, burned, fund = avl.NewTree(), avl.NewTree(), avl.NewTree(), 0, 0
-	sumRoot, active, dead, waits = &sumNode{}, 0, nil, avl.NewTree()
+	sumRoot, active, pending, waits = &sumNode{}, 0, nil, avl.NewTree()
 	votes, allVotes, openVotes = map[int]*poolVote{}, nil, nil
 	texts, byGuard = avl.NewTree(), avl.NewTree()
 	MinTicketAge, RevealWindow, CheckWindow, DrawDeadline, UnbondBlocks, DrawDelay = 10, 5, 20, 30, 60, 3
@@ -649,8 +649,8 @@ func TestLapsedDrawLosesBond(cur realm, t *testing.T) {
 		t.Error("a round past its deadline still holds the tree")
 	}
 	Abandon(cross(cur), id)
-	if st, _, _ := State(id); st != Abandoned {
-		t.Fatalf("abandoned: %s", st)
+	if st, _, _ := State(id); st != Abandoned || waits.Size() != 0 {
+		t.Fatalf("abandoned: %s, %d rounds kept", st, waits.Size())
 	}
 	if got := bal(worker) - before; got != 0 || FundBalance() != FilingBond {
 		t.Errorf("the filer got back %d of its bond; fund %d", got, FundBalance())
@@ -860,10 +860,11 @@ func TestFloor(cur realm, t *testing.T) {
 	}
 }
 
-// Withdrawing tickets unstaked long before, after the round is fixed and
-// before its draw, changes no pick: their weight stays in the tree, marked
-// withdrawn, until no round waits; then Compact takes it out (round 10, new
-// major 1; round 11, new major 2).
+// Withdrawing tickets that started leaving while an earlier round waited,
+// after a later round is fixed and before its draw, changes no pick: their
+// weight stays where draws see it, marked withdrawn, until no round waits;
+// then the draw's compaction takes it out (round 10, new major 1; round 11,
+// new major 2).
 func TestWithdrawMovesNoDraw(cur realm, t *testing.T) {
 	owners := []address{alice, bob, carol, dave, eve, anyone}
 	spares := []address{testutils.TestAddress("s1"), testutils.TestAddress("s2"), testutils.TestAddress("s3")}
@@ -874,24 +875,33 @@ func TestWithdrawMovesNoDraw(cur realm, t *testing.T) {
 			testing.SetRealm(u(w))
 			stakeOne(t, cur)
 		}
-		for i, w := range spares { // staked and unstaked at once: never drawn, but in the tree until withdrawn
+		for i, w := range spares {
 			testing.SetRealm(u(w))
 			send(MinTicket + int64(i+1))
 			StakeTicket(cross(cur))
 			send(0)
+		}
+		testing.SkipHeights(MinTicketAge)
+		testing.SetRealm(u(worker))
+		file(t, cur, ok, 1001) // an earlier filing, whose round waits while the spares leave
+		for i, w := range spares {
+			testing.SetRealm(u(w))
 			Unstake(cross(cur), len(owners)+i)
 		}
-		testing.SkipHeights(UnbondBlocks)
+		if len(pending) != 3 {
+			t.Fatalf("%d leaving while a round waits are pending", len(pending))
+		}
+		testing.SkipHeights(UnbondBlocks) // the earlier round lapses; nobody compacts
 		testing.SetRealm(u(worker))
 		id := file(t, cur, ok, 1001)
 		if pass == 1 {
-			for i, w := range spares { // after the round is fixed, before the draw
+			for i, w := range spares { // after the round is fixed, before its draw
 				testing.SetRealm(u(w))
 				Withdraw(cross(cur), len(owners)+i)
 			}
-			sum, left, gone := below(nTickets)
-			if sum != 9*MinTicket+6 || left != 3*MinTicket+6 || gone != 3*MinTicket+6 || len(dead) != 3 {
-				t.Fatalf("while the round waits the tree holds %d, %d leaving, %d withdrawn; %d marked", sum, left, gone, len(dead))
+			sum, left, gone, parked := below(nTickets)
+			if sum != 9*MinTicket+6 || left != 3*MinTicket+6 || gone != 3*MinTicket+6 || parked != 0 || len(pending) != 3 {
+				t.Fatalf("while the round waits the tree holds %d, %d leaving, %d withdrawn, %d parked; %d pending", sum, left, gone, parked, len(pending))
 			}
 			testing.SetRealm(u(anyone))
 			if n := Compact(cross(cur)); n != 3 {
@@ -904,11 +914,8 @@ func TestWithdrawMovesNoDraw(cur realm, t *testing.T) {
 			first = drawn
 			continue
 		}
-		if n := Compact(cross(cur)); n != 0 {
-			t.Fatalf("Compact left %d after the draw", n)
-		}
-		if sum, left, gone := below(nTickets); sum != 6*MinTicket || left != 0 || gone != 0 {
-			t.Fatalf("after Compact the tree holds %d, %d leaving, %d withdrawn", sum, left, gone)
+		if sum, left, gone, parked := below(nTickets); sum != 6*MinTicket || left != 0 || gone != 0 || parked != 0 || len(pending) != 0 {
+			t.Fatalf("after the draw the tree holds %d, %d leaving, %d withdrawn, %d parked; %d pending", sum, left, gone, parked, len(pending))
 		}
 		for i := range drawn {
 			if drawn[i] != first[i] {

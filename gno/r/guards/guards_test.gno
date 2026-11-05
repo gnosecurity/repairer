@@ -1,0 +1,536 @@
+package guards
+
+import (
+	"chain"
+	"chain/banker"
+	"chain/runtime"
+	"strings"
+	"testing"
+	"time"
+
+	"gno.land/p/nt/avl/v0"
+	"gno.land/p/nt/testutils/v0"
+	"gno.land/p/nt/ufmt/v0"
+)
+
+// drand evmnet rounds 1001 and 1002, as api.drand.sh serves them.
+const (
+	sig1001 = "037ca0c482675da24ec2efed381ac9ac103ebfe834c798b0b8234828b309dc7704cafa24b93010156482236fed83576883f9fb15e7175216ed8d206e3e323d4c"
+	sig1002 = "1ed7f88d4317f7fc378d6eece9dde7d6b3a4f6956c12450a9fdb843df146715d0ea34a65b09f1363b2b69fe532fd78979816ff876ee49d59514fdcbc09bd27fb"
+)
+
+const guardText = `{"flaw":"CVE-2026-98432","drop":{"ip_options":true}}` + "\n"
+
+var (
+	worker = testutils.TestAddress("worker")
+	alice  = testutils.TestAddress("alice")
+	bob    = testutils.TestAddress("bob")
+	carol  = testutils.TestAddress("carol")
+	dave   = testutils.TestAddress("dave")
+	eve    = testutils.TestAddress("eve")
+	anyone = testutils.TestAddress("anyone")
+	self   = chain.PackageAddress("gno.land/r/autopatch/guards")
+)
+
+// Note: testing.SetRealm rewrites the realm value of the function that
+// calls it, so only the test functions themselves switch users; the helpers
+// call the realm as whoever the test set.
+
+func reset() {
+	tickets, nTickets, filings, nFilings = avl.NewTree(), 0, avl.NewTree(), 0
+	levels, records, beacon, burned = avl.NewTree(), avl.NewTree(), avl.NewTree(), 0
+	MinTicketAge, RevealWindow, CheckWindow, UnbondBlocks, DrawDelay = 10, 5, 20, 10, 3
+}
+
+func u(a address) runtime.Realm { return testing.NewUserRealm(a) }
+
+// send makes the next call send n ugnot here.
+func send(n int64) {
+	c := chain.Coins{}
+	if n > 0 {
+		c = chain.Coins{chain.NewCoin("ugnot", n)}
+		testing.IssueCoins(self, c) // what the tx moves here
+	}
+	testing.SetOriginSend(c)
+}
+
+// aim makes the next reveal or redraw draw from beacon round r.
+func aim(r uint64) {
+	drandGenesis = time.Now().Unix() - int64(r-1-uint64(DrawDelay))*drandPeriod
+}
+
+func bal(a address) int64 { return banker.NewReadonlyBanker().GetCoins(a).AmountOf("ugnot") }
+
+func balances(as ...address) map[address]int64 {
+	m := map[address]int64{}
+	for _, a := range as {
+		m[a] = bal(a)
+	}
+	return m
+}
+
+func stakeOf(id int) int64 {
+	_, s, _, _ := TicketOf(id)
+	return s
+}
+
+// refuses checks that f aborts with a message containing want.
+func refuses(t *testing.T, want string, f func()) {
+	t.Helper()
+	r := revive(f)
+	if r == nil {
+		t.Errorf("%q: wasn't refused", want)
+		return
+	}
+	if got := ufmt.Sprintf("%v", r); !strings.Contains(got, want) {
+		t.Errorf("refused with %q, want %q", got, want)
+	}
+}
+
+// stakeAll stakes a ticket for each owner, in order; the test sets each
+// owner before calling, so it takes one owner at a time.
+func stakeOne(t *testing.T, rlm realm) {
+	send(MinTicket)
+	StakeTicket(cross(rlm))
+	send(0)
+}
+
+// file commits and reveals the worker's filing of guardText with transcript
+// tr, to be drawn from beacon round r. The test sets the worker first.
+func file(t *testing.T, rlm realm, tr string, r uint64) int {
+	tc := Commitment(worker, "transcript", tr, "t")
+	send(FilingBond)
+	id := Commit(cross(rlm), Commitment(worker, "guard", GuardHash(guardText)+"\x00"+tc, "s"))
+	send(0)
+	testing.SkipHeights(1)
+	aim(r)
+	Reveal(cross(rlm), id, guardText, tc, "s")
+	return id
+}
+
+// draw submits the round and draws; the test sets anyone first.
+func draw(t *testing.T, rlm realm, id int, round uint64, sig string) []address {
+	t.Helper()
+	SubmitBeacon(cross(rlm), round, sig)
+	Draw(cross(rlm), id)
+	st, r, drawn := State(id)
+	if st != Drawn || r != round || len(drawn) != Checkers {
+		t.Fatalf("draw: %s from %d, %d drawn", st, r, len(drawn))
+	}
+	return drawn
+}
+
+func salt(who address) string {
+	if who == worker {
+		return "t"
+	}
+	return "c-" + string(who)
+}
+
+func kind(who address) string {
+	if who == worker {
+		return "transcript"
+	}
+	return "check"
+}
+
+// The honest path, and the draw's fixed round: a round other than the one
+// the reveal fixed draws nothing, and the filer can't abandon a filing that
+// can be drawn. Every checker is paid, the rest of the bond goes back, the
+// level is written, and a ticket comes back after unbonding.
+func TestHonest(cur realm, t *testing.T) {
+	reset()
+	testing.SetRealm(testing.NewCodeRealm("gno.land/r/evil/proxy"))
+	send(MinTicket)
+	refuses(t, "call from your own account", func() { StakeTicket(cross(cur)) })
+	for _, w := range []address{alice, bob, carol, dave} {
+		testing.SetRealm(u(w))
+		stakeOne(t, cur)
+	}
+	send(MinTicket - 1)
+	refuses(t, "send at least", func() { StakeTicket(cross(cur)) })
+	// The worker's own ticket and alice's next two are large: a draw that
+	// let in the filer, or one owner twice, would take them.
+	for _, w := range []address{worker, alice, alice} {
+		testing.SetRealm(u(w))
+		send(1000 * MinTicket)
+		StakeTicket(cross(cur))
+	}
+	send(0)
+	testing.SkipHeights(MinTicketAge)
+	before := balances(worker, alice, bob, carol, dave)
+	testing.SetRealm(u(worker))
+	send(FilingBond - 1)
+	refuses(t, "send at least", func() { Commit(cross(cur), Commitment(worker, "guard", "x", "s")) })
+	id := file(t, cur, "tr", 1001)
+	testing.SetRealm(u(anyone))
+	refuses(t, "submit beacon round 1001 first", func() { Draw(cross(cur), id) })
+	SubmitBeacon(cross(cur), 1002, sig1002)
+	refuses(t, "submit beacon round 1001 first", func() { Draw(cross(cur), id) })
+	refuses(t, "that isn't drand evmnet's signature", func() { SubmitBeacon(cross(cur), 1003, sig1002) })
+	testing.SetRealm(u(worker))
+	refuses(t, "it can still be drawn", func() { Abandon(cross(cur), id) })
+	testing.SetRealm(u(anyone))
+	drawn := draw(t, cur, id, 1001, sig1001)
+	seen := map[address]bool{}
+	for _, c := range drawn {
+		if c == worker || seen[c] {
+			t.Fatalf("drew %v", drawn)
+		}
+		seen[c] = true
+	}
+	refuses(t, "not waiting for a draw", func() { Draw(cross(cur), id) })
+	testing.SetRealm(u(worker))
+	refuses(t, "wait until every drawn checker has committed", func() { RevealCheck(cross(cur), id, "tr", "t") })
+	testing.SetRealm(u(eve))
+	refuses(t, "you weren't drawn", func() { CommitCheck(cross(cur), id, Commitment(eve, "check", "tr", "x")) })
+	for _, c := range drawn {
+		testing.SetRealm(u(c))
+		CommitCheck(cross(cur), id, Commitment(c, "check", "tr", salt(c)))
+	}
+	refuses(t, "already committed", func() { CommitCheck(cross(cur), id, Commitment(drawn[2], "check", "tr", "y")) })
+	testing.SetRealm(u(anyone))
+	refuses(t, "still waiting for reveals", func() { Settle(cross(cur), id) })
+	testing.SetRealm(u(drawn[0]))
+	refuses(t, "that isn't what was committed", func() { RevealCheck(cross(cur), id, "tr", "wrong") })
+	for _, c := range append([]address{worker}, drawn...) {
+		testing.SetRealm(u(c))
+		RevealCheck(cross(cur), id, "tr", salt(c))
+	}
+	testing.SetRealm(u(anyone))
+	if s := Settle(cross(cur), id); s != Tested || Level(GuardHash(guardText)) != Tested {
+		t.Fatalf("settled %s, level %q", s, Level(GuardHash(guardText)))
+	}
+	refuses(t, "nothing to settle", func() { Settle(cross(cur), id) })
+	for _, c := range drawn {
+		if got := bal(c) - before[c]; got != CheckFee {
+			t.Errorf("checker paid %d", got)
+		}
+	}
+	if got := bal(worker) - before[worker]; got != FilingBond-int64(Checkers)*CheckFee {
+		t.Errorf("worker got back %d", got)
+	}
+	if r := RecordOf(worker); r.Passed != 1 {
+		t.Errorf("worker's record %+v", r)
+	}
+	// alice's ticket (0) comes back after unbonding.
+	testing.SetRealm(u(alice))
+	Unstake(cross(cur), 0)
+	refuses(t, "still unbonding", func() { Withdraw(cross(cur), 0) })
+	testing.SkipHeights(UnbondBlocks)
+	testing.SetRealm(u(bob))
+	refuses(t, "not your ticket", func() { Withdraw(cross(cur), 0) })
+	a := bal(alice)
+	testing.SetRealm(u(alice))
+	Withdraw(cross(cur), 0)
+	if bal(alice)-a != MinTicket {
+		t.Errorf("alice got back %d", bal(alice)-a)
+	}
+	if Burned() != 0 {
+		t.Errorf("burned %d on the honest path", Burned())
+	}
+}
+
+// A drawn checker who never commits is fined and replaced from a later
+// round; the honest checkers and the worker lose nothing.
+func TestLazyChecker(cur realm, t *testing.T) {
+	reset()
+	for _, w := range []address{alice, bob, carol, dave} {
+		testing.SetRealm(u(w))
+		stakeOne(t, cur)
+	}
+	ids := map[address]int{alice: 0, bob: 1, carol: 2, dave: 3}
+	testing.SkipHeights(MinTicketAge)
+	before := balances(worker, alice, bob, carol, dave)
+	testing.SetRealm(u(worker))
+	id := file(t, cur, "tr", 1001)
+	testing.SetRealm(u(anyone))
+	drawn := draw(t, cur, id, 1001, sig1001)
+	lazy := drawn[0]
+	for _, c := range drawn[1:] {
+		testing.SetRealm(u(c))
+		CommitCheck(cross(cur), id, Commitment(c, "check", "tr", salt(c)))
+	}
+	testing.SetRealm(u(anyone))
+	refuses(t, "still waiting for commitments", func() { Settle(cross(cur), id) })
+	testing.SkipHeights(CheckWindow + 1)
+	testing.SetRealm(u(lazy))
+	refuses(t, "not taking checks", func() { CommitCheck(cross(cur), id, Commitment(lazy, "check", "tr", salt(lazy))) })
+	aim(1002)
+	testing.SetRealm(u(anyone))
+	if s := Settle(cross(cur), id); s != Revealed {
+		t.Fatalf("after the window: %s", s)
+	}
+	if got := stakeOf(ids[lazy]); got != MinTicket-NoShowFine {
+		t.Errorf("the lazy checker kept %d", got)
+	}
+	drawn2 := draw(t, cur, id, 1002, sig1002)
+	var fresh address
+	for _, c := range drawn2 {
+		if c == lazy {
+			t.Fatal("the lazy checker was drawn again")
+		}
+		if c != drawn[1] && c != drawn[2] {
+			fresh = c
+		}
+	}
+	testing.SetRealm(u(fresh))
+	CommitCheck(cross(cur), id, Commitment(fresh, "check", "tr", salt(fresh)))
+	for _, c := range append([]address{worker}, drawn2...) {
+		testing.SetRealm(u(c))
+		RevealCheck(cross(cur), id, "tr", salt(c))
+	}
+	testing.SetRealm(u(anyone))
+	if s := Settle(cross(cur), id); s != Tested {
+		t.Fatalf("settled %s", s)
+	}
+	for _, c := range drawn2 {
+		if got := bal(c) - before[c]; got != CheckFee || stakeOf(ids[c]) != MinTicket {
+			t.Errorf("an honest checker: paid %d, stake %d", got, stakeOf(ids[c]))
+		}
+	}
+	if bal(lazy) != before[lazy] || RecordOf(lazy).Silent != 1 {
+		t.Errorf("the lazy checker: paid %d, record %+v", bal(lazy)-before[lazy], RecordOf(lazy))
+	}
+	if got := bal(worker) - before[worker]; got != FilingBond-int64(Checkers)*CheckFee {
+		t.Errorf("worker got back %d", got)
+	}
+	if Burned() != NoShowFine {
+		t.Errorf("burned %d", Burned())
+	}
+}
+
+// A drawn checker who lies makes a dispute: nothing is tested, nobody is
+// paid, and no honest bond or stake is taken. The bond and the drawn
+// tickets stay held for the panel; an undrawn ticket can leave.
+func TestLiar(cur realm, t *testing.T) {
+	reset()
+	owners := []address{alice, bob, carol, dave}
+	for _, w := range owners {
+		testing.SetRealm(u(w))
+		stakeOne(t, cur)
+	}
+	testing.SkipHeights(MinTicketAge)
+	before := balances(worker, alice, bob, carol, dave)
+	testing.SetRealm(u(worker))
+	id := file(t, cur, "tr", 1001)
+	testing.SetRealm(u(anyone))
+	drawn := draw(t, cur, id, 1001, sig1001)
+	says := map[address]string{drawn[0]: "a lie"}
+	for _, c := range drawn {
+		testing.SetRealm(u(c))
+		CommitCheck(cross(cur), id, Commitment(c, "check", or(says[c], "tr"), salt(c)))
+	}
+	for _, c := range append([]address{worker}, drawn...) {
+		testing.SetRealm(u(c))
+		RevealCheck(cross(cur), id, or(says[c], "tr"), salt(c))
+	}
+	testing.SetRealm(u(anyone))
+	if s := Settle(cross(cur), id); s != Disputed || Level(GuardHash(guardText)) != "" {
+		t.Fatalf("with a liar: %s", s)
+	}
+	for _, a := range append([]address{worker}, owners...) {
+		if bal(a) != before[a] {
+			t.Errorf("%s was paid %d before the panel", a, bal(a)-before[a])
+		}
+	}
+	for tid, c := range owners {
+		if stakeOf(tid) != MinTicket {
+			t.Errorf("%s's stake is %d", c, stakeOf(tid))
+		}
+		testing.SetRealm(u(c))
+		Unstake(cross(cur), tid)
+	}
+	testing.SkipHeights(UnbondBlocks)
+	left := 0
+	for tid, c := range owners {
+		testing.SetRealm(u(c))
+		if c == drawn[0] || c == drawn[1] || c == drawn[2] {
+			refuses(t, "drawn into a check that hasn't settled", func() { Withdraw(cross(cur), tid) })
+			continue
+		}
+		Withdraw(cross(cur), tid)
+		left++
+	}
+	if left != 1 || Burned() != 0 {
+		t.Errorf("%d undrawn left, burned %d", left, Burned())
+	}
+}
+
+// A liar and a silent checker together: the open transcripts already
+// differ, so the filing goes straight to a panel, and the silent one is
+// fined; no honest bond or stake is taken.
+func TestLiarAndSilent(cur realm, t *testing.T) {
+	reset()
+	owners := []address{alice, bob, carol, dave}
+	for _, w := range owners {
+		testing.SetRealm(u(w))
+		stakeOne(t, cur)
+	}
+	testing.SkipHeights(MinTicketAge)
+	before := balances(worker, alice, bob, carol, dave)
+	testing.SetRealm(u(worker))
+	id := file(t, cur, "tr", 1001)
+	testing.SetRealm(u(anyone))
+	drawn := draw(t, cur, id, 1001, sig1001)
+	says := map[address]string{drawn[0]: "a lie"}
+	for _, c := range drawn {
+		testing.SetRealm(u(c))
+		CommitCheck(cross(cur), id, Commitment(c, "check", or(says[c], "tr"), salt(c)))
+	}
+	for _, c := range []address{worker, drawn[0], drawn[2]} { // drawn[1] stays silent
+		testing.SetRealm(u(c))
+		RevealCheck(cross(cur), id, or(says[c], "tr"), salt(c))
+	}
+	testing.SkipHeights(RevealWindow + 1)
+	testing.SetRealm(u(anyone))
+	if s := Settle(cross(cur), id); s != Disputed {
+		t.Fatalf("settled %s", s)
+	}
+	for tid, c := range owners {
+		want := MinTicket
+		if c == drawn[1] {
+			want -= NoShowFine
+		}
+		if stakeOf(tid) != want || bal(c) != before[c] {
+			t.Errorf("%s: stake %d, paid %d", c, stakeOf(tid), bal(c)-before[c])
+		}
+	}
+	if bal(worker) != before[worker] || Burned() != NoShowFine {
+		t.Errorf("worker paid %d, burned %d", bal(worker)-before[worker], Burned())
+	}
+}
+
+// A worker who goes silent after the draw loses its bond: the checkers who
+// answered are paid from it, and the rest is locked for good.
+func TestSilentWorker(cur realm, t *testing.T) {
+	reset()
+	for _, w := range []address{alice, bob, carol, dave} {
+		testing.SetRealm(u(w))
+		stakeOne(t, cur)
+	}
+	testing.SkipHeights(MinTicketAge)
+	before := balances(worker, alice, bob, carol, dave)
+	testing.SetRealm(u(worker))
+	id := file(t, cur, "tr", 1001)
+	testing.SetRealm(u(anyone))
+	drawn := draw(t, cur, id, 1001, sig1001)
+	for _, c := range drawn {
+		testing.SetRealm(u(c))
+		CommitCheck(cross(cur), id, Commitment(c, "check", "tr", salt(c)))
+	}
+	for _, c := range drawn {
+		testing.SetRealm(u(c))
+		RevealCheck(cross(cur), id, "tr", salt(c))
+	}
+	testing.SetRealm(u(anyone))
+	refuses(t, "still waiting for reveals", func() { Settle(cross(cur), id) })
+	testing.SkipHeights(RevealWindow + 1)
+	testing.SetRealm(u(worker))
+	refuses(t, "the reveal window has passed", func() { RevealCheck(cross(cur), id, "tr", "t") })
+	testing.SetRealm(u(anyone))
+	if s := Settle(cross(cur), id); s != Forfeited {
+		t.Fatalf("settled %s", s)
+	}
+	for _, c := range drawn {
+		if got := bal(c) - before[c]; got != CheckFee {
+			t.Errorf("checker paid %d", got)
+		}
+	}
+	if bal(worker) != before[worker] || Burned() != FilingBond-int64(Checkers)*CheckFee || RecordOf(worker).Forfeited != 1 {
+		t.Errorf("worker got %d, burned %d", bal(worker)-before[worker], Burned())
+	}
+}
+
+// A copier who submits another's commitment first can't reveal it, and
+// loses its bond; so does a flood of filings never revealed, and a reveal
+// after its window. The worker's filing goes on.
+func TestCopierAndFlood(cur realm, t *testing.T) {
+	reset()
+	tr := Commitment(worker, "transcript", "tr", "t")
+	commit := Commitment(worker, "guard", GuardHash(guardText)+"\x00"+tr, "s")
+	testing.SetRealm(u(eve))
+	send(FilingBond)
+	copied := Commit(cross(cur), commit) // eve saw it in the mempool
+	testing.SetRealm(u(worker))
+	send(FilingBond)
+	id := Commit(cross(cur), commit)
+	testing.SetRealm(u(eve))
+	for i := 0; i < 5; i++ {
+		send(FilingBond)
+		Commit(cross(cur), Commitment(eve, "guard", "junk", "s"))
+	}
+	send(0)
+	refuses(t, "nothing to forfeit", func() { Forfeit(cross(cur), copied) })
+	refuses(t, "that isn't what was committed", func() { Reveal(cross(cur), copied, guardText, tr, "s") })
+	refuses(t, "only the filer reveals", func() { Reveal(cross(cur), id, guardText, tr, "s") })
+	testing.SetRealm(u(worker))
+	big := strings.Repeat("x", MaxGuard+1)
+	send(FilingBond)
+	bigID := Commit(cross(cur), Commitment(worker, "guard", GuardHash(big)+"\x00"+tr, "s"))
+	send(0)
+	refuses(t, "a guard is at most", func() { Reveal(cross(cur), bigID, big, tr, "s") })
+	refuses(t, "that isn't what was committed", func() { Reveal(cross(cur), id, guardText+" ", tr, "s") })
+	Reveal(cross(cur), id, guardText, tr, "s")
+	testing.SkipHeights(RevealWindow + 1)
+	testing.SetRealm(u(eve))
+	refuses(t, "the reveal window has passed", func() { Reveal(cross(cur), copied, guardText, tr, "s") })
+	for f := 0; f < nFilings; f++ {
+		if f == id {
+			refuses(t, "nothing to forfeit", func() { Forfeit(cross(cur), f) })
+			continue
+		}
+		Forfeit(cross(cur), f)
+	}
+	if Burned() != 7*FilingBond || RecordOf(eve).Forfeited != 6 || RecordOf(worker).Forfeited != 1 {
+		t.Errorf("burned %d, eve's record %+v", Burned(), RecordOf(eve))
+	}
+	if st, _, _ := State(id); st != Revealed {
+		t.Errorf("the worker's filing is %s", st)
+	}
+}
+
+// Names staked after a filing can't be drawn into it. A filing that can
+// never be drawn may be abandoned by its filer, and its bond comes back.
+func TestYoungTickets(cur realm, t *testing.T) {
+	reset()
+	for _, w := range []address{alice, bob, carol} {
+		testing.SetRealm(u(w))
+		stakeOne(t, cur)
+	}
+	testing.SkipHeights(MinTicketAge)
+	testing.SetRealm(u(carol))
+	Unstake(cross(cur), 2) // leaving: never drawn
+	before := bal(worker)
+	tc := Commitment(worker, "transcript", "tr", "t")
+	testing.SetRealm(u(worker))
+	send(FilingBond)
+	id := Commit(cross(cur), Commitment(worker, "guard", GuardHash(guardText)+"\x00"+tc, "s"))
+	for _, w := range []address{dave, eve, anyone} { // staked for the attack
+		testing.SetRealm(u(w))
+		stakeOne(t, cur)
+	}
+	aim(1001)
+	testing.SetRealm(u(worker))
+	Reveal(cross(cur), id, guardText, tc, "s")
+	testing.SetRealm(u(anyone))
+	SubmitBeacon(cross(cur), 1001, sig1001)
+	refuses(t, "too few staked checkers", func() { Draw(cross(cur), id) })
+	if st, _, drawn := State(id); st != Revealed || len(drawn) != 0 {
+		t.Errorf("a failed draw left %s with %v", st, drawn)
+	}
+	testing.SetRealm(u(eve))
+	refuses(t, "only the filer abandons", func() { Abandon(cross(cur), id) })
+	testing.SetRealm(u(worker))
+	Abandon(cross(cur), id)
+	if got := bal(worker) - before; got != FilingBond {
+		t.Errorf("worker got back %d", got)
+	}
+}
+
+func or(s, d string) string {
+	if s == "" {
+		return d
+	}
+	return s
+}

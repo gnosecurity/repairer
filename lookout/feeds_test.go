@@ -48,7 +48,7 @@ func TestFetcher(t *testing.T) {
 	if b, _ := os.ReadFile(f.Path("kev.json")); string(b) != "v1" {
 		t.Fatalf("the old copy was lost: %q", b)
 	}
-	if !strings.Contains(asked[1], `"a"|autopatch-lookout`) {
+	if !strings.Contains(asked[1], `"a"|Go-http-client/1.1`) {
 		t.Fatalf("requests %q", asked)
 	}
 	if _, err := f.Get(ctx, "../etc/passwd", ts.URL, 100); err == nil {

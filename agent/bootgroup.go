@@ -19,6 +19,7 @@ const (
 	healthFile    = "health.json"    // the machine's last few health samples
 	bootGroupFile = "bootgroup.json" // the window the guards a boot brought back share
 	keptSamples   = 3
+	freshSamples  = time.Hour // pre-boot samples older than this don't make the baseline
 )
 
 // sampleRecord is one tick's health sample: every check it ran, and the
@@ -65,6 +66,13 @@ type bootGroup struct {
 	// that held has passed since the boot.
 	Windowed []string `json:"windowed,omitempty"`
 	Observed []string `json:"observed,omitempty"`
+	// Cut are windows after an earlier boot that this boot cut short;
+	// CutShared says whether that group had more than one guard.
+	Cut       []string `json:"cut,omitempty"`
+	CutShared bool     `json:"cut_shared,omitempty"`
+	// Shared is set when a keep went on during the window, or the window
+	// holds more than one guard: a failure then counts no try.
+	Shared bool `json:"shared,omitempty"`
 	// Armed: the check has passed since the boot, or its grace ran out.
 	// Passed: it has passed since the boot.
 	Armed   map[string]bool   `json:"armed,omitempty"`
@@ -74,18 +82,38 @@ type bootGroup struct {
 	Settled time.Time         `json:"settled,omitzero"`
 }
 
-func (a *Agent) openBootGroup(windowed, observed []string) error {
-	g := bootGroup{At: a.now().UTC(), Before: map[string]int{}, Windowed: windowed, Observed: observed}
+func (a *Agent) openBootGroup(windowed, observed, cut []string, cutShared bool) error {
+	g := bootGroup{At: a.now().UTC(), Before: map[string]int{}, Windowed: windowed, Observed: observed, Cut: cut, CutShared: cutShared}
 	var recs []sampleRecord
 	if b, err := os.ReadFile(filepath.Join(a.StateDir, healthFile)); err == nil {
 		json.Unmarshal(b, &recs)
 	}
-	for _, r := range recs {
+	// Samples count only if the newest was taken within freshSamples of the
+	// boot; after a long time off, they say little about the machine now.
+	fresh := len(recs) > 0 && a.now().Sub(recs[len(recs)-1].At) <= freshSamples
+	if fresh {
+		for _, r := range recs {
+			g.Sampled = true
+			for _, k := range r.Keys {
+				g.Before[k] += 0
+				if _, failed := r.Fails[k]; failed {
+					g.Before[k]++
+				}
+			}
+		}
+		return a.saveBootGroup(&g)
+	}
+	// No fresh samples: a check counts only if it held in the baseline of
+	// every windowed guard that has one.
+	for _, h := range windowed {
+		ev, err := a.loadEvidence(h)
+		if err != nil || ev.Trial == nil {
+			continue
+		}
 		g.Sampled = true
-		for _, k := range r.Keys {
-			g.Before[k] += 0
-			if _, failed := r.Fails[k]; failed {
-				g.Before[k]++
+		for k, n := range ev.Trial.Before {
+			if old, seen := g.Before[k]; !seen || old == 0 {
+				g.Before[k] = n
 			}
 		}
 	}
@@ -142,6 +170,8 @@ func (a *Agent) watchBootGroup(ctx context.Context, f *Fleet, checks []policy.He
 		switch e := on[h]; {
 		case e != nil && e.Status == Pending && e.BootWindow:
 			windowed = append(windowed, h)
+		case e != nil && e.Status == Confirmed && !e.Booted:
+			g.Observed = append(g.Observed, h) // kept during the window: watched, not judged
 		case e == nil && !containsHash(f.Off, h):
 			if ev := evs[h]; ev != nil && !ev.Held {
 				a.failWindow(h, ev, "its window after the boot ended without a verdict", res)
@@ -149,6 +179,17 @@ func (a *Agent) watchBootGroup(ctx context.Context, f *Fleet, checks []policy.He
 		}
 	}
 	g.Windowed = windowed
+	for _, h := range g.Cut {
+		if ev := evs[h]; ev != nil && !ev.Held && !containsHash(f.Off, h) {
+			why := "the machine restarted during its window after a boot"
+			if g.CutShared {
+				a.suspectWindow(h, ev, why, res)
+			} else {
+				a.failWindow(h, ev, why, res)
+			}
+		}
+	}
+	g.Cut = nil
 	// Each map on its own: an empty one reads back from disk as nil.
 	if g.Armed == nil {
 		g.Armed = map[string]bool{}
@@ -203,8 +244,9 @@ func (a *Agent) watchBootGroup(ctx context.Context, f *Fleet, checks []policy.He
 	}
 	stamp := now.UTC().Format(time.RFC3339)
 	// The observed guards (keep, strips) count as booted once every check
-	// that held has passed since the boot; nothing takes them off.
-	if allPassed {
+	// that held has passed since the boot, and only when no windowed guard
+	// of this boot is still waiting for its verdict; nothing takes them off.
+	if allPassed && len(g.Windowed) == 0 {
 		for _, h := range g.Observed {
 			if err := a.MarkBooted(ctx, h); err != nil {
 				return true, err
@@ -220,12 +262,20 @@ func (a *Agent) watchBootGroup(ctx context.Context, f *Fleet, checks []policy.He
 	case len(bad) > 0:
 		sort.Strings(bad)
 		why := fmt.Sprintf("the window after the boot failed, %d times in a row: %s", failRun, strings.Join(bad, "; "))
+		shared := len(g.Windowed) > 1 || g.Shared
 		for _, h := range g.Windowed {
 			if _, err := a.Undo(ctx, h, false); err != nil {
 				res.Refused = append(res.Refused, h[:12]+": taking it off: "+err.Error())
 				continue
 			}
-			if ev := evs[h]; ev != nil {
+			ev := evs[h]
+			if ev == nil {
+				continue
+			}
+			if shared {
+				a.suspectWindow(h, ev, why+" (shared with another guard of the boot)", res)
+			} else {
+				ev.Suspect = false // alone: this one broke it
 				a.failWindow(h, ev, why, res)
 			}
 		}
@@ -237,7 +287,7 @@ func (a *Agent) watchBootGroup(ctx context.Context, f *Fleet, checks []policy.He
 				continue
 			}
 			if ev := evs[h]; ev != nil {
-				ev.Tries, ev.Last = 0, "confirmed after a boot "+stamp
+				ev.Tries, ev.Suspect, ev.Last = 0, false, "confirmed after a boot "+stamp
 				a.saveEvidence(h, ev)
 			}
 			res.Confirmed = append(res.Confirmed, on[h].Guard.Name())

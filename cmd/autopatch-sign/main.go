@@ -31,11 +31,12 @@ import (
 	"github.com/jaekwon/autopatch/signer"
 )
 
-const usage = `usage: autopatch-sign <yes|off|on|policy> [flags] FILE
+const usage = `usage: autopatch-sign <yes|off|on|policy|cancel> [flags] FILE|HASH
 
   yes    GUARD.json   the owner's yes to a guard: -tiers A,B -until RFC3339 [-mode undo|keep] [-nocanary] [-kev KEV.json]
   off    GUARD.json   take a guard off some hosts and keep it off there: -hosts mail,web
   on     GUARD.json   lift an Off on some hosts: -hosts mail (a Yes never does)
+  cancel HASH         cancel a pending policy change (allowed even after you signed a change of key)
   policy NEW.json     a policy change, against the policy in force (-policy); its keys are checked
                       against your address book (-confirm-keys to accept the differences shown)
 
@@ -115,7 +116,7 @@ func run(ctx context.Context, cmd string, args []string, stdout io.Writer) error
 	}
 	// After you sign a change of key, statements signed with the old key
 	// would hold every machine once the change is in force there.
-	if st.NewestPolicy != nil {
+	if st.NewestPolicy != nil && cmd != "cancel" { // a Cancel is how a change of key is stopped
 		if np, err := policy.Parse(st.NewestPolicy); err == nil && np.Signers.Me.Hex != cur.Signers.Me.Hex {
 			return fmt.Errorf("you signed a change of your key (policy %.16s); once the reports show it in force on every machine, sign with the new key and -policy that policy", np.Hash())
 		}
@@ -203,6 +204,13 @@ func run(ctx context.Context, cmd string, args []string, stdout io.Writer) error
 		}
 		if stmt, err = signer.PrepareYes(cur, g, approve.Yes{Tiers: ts, Until: end.UTC(), Mode: *mode, NoCanary: *nocanary}, *seq); err != nil {
 			return err
+		}
+	case "cancel":
+		if stmt, err = signer.PrepareCancel(cur, fs.Arg(0), *seq); err != nil {
+			return err
+		}
+		if !checked.Pending {
+			notes = append(notes, "no machine reports a pending policy change")
 		}
 	case "policy":
 		if newPolicy, err = readPolicy(fs.Arg(0)); err != nil {

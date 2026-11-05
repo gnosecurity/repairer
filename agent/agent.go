@@ -861,6 +861,18 @@ func (a *Agent) Boot(ctx context.Context) error {
 	var errs []error
 	var windows, observed []string
 	var off []string
+	// Windows after an earlier boot that this restart cuts short: each one
+	// counts as a failure (shared, if the group had more than one).
+	var cut []string
+	cutShared := false
+	if old, err := a.loadBootGroup(); err == nil && old != nil {
+		for _, h := range old.Windowed {
+			if e := st.find(h); e != nil && e.Status == Pending && e.BootWindow {
+				cut = append(cut, h)
+			}
+		}
+		cutShared = len(old.Windowed) > 1 || old.Shared
+	}
 	if f, err := a.loadFleet(); err == nil {
 		off = f.Off
 	}
@@ -904,8 +916,8 @@ func (a *Agent) Boot(ctx context.Context) error {
 		}
 	}
 	errs = append(errs, a.writeSysctlFile(st), s.save(st))
-	if len(windows)+len(observed) > 0 {
-		errs = append(errs, a.openBootGroup(windows, observed))
+	if len(windows)+len(observed) > 0 || len(cut) > 0 {
+		errs = append(errs, a.openBootGroup(windows, observed, cut, cutShared))
 	}
 	for _, h := range windows { // armed after the save, as Apply does
 		if err := a.Timer.Arm(ctx, h, a.bootArm()); err != nil {
@@ -963,6 +975,9 @@ func (a *Agent) SetKeep(ctx context.Context, hash string, keep bool) (bool, erro
 	}
 	e.Keep = keep
 	if keep && e.Status == Pending {
+		// A keep ends the window, but says nothing about health after a
+		// boot: the boot group watches it from here as an observed guard.
+		e.BootWindow = false
 		return true, a.confirm(ctx, s, st, e)
 	}
 	return true, s.save(st)

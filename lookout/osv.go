@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -213,7 +214,10 @@ func (s *OSVSync) Sync(ctx context.Context) (int, error) {
 		}
 		fetcher := &Fetcher{Dir: s.Dir, Client: s.Fetcher.Client}
 		if _, err := fetcher.Get(ctx, c.id+".json", s.Base+"/"+s.Ecosystem+"/"+c.id+".json", 16<<20); err != nil {
-			return n, fmt.Errorf("lookout: OSV record %s: %w", c.id, err)
+			if !errors.Is(err, ErrNotFound) {
+				return n, fmt.Errorf("lookout: OSV record %s: %w", c.id, err) // try again next time
+			}
+			// A record listed but gone: skip it rather than stop every sync after it.
 		}
 		os.Remove(filepath.Join(s.Dir, c.id+".json.meta")) // records are fetched by time, not by ETag
 		if err := s.setLast(c.at); err != nil {

@@ -101,6 +101,25 @@ func run(ctx context.Context, cmd string, args []string, stdout io.Writer) error
 			return report.Run(ctx, target, nil)
 		}}
 	store := &lookout.Store{Dir: filepath.Join(c.State, "store")}
+	feeds := &lookout.Feeds{Dir: filepath.Join(c.State, "feeds"), Fetcher: &lookout.Fetcher{Dir: filepath.Join(c.State, "feeds", "copies")}}
+	var lastFeeds time.Time
+	// refresh reads the feeds once an hour and matches them against the
+	// machines; every request is the same whatever the fleet runs.
+	refresh := func(sts []lookout.HostStatus) {
+		if time.Since(lastFeeds) < time.Hour {
+			return
+		}
+		lastFeeds = time.Now()
+		for _, err := range feeds.Refresh(ctx) {
+			fmt.Fprintf(stdout, "feeds: %v\n", err)
+		}
+		ms := lookout.Machines(sts)
+		if fs, err := feeds.Find(ms, feeds.Watch(store, ms), time.Now()); err != nil {
+			fmt.Fprintf(stdout, "feeds: %v\n", err)
+		} else {
+			fmt.Fprintf(stdout, "feeds: %d findings leave a machine exposed\n", len(fs))
+		}
+	}
 
 	collect := func() []lookout.HostStatus {
 		sts := col.Collect(ctx)
@@ -147,6 +166,7 @@ func run(ctx context.Context, cmd string, args []string, stdout io.Writer) error
 			if err != nil {
 				return err
 			}
+			pg.Feeds = feeds
 			srv := &http.Server{Addr: *listen, Handler: pg.Handler(), ReadHeaderTimeout: 10 * time.Second,
 				ReadTimeout: time.Minute, WriteTimeout: time.Minute, MaxHeaderBytes: 64 << 10}
 			go func() {
@@ -157,7 +177,12 @@ func run(ctx context.Context, cmd string, args []string, stdout io.Writer) error
 			defer srv.Close()
 		}
 		for {
-			deliver(collect())
+			sts := collect()
+			if n, err := store.Prune(sts); err == nil && n > 0 {
+				fmt.Fprintf(stdout, "forgot %d signed statements every machine is past\n", n)
+			}
+			deliver(sts)
+			refresh(sts)
 			select {
 			case <-ctx.Done():
 				return nil

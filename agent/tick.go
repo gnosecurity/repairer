@@ -1,8 +1,10 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -63,6 +65,11 @@ type Evidence struct {
 	RetryAt time.Time `json:"retry_at,omitzero"`
 	Ask     bool      `json:"ask,omitempty"`
 	Last    string    `json:"last,omitempty"`
+	// Suspect is set when the guard came off with others in a window they
+	// shared (a boot's, or one a keep joined): no try is counted, and after
+	// a boot's, such guards come back one per boot, so the next boot judges
+	// each alone.
+	Suspect bool `json:"suspect,omitempty"`
 	// Held is set when root took the guard off by hand: it stays off until
 	// the owner's On names this host. A Yes doesn't lift it.
 	Held bool `json:"held,omitempty"`
@@ -101,6 +108,9 @@ type Trial struct {
 	// that held was armed; the window's length runs from then.
 	Armed   map[string]bool `json:"armed,omitempty"`
 	Settled time.Time       `json:"settled,omitzero"`
+	// Shared is set when a keep went on during the window: a failure then
+	// has two suspects, and counts no try.
+	Shared bool `json:"shared,omitempty"`
 }
 
 const (
@@ -391,7 +401,12 @@ func (a *Agent) watch(ctx context.Context, e *Entry, ev *Evidence, checks []poli
 			a.saveEvidence(e.Hash, ev)
 			return verdictNone
 		}
-		a.failWindow(e.Hash, ev, fmt.Sprintf("health failed %d times in a row: %s", failRun, strings.Join(bad, "; ")), res)
+		why := fmt.Sprintf("health failed %d times in a row: %s", failRun, strings.Join(bad, "; "))
+		if t.Shared {
+			a.suspectWindow(e.Hash, ev, why+" (a keep went on during its window)", res)
+		} else {
+			a.failWindow(e.Hash, ev, why, res)
+		}
 		return verdictFailed
 	case !t.Settled.IsZero() && !now.Before(t.Settled.Add(TrialWindow)) && len(t.Streak) == 0:
 		if _, err := a.Confirm(ctx, e.Hash); err != nil {
@@ -413,6 +428,21 @@ func (a *Agent) watch(ctx context.Context, e *Entry, ev *Evidence, checks []poli
 	}
 	a.saveEvidence(e.Hash, ev)
 	return verdictNone
+}
+
+// suspectWindow is a failed window the guard shared with another change:
+// it is off and tried again after the first wait, but no try is counted,
+// since it may not be the one that broke something.
+func (a *Agent) suspectWindow(h string, ev *Evidence, why string, res *TickResult) {
+	ev.Suspect, ev.Trial = true, nil
+	ev.Last = why + " (" + a.now().UTC().Format(time.RFC3339) + ")"
+	ev.RetryAt = a.now().Add(retries[0])
+	a.saveEvidence(h, ev)
+	name := h[:12]
+	if g, err := guard.Parse(ev.Guard); err == nil {
+		name = g.Name()
+	}
+	res.Undone = append(res.Undone, name+": "+why+"; no try counted")
 }
 
 // failWindow counts a failed window: the guard is off, and it is tried
@@ -446,10 +476,21 @@ func (a *Agent) next(ctx context.Context, f *Fleet, p *policy.Policy, entries []
 	}
 	on, ids := map[string]bool{}, map[string]bool{}
 	var modelGuards [][]string
+	// The boot slot: after a shared window after a boot failed, its guards
+	// come back one per boot. A suspect that bites at a boot goes on only
+	// when no other unbooted guard that bites at a boot is on, and while
+	// one is on, no other such guard goes on.
+	unbooted, suspectUnbooted := 0, false
 	for _, e := range entries {
 		on[e.Hash], ids[e.Guard.ID] = true, true
 		if e.By == "model" {
 			modelGuards = append(modelGuards, e.Guard.Flaws)
+		}
+		if e.Later && !e.Booted && !e.Keep && e.Guard.BitesAtBoot() {
+			unbooted++
+			if ev := evs[e.Hash]; ev != nil && ev.Suspect {
+				suspectUnbooted = true
+			}
 		}
 	}
 	listening, err := a.Sys.ListeningAll()
@@ -493,6 +534,10 @@ func (a *Agent) next(ctx context.Context, f *Fleet, p *policy.Policy, entries []
 		}
 		keep := d.By == "me" && yes != nil && yes.Mode == "keep"
 		if keepOnly && !keep {
+			continue
+		}
+		if !keep && g.Later() && g.BitesAtBoot() && ((ev.Suspect && unbooted > 0) || suspectUnbooted) {
+			res.Waiting = append(res.Waiting, g.Name()+" (one guard per boot after a shared window failed)")
 			continue
 		}
 		// The tier's spacing, only after a canary's Healthy released the
@@ -566,6 +611,9 @@ func (a *Agent) next(ctx context.Context, f *Fleet, p *policy.Policy, entries []
 			}
 			c.ev.Trial.Window = e.AppliedAt
 		}
+		if c.keep && keepOnly {
+			a.shareOpenWindows(entries, evs)
+		}
 		if c.keep {
 			c.ev.Trial = nil
 			c.ev.Last = "on, kept, " + a.now().UTC().Format(time.RFC3339)
@@ -596,6 +644,24 @@ func (a *Agent) Hold(hash, why string) error {
 	ev.Held, ev.Trial = true, nil
 	ev.Last = why + " (" + a.now().UTC().Format(time.RFC3339) + ")"
 	return a.saveEvidence(hash, ev)
+}
+
+// shareOpenWindows marks every open window shared, because a keep went on
+// during it: if one of them fails, no try is counted.
+func (a *Agent) shareOpenWindows(entries []*Entry, evs map[string]*Evidence) {
+	for _, e := range entries {
+		if e.Status != Pending || e.BootWindow {
+			continue
+		}
+		if ev := evs[e.Hash]; ev != nil && ev.Trial != nil {
+			ev.Trial.Shared = true
+			a.saveEvidence(e.Hash, ev)
+		}
+	}
+	if g, err := a.loadBootGroup(); err == nil && g != nil {
+		g.Shared = true
+		a.saveBootGroup(g)
+	}
 }
 
 // baselined reports whether a baseline is complete.
@@ -797,7 +863,14 @@ func (a *Agent) applyBundle(ctx context.Context, f *Fleet, bun *Bundle, res *Tic
 			continue // already taken, or replayed
 		}
 		if m.Seq != f.LastSeq+1 {
-			f.Held = fmt.Sprintf("waiting for statement %d (have up to %d, and %d is here)", f.LastSeq+1, f.LastSeq, m.Seq)
+			// Only a later statement whose signature checks out says one is
+			// missing; a forged one can't plant a false wait in the reports.
+			var tx approve.GnokeyTx
+			if json.Unmarshal(m.Tx, &tx) == nil {
+				if _, err := approve.VerifyGnokey(m.Tx, chain, m.Seq, owner, tx.Memo); err == nil {
+					f.Held = fmt.Sprintf("waiting for statement %d (have up to %d, and %d is here)", f.LastSeq+1, f.LastSeq, m.Seq)
+				}
+			}
 			break
 		}
 		what, skip, hold := a.ownerMessage(ctx, f, p, bun, chain, owner, m, res)
@@ -824,13 +897,12 @@ func (a *Agent) applyBundle(ctx context.Context, f *Fleet, bun *Bundle, res *Tic
 	}
 }
 
-// guardFile finds the guard a statement names: in the bundle, or else in
-// what this agent already holds, so a statement isn't held for a file the
-// agent has.
+// guardFile finds the guard a statement names: the agent's own copy
+// first, else the bundle's, but only if that file is the guard the hash
+// names (a guard's hash is over its exact canonical bytes). A wrong file is
+// treated as no file, so a lookout can't make the agent skip a statement by
+// attaching another guard to it.
 func (a *Agent) guardFile(bun *Bundle, hash string) ([]byte, error) {
-	if b := bun.Guards[hash]; b != nil {
-		return b, nil
-	}
 	if ev, err := a.loadEvidence(hash); err == nil && ev.Guard != nil {
 		return ev.Guard, nil
 	}
@@ -841,7 +913,18 @@ func (a *Agent) guardFile(bun *Bundle, hash string) ([]byte, error) {
 			}
 		}
 	}
+	if b := bun.Guards[hash]; b != nil && fileHash(b) == hash {
+		return b, nil
+	}
 	return nil, errors.New("no file for guard " + hash[:min(16, len(hash))])
+}
+
+// fileHash is a canonical file's hash: sha256 of its bytes without a final
+// newline. Guards and policies are named this way.
+func fileHash(b []byte) string {
+	b = bytes.TrimSuffix(b, []byte("\n"))
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
 }
 
 // ownerMessage takes one owner statement. It returns what the statement
@@ -860,31 +943,28 @@ func (a *Agent) ownerMessage(ctx context.Context, f *Fleet, p *policy.Policy, bu
 	}
 	fn, args := tx.Msg[0].Func, tx.Msg[0].Args
 	what = fn
-	if !strings.HasPrefix(tx.Memo, approve.MemoVersion+" ") {
-		return what, "its memo is in a format newer than this agent", nil
-	}
 	tier, _ := p.TierOf(f.Host)
 	switch fn {
 	case "Off", "On":
+		// Off and On act on their signed guard hash and hosts whenever the
+		// signature checks out: a memo this agent can't rebuild (a newer
+		// format, a guard file it can't read or doesn't have) is noted,
+		// never a reason to skip. Skipping an Off would leave a guard on.
 		o, err := approve.ParseOff(approve.Call{Func: "Off", Args: args})
 		if err != nil {
 			return what, "its arguments: " + err.Error(), nil
 		}
 		what += " " + o.Hash[:16]
-		// With the guard's file, the memo must be what this agent writes
-		// for it; without one, the signed arguments are enough to act on.
 		if file, err := a.guardFile(bun, o.Hash); err == nil {
-			g, err := guard.Parse(file)
-			if err != nil {
-				return what, "a guard file this release can't read: " + err.Error(), nil
-			}
-			what = fn + " " + g.Name()
-			verify := approve.VerifyOff
-			if fn == "On" {
-				verify = approve.VerifyOn
-			}
-			if _, err := verify(m.Tx, chain, m.Seq, owner, g); err != nil {
-				return what, "its memo isn't what this agent writes for that guard: " + err.Error(), nil
+			if g, err := guard.Parse(file); err == nil {
+				what = fn + " " + g.Name()
+				verify := approve.VerifyOff
+				if fn == "On" {
+					verify = approve.VerifyOn
+				}
+				if _, err := verify(m.Tx, chain, m.Seq, owner, g); err != nil {
+					what += " (its memo isn't the one this agent writes; acted on as signed)"
+				}
 			}
 		}
 		if !o.Names(f.Host) {
@@ -909,6 +989,9 @@ func (a *Agent) ownerMessage(ctx context.Context, f *Fleet, p *policy.Policy, bu
 		}
 		return what, "", nil
 	case "Yes":
+		if !strings.HasPrefix(tx.Memo, approve.MemoVersion+" ") {
+			return what, "its memo is in a format newer than this agent", nil
+		}
 		if len(args) < 1 {
 			return what, "no guard named", nil
 		}
@@ -948,8 +1031,12 @@ func (a *Agent) ownerMessage(ctx context.Context, f *Fleet, p *policy.Policy, bu
 		if len(args) != 2 {
 			return what, "Policy takes two hashes", nil
 		}
+		if !strings.HasPrefix(tx.Memo, approve.MemoVersion+" ") {
+			return what, "its memo is in a format newer than this agent", nil
+		}
+		// The bundle's file counts only if it is the policy the hash names.
 		file := bun.Policies[args[0]]
-		if file == nil {
+		if file == nil || fileHash(file) != args[0] {
 			return "", "", errors.New("the policy file it names isn't here yet")
 		}
 		next, err := policy.Parse(file)
@@ -978,6 +1065,28 @@ func (a *Agent) ownerMessage(ctx context.Context, f *Fleet, p *policy.Policy, bu
 		}
 		f.Pending = &PendingPolicy{Policy: next.Canonical(), FirstSeen: a.now().UTC()}
 		return what + " pending", "", nil
+	case "Cancel":
+		// Cancel drops a pending policy change, by its hash; the memo is
+		// rebuilt from the fleet and the hash it names.
+		if len(args) != 1 {
+			return what, "Cancel takes one hash", nil
+		}
+		memo, err := approve.MemoCancel(p.Fleet, args[0])
+		if err != nil {
+			return what, err.Error(), nil
+		}
+		what = "Cancel " + args[0][:min(16, len(args[0]))]
+		if _, err := approve.VerifyGnokey(m.Tx, chain, m.Seq, owner, memo); err != nil {
+			return what, "its memo isn't the one this agent writes: " + err.Error(), nil
+		}
+		if f.Pending == nil {
+			return what, "no policy change is pending here", nil
+		}
+		if pend, err := policy.Parse(f.Pending.Policy); err != nil || pend.Hash() != args[0] {
+			return what, "the pending change here is another policy", nil
+		}
+		f.Pending = nil
+		return what, "", nil
 	}
 	return what, "not a kind of statement this release acts on", nil
 }

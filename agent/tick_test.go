@@ -129,8 +129,13 @@ func TestProcessSpool(t *testing.T) {
 	if _, err := Intake(spool, strings.NewReader(string(jump))); err != nil {
 		t.Fatal(err)
 	}
-	if res, _ = a.Tick(ctx); len(res.Accepted) != 0 || !strings.Contains(res.Held, "waiting for statement 9") {
-		t.Fatalf("a jump: %+v", res)
+	// It doesn't check out for that number either, so it plants no wait in
+	// the reports (round 7, minor 12).
+	if res, _ = a.Tick(ctx); len(res.Accepted) != 0 || res.Held != "" {
+		t.Fatalf("a forged jump: %+v", res)
+	}
+	if f, _ := a.loadFleet(); f.LastSeq != 8 {
+		t.Fatalf("last %d", f.LastSeq)
 	}
 }
 
@@ -337,8 +342,8 @@ func TestStatementUsesHeldGuardFile(t *testing.T) {
 
 // A statement whose signature checks out is always taken; one this agent
 // can't act on is listed as skipped, and the ones after it still act
-// (round 6, new major 1): a Cancel (no agent acts on it yet), a memo in a
-// newer format, a policy file this release can't read; then an Off.
+// (round 6, new major 1): a memo in a newer format, a policy file this
+// release can't read; then an Off. (9, a Cancel, is acted on.)
 func TestSkipsDontHold(t *testing.T) {
 	_, msgs, g, _ := tiersChain(t)
 	mail, tick := tiersAgent(t, "mail")
@@ -356,10 +361,14 @@ func TestSkipsDontHold(t *testing.T) {
 		whys = append(whys, fmt.Sprintf("%d %s", sk.Seq, sk.Why))
 	}
 	got := strings.Join(whys, " | ")
-	for _, want := range []string{"9 not a kind of statement this release acts on", "10 its memo is in a format newer", "11 a policy file this release can't read"} {
+	for _, want := range []string{"10 its memo is in a format newer", "11 a policy file this release can't read"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("skipped %q lacks %q", got, want)
 		}
+	}
+	// 9 is a Cancel of the policy change pending from 7 and 8: acted on.
+	if strings.Contains(got, "9 ") || f.Pending != nil {
+		t.Errorf("the Cancel: skipped %q, pending %v", got, f.Pending != nil)
 	}
 	// The report carries the skipped statements.
 	if err := mail.writeReport(ctx, f, mustPolicy(t, f), res); err != nil {
@@ -521,5 +530,89 @@ func TestHandHoldOnlyOn(t *testing.T) {
 	tick()
 	if isOn(t, backup, g) {
 		t.Fatal("back on without an On for backup")
+	}
+}
+
+// A wrong file under a statement's hash is no file: the agent holds (or
+// uses its own copy) and takes the statement when the right file comes;
+// and an Off acts on its signed hash and hosts even with no file (round 7,
+// new major 1).
+func TestWrongFileHolds(t *testing.T) {
+	_, msgs, g, pols := tiersChain(t)
+	mail, tick := tiersAgent(t, "mail")
+	other, err := guard.Parse(mustRead(t, "../guard/testdata/cve-2026-98432-mptcp.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Statement 1 (a Yes for g) with another guard's file filed under g's hash.
+	js, _ := json.Marshal(Bundle{Messages: msgs[:1], Guards: map[string][]byte{g.Hash(): other.Canonical()}, Policies: pols})
+	if _, err := Intake(filepath.Join(mail.StateDir, spoolDir), bytes.NewReader(js)); err != nil {
+		t.Fatal(err)
+	}
+	tick()
+	if f, _ := mail.loadFleet(); f.LastSeq != 0 || !strings.Contains(f.Held, "held at statement 1") {
+		t.Fatalf("a wrong file: last %d held %q", f.LastSeq, f.Held)
+	}
+	tick(msgs[0])
+	if f, _ := mail.loadFleet(); f.LastSeq != 1 || !isOn(t, mail, g) {
+		t.Fatalf("with the right file: last %d", f.LastSeq)
+	}
+	// An Off whose guard this machine has no file for still lands on the Off
+	// list: on backup, which never saw g, deliver 1 to 3 without files, then
+	// the Off for mail and an Off-like check on mail's list.
+	backup, btick := tiersAgent(t, "backup")
+	js, _ = json.Marshal(Bundle{Messages: msgs[:4]}) // Yeses held for lack of a file...
+	if _, err := Intake(filepath.Join(backup.StateDir, spoolDir), bytes.NewReader(js)); err != nil {
+		t.Fatal(err)
+	}
+	btick()
+	if f, _ := backup.loadFleet(); f.LastSeq != 0 {
+		t.Fatalf("a Yes without its file was taken: %d", f.LastSeq)
+	}
+	mail2, tick2 := tiersAgent(t, "mail")
+	tick2(msgs[:3]...)
+	js, _ = json.Marshal(Bundle{Messages: msgs[3:4]}) // the Off, no file; mail has the guard's file
+	if _, err := Intake(filepath.Join(mail2.StateDir, spoolDir), bytes.NewReader(js)); err != nil {
+		t.Fatal(err)
+	}
+	tick2()
+	if f, _ := mail2.loadFleet(); !containsHash(f.Off, g.Hash()) || isOn(t, mail2, g) {
+		t.Fatalf("the Off didn't land: %+v", f.Off)
+	}
+}
+
+func mustRead(t *testing.T, path string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// A policy file under a statement's hash counts only if it is that policy:
+// a wrong one holds the Policy until the right one comes (round 7).
+func TestWrongPolicyFileHolds(t *testing.T) {
+	_, msgs, _, pols := tiersChain(t)
+	backup, tick := tiersAgent(t, "backup")
+	tick(msgs[:6]...)
+	var t1 string
+	for h, b := range pols {
+		if p, err := policy.Parse(b); err == nil && p.DelaySeconds == 172800 && p.Tiers[0].SpacingSeconds == 0 {
+			t1 = h
+		}
+	}
+	wrong := map[string][]byte{t1: mustRead(t, "../approve/testdata/tiers/policy-0.json")}
+	js, _ := json.Marshal(Bundle{Messages: msgs[6:7], Policies: wrong})
+	if _, err := Intake(filepath.Join(backup.StateDir, spoolDir), bytes.NewReader(js)); err != nil {
+		t.Fatal(err)
+	}
+	tick()
+	if f, _ := backup.loadFleet(); f.LastSeq != 6 || !strings.Contains(f.Held, "held at statement 7") {
+		t.Fatalf("a wrong policy file: last %d held %q", f.LastSeq, f.Held)
+	}
+	tick(msgs[6])
+	if f, _ := backup.loadFleet(); f.LastSeq != 7 || f.Pending == nil {
+		t.Fatalf("with the right file: last %d pending %v", f.LastSeq, f.Pending != nil)
 	}
 }

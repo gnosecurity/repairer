@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/jaekwon/autopatch/agent"
 	"github.com/jaekwon/autopatch/approve"
@@ -127,17 +128,25 @@ func isHash(h string) bool {
 	return true
 }
 
-// Limits on one bundle, under the agent's 1 MB.
-const (
-	maxBundleMessages = 50
-	maxBundleSigned   = 200
-)
+// maxBundleMessages caps the owner's statements in one bundle; the rest
+// come in the next.
+const maxBundleMessages = 50
 
-// Bundle builds what to carry to one machine: the owner's statements after
-// the last one it took, in order and without a gap; the guard and policy
-// files they and the signed statements name; every signed statement; the
-// canaries' Healthy answers from their reports; and, for a canary, the
-// other machines' wants.
+// bundleBudget is how much of the agent's 1 MB a bundle may fill (a var so
+// tests can make it small).
+var bundleBudget = agent.MaxBundle - 64<<10
+
+// Bundle builds what to carry to one machine, in order of need, within the
+// agent's 1 MB:
+//  1. the owner's statements after the last one it took, in order,
+//     stopping at a gap, with the files they name;
+//  2. the canaries' Healthy answers to this machine's wants, and for a
+//     canary, the other machines' wants;
+//  3. signed statements (Tested, the model's yes) for guards not yet
+//     confirmed here, newest first, with their files.
+//
+// What doesn't fit waits for the next delivery; a bundle is never refused
+// for its size.
 func (s *Store) Bundle(host string, sts []HostStatus, p *policy.Policy) ([]byte, error) {
 	var me *agent.FleetReport
 	for _, st := range sts {
@@ -149,11 +158,52 @@ func (s *Store) Bundle(host string, sts []HostStatus, p *policy.Policy) ([]byte,
 		return nil, fmt.Errorf("lookout: no report from %s, so no way to know what it has", host)
 	}
 	b := agent.Bundle{Guards: map[string][]byte{}, Policies: map[string][]byte{}}
-	addGuard := func(h string) {
-		if g, err := os.ReadFile(s.path("guards", h+".json")); err == nil {
-			b.Guards[h] = g
+	used := 512
+	fits := func(v any) bool {
+		j, err := json.Marshal(v)
+		if err != nil || used+len(j)+8 > bundleBudget {
+			return false
+		}
+		used += len(j) + 8
+		return true
+	}
+	addGuard := func(h string) bool {
+		if _, ok := b.Guards[h]; ok {
+			return true
+		}
+		g, err := os.ReadFile(s.path("guards", h+".json"))
+		if err != nil {
+			return true // the agent may hold it; a statement that needs it waits
+		}
+		if !fits(g) {
+			return false
+		}
+		b.Guards[h] = g
+		return true
+	}
+	messages := func() error {
+		return s.addMessages(&b, me, fits, addGuard)
+	}
+	answers := func() error {
+		s.addAnswers(&b, host, me, sts, p, fits)
+		return nil
+	}
+	signed := func() error {
+		s.addSignedFor(&b, me, fits, addGuard)
+		return nil
+	}
+	// In order of need: what doesn't fit waits for the next delivery.
+	for _, step := range []func() error{messages, answers, signed} {
+		if err := step(); err != nil {
+			return nil, err
 		}
 	}
+	return json.Marshal(b)
+}
+
+// addMessages adds the owner's statements after the last one the machine
+// took, in order, stopping at a gap, with the files they name.
+func (s *Store) addMessages(b *agent.Bundle, me *agent.FleetReport, fits func(any) bool, addGuard func(string) bool) error {
 	for seq := me.OwnerSeq + 1; len(b.Messages) < maxBundleMessages; seq++ {
 		raw, err := os.ReadFile(s.path("messages", strconv.FormatUint(seq, 10)+".json"))
 		if err != nil {
@@ -161,7 +211,10 @@ func (s *Store) Bundle(host string, sts []HostStatus, p *policy.Policy) ([]byte,
 		}
 		var m agent.Message
 		if err := json.Unmarshal(raw, &m); err != nil {
-			return nil, err
+			return err
+		}
+		if !fits(m) {
+			break
 		}
 		b.Messages = append(b.Messages, m)
 		var tx approve.GnokeyTx
@@ -170,28 +223,21 @@ func (s *Store) Bundle(host string, sts []HostStatus, p *policy.Policy) ([]byte,
 			case "Yes", "Off", "On":
 				addGuard(tx.Msg[0].Args[0])
 			case "Policy":
-				if pb, err := os.ReadFile(s.path("policies", tx.Msg[0].Args[0]+".json")); err == nil {
+				if pb, err := os.ReadFile(s.path("policies", tx.Msg[0].Args[0]+".json")); err == nil && fits(pb) {
 					b.Policies[tx.Msg[0].Args[0]] = pb
 				}
 			}
 		}
 	}
-	signed, _ := filepath.Glob(s.path("signed", "*.json"))
-	sort.Strings(signed)
-	for _, f := range signed {
-		if len(b.Signed) >= maxBundleSigned {
-			break
-		}
-		raw, err := os.ReadFile(f)
-		if err != nil {
-			return nil, err
-		}
-		var sg approve.Signed
-		if err := json.Unmarshal(raw, &sg); err != nil {
-			return nil, err
-		}
-		b.Signed = append(b.Signed, sg)
-		addGuard(sg.Statement.Guard)
+	return nil
+}
+
+// addAnswers adds the canaries' Healthy answers to this machine's wants,
+// and for a canary, the other machines' wants.
+func (s *Store) addAnswers(b *agent.Bundle, host string, me *agent.FleetReport, sts []HostStatus, p *policy.Policy, fits func(any) bool) {
+	mine := map[string]bool{}
+	for _, w := range me.Wants {
+		mine[w.Guard+"/"+w.Nonce] = true
 	}
 	tier, _ := p.TierOf(host)
 	canary := tier != nil && contains(tier.Canaries, host)
@@ -199,21 +245,98 @@ func (s *Store) Bundle(host string, sts []HostStatus, p *policy.Policy) ([]byte,
 		if st.Report == nil || st.Host == host {
 			continue
 		}
-		if !canary && len(b.Signed) < maxBundleSigned {
-			b.Signed = append(b.Signed, st.Report.Healthy...)
+		for _, h := range st.Report.Healthy {
+			if mine[h.Statement.Guard+"/"+h.Statement.Nonce] && fits(h) {
+				b.Signed = append(b.Signed, h)
+			}
 		}
 		if canary {
-			b.Wants = append(b.Wants, st.Report.Wants...)
+			for _, w := range st.Report.Wants {
+				if fits(w) {
+					b.Wants = append(b.Wants, w)
+				}
+			}
 		}
 	}
-	out, err := json.Marshal(b)
+}
+
+// addSignedFor adds signed statements (Tested, the model's yes) for guards
+// not yet confirmed on the machine, newest first, with their files.
+func (s *Store) addSignedFor(b *agent.Bundle, me *agent.FleetReport, fits func(any) bool, addGuard func(string) bool) {
+	confirmed := map[string]bool{}
+	for _, g := range me.Guards {
+		if g.Status == agent.Confirmed {
+			confirmed[g.Hash] = true
+		}
+	}
+	files, _ := filepath.Glob(s.path("signed", "*.json"))
+	type kept struct {
+		path string
+		at   int64
+	}
+	var ks []kept
+	for _, f := range files {
+		if confirmed[strings.SplitN(filepath.Base(f), "-", 2)[0]] {
+			continue
+		}
+		if fi, err := os.Stat(f); err == nil {
+			ks = append(ks, kept{f, fi.ModTime().UnixNano()})
+		}
+	}
+	sort.Slice(ks, func(i, j int) bool { return ks[i].at > ks[j].at })
+	for _, k := range ks {
+		raw, err := os.ReadFile(k.path)
+		if err != nil {
+			continue
+		}
+		var sg approve.Signed
+		if err := json.Unmarshal(raw, &sg); err != nil {
+			continue
+		}
+		if !addGuard(sg.Statement.Guard) || !fits(sg) {
+			break
+		}
+		b.Signed = append(b.Signed, sg)
+	}
+}
+
+// Prune forgets kept signed statements no machine needs: those for a guard
+// every machine of the policy reports confirmed, or has on its Off list.
+// It forgets nothing while any machine has no fresh report.
+func (s *Store) Prune(sts []HostStatus) (int, error) {
+	if len(sts) == 0 {
+		return 0, nil
+	}
+	for _, st := range sts {
+		if st.Report == nil || st.Silent {
+			return 0, nil
+		}
+	}
+	files, err := filepath.Glob(s.path("signed", "*.json"))
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
-	if len(out) > agent.MaxBundle {
-		return nil, fmt.Errorf("lookout: the bundle for %s is %d bytes, more than an agent takes", host, len(out))
+	n := 0
+	for _, f := range files {
+		h := strings.SplitN(filepath.Base(f), "-", 2)[0]
+		done := true
+		for _, st := range sts {
+			ok := contains(st.Report.Off, h)
+			for _, g := range st.Report.Guards {
+				if g.Hash == h && g.Status == agent.Confirmed {
+					ok = true
+				}
+			}
+			if !ok {
+				done = false
+				break
+			}
+		}
+		if done && os.Remove(f) == nil {
+			n++
+		}
 	}
-	return out, nil
+	return n, nil
 }
 
 func contains(xs []string, x string) bool {

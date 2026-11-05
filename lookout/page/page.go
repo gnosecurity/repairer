@@ -38,6 +38,7 @@ type Server struct {
 	PolicyFile []byte
 	Collector  *lookout.Collector
 	Store      *lookout.Store
+	Feeds      *lookout.Feeds // findings, when the feeds run
 	Now        func() time.Time
 
 	admins     map[string]bool
@@ -136,6 +137,7 @@ type view struct {
 	Policy   string
 	Machines []machineRow
 	Waiting  []waitRow
+	Findings []lookout.Finding
 	Notice   string
 	Problem  string
 }
@@ -200,6 +202,11 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 		v.Machines = append(v.Machines, row)
 	}
 	sort.SliceStable(v.Waiting, func(i, j int) bool { return v.Waiting[i].Ask && !v.Waiting[j].Ask })
+	if s.Feeds != nil {
+		if fs, err := s.Feeds.Findings(); err == nil {
+			v.Findings = fs[:min(len(fs), 200)] // exploited first
+		}
+	}
 	s.render(w, "dashboard.html", v)
 }
 

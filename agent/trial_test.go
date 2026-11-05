@@ -936,3 +936,226 @@ func TestStripNoBootWindow(t *testing.T) {
 		t.Fatalf("not booted with the checks back: %+v", e)
 	}
 }
+
+// bootUntilConfirmed drives a later guard from its Tested to confirmed
+// (baseline, window), then returns.
+func (tr *trial) onAndConfirmed(g *guard.Guard) {
+	tr.t.Helper()
+	tr.clock = tr.clock.Add(-time.Minute)
+	tr.putOn(g)
+	for i := 0; i < 10; i++ {
+		tr.step(time.Minute)
+	}
+	if e := tr.entry(g); e == nil || e.Status != Confirmed {
+		tr.t.Fatalf("%s not confirmed: %+v", g.Name(), e)
+	}
+}
+
+// After a shared boot window fails, its guards are suspects: no try is
+// counted, they come back one per boot, and the next boot judges each
+// alone; the guilty one then fails alone and counts a try (round 7, new
+// major 3).
+func TestSuspectsComeBackOnePerBoot(t *testing.T) {
+	tr := newTrial(t, "backup", "")
+	x, y := mptcpGuard(t), ksmbdGuard(t)
+	tr.tested(x)
+	tr.tested(y)
+	tr.tick()
+	first, second := x, y
+	if y.Hash() < x.Hash() {
+		first, second = y, x
+	}
+	tr.onAndConfirmed(first)
+	tr.onAndConfirmed(second)
+	for i := 0; i < 3; i++ {
+		tr.step(time.Minute)
+	}
+	// The boot breaks the check: both come off as suspects, no try counted.
+	if err := tr.a.Boot(ctx); err != nil {
+		t.Fatal(err)
+	}
+	tr.step(time.Minute)
+	tr.fail[site] = "broken after the boot"
+	for i := 0; i < 3; i++ {
+		tr.step(time.Minute)
+	}
+	for _, g := range []*guard.Guard{x, y} {
+		ev := tr.evidence(g)
+		if tr.entry(g) != nil || !ev.Suspect || ev.Tries != 0 {
+			t.Fatalf("%s after the shared failure: on %v, suspect %v, tries %d", g.Name(), tr.entry(g) != nil, ev.Suspect, ev.Tries)
+		}
+	}
+	delete(tr.fail, site)
+	// One comes back; the other waits for a boot to judge the first.
+	var back, waiting *guard.Guard
+	for i := 0; i < 30 && back == nil; i++ {
+		tr.step(time.Minute)
+		for _, g := range []*guard.Guard{x, y} {
+			if e := tr.entry(g); e != nil && e.Status == Confirmed {
+				back = g
+			}
+		}
+	}
+	if back == nil {
+		t.Fatal("no suspect came back")
+	}
+	waiting = x
+	if back == x {
+		waiting = y
+	}
+	for i := 0; i < 30; i++ {
+		res := tr.step(time.Minute)
+		if tr.entry(waiting) != nil {
+			t.Fatalf("both suspects on before a boot judged the first: %+v", res)
+		}
+	}
+	// The boot judges the first alone, and it passes: booted, no longer a suspect.
+	if err := tr.a.Boot(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 11; i++ {
+		tr.step(time.Minute)
+	}
+	if e := tr.entry(back); !e.Booted || tr.evidence(back).Suspect {
+		t.Fatalf("the first after its solo boot: %+v", e)
+	}
+	// Now the second goes on; its solo boot fails: a try is counted.
+	tr.onAndConfirmedWhenReady(t, waiting)
+	if err := tr.a.Boot(ctx); err != nil {
+		t.Fatal(err)
+	}
+	tr.step(time.Minute)
+	tr.fail[site] = "broken after the boot"
+	for i := 0; i < 3; i++ {
+		tr.step(time.Minute)
+	}
+	if ev := tr.evidence(waiting); tr.entry(waiting) != nil || ev.Suspect || ev.Tries != 1 {
+		t.Fatalf("the guilty one alone: suspect %v, tries %d", ev.Suspect, ev.Tries)
+	}
+}
+
+// onAndConfirmedWhenReady waits for a guard's baseline to begin, then
+// drives it through its window.
+func (tr *trial) onAndConfirmedWhenReady(t *testing.T, g *guard.Guard) {
+	t.Helper()
+	for i := 0; i < 60; i++ {
+		if e := tr.entry(g); e != nil && e.Status == Confirmed {
+			return
+		}
+		tr.step(time.Minute)
+	}
+	t.Fatalf("%s never went on", g.Name())
+}
+
+// A keep that goes on during another guard's window shares it: if that
+// window fails, no try is counted (round 7, minor 7).
+func TestKeepSharesTheWindow(t *testing.T) {
+	tr := newTrial(t, "backup", "")
+	g1 := ipoptGuard(t)
+	tr.tested(g1)
+	tr.tick()
+	tr.clock = tr.clock.Add(-time.Minute)
+	tr.putOn(g1)
+	g2 := portGuard(t, "test/udp5353", "udp", "5353")
+	ev := &Evidence{Guard: g2.Canonical(), Yeses: map[string]*approve.Yes{"A": {Hash: g2.Hash(), Tiers: []string{"A"}, Until: tr.clock.Add(time.Hour), Mode: "keep"}}}
+	if err := tr.a.saveEvidence(g2.Hash(), ev); err != nil {
+		t.Fatal(err)
+	}
+	tr.step(time.Minute) // the keep goes on during g1's window
+	tr.fail[site] = "broken"
+	for i := 0; i < 3; i++ {
+		tr.step(time.Minute)
+	}
+	if ev := tr.evidence(g1); tr.entry(g1) != nil || !ev.Suspect || ev.Tries != 0 {
+		t.Fatalf("g1 after a shared window failed: suspect %v tries %d", ev.Suspect, ev.Tries)
+	}
+	if e := tr.entry(g2); e == nil || e.Status != Confirmed {
+		t.Fatal("the keep came off")
+	}
+}
+
+// A restart during a lone guard's window after a boot counts a try (round
+// 7, minor 5).
+func TestRestartDuringBootWindow(t *testing.T) {
+	tr := newTrial(t, "backup", "")
+	g := mptcpGuard(t)
+	tr.tested(g)
+	tr.tick()
+	tr.onAndConfirmed(g)
+	tr.step(time.Minute)
+	if err := tr.a.Boot(ctx); err != nil {
+		t.Fatal(err)
+	}
+	tr.step(time.Minute)
+	if err := tr.a.Boot(ctx); err != nil { // restarted during its window
+		t.Fatal(err)
+	}
+	res := tr.step(time.Minute)
+	if ev := tr.evidence(g); tr.entry(g) != nil || ev.Tries != 1 || !strings.Contains(strings.Join(res.Undone, " "), "restarted") {
+		t.Fatalf("on %v tries %d: %+v", tr.entry(g) != nil, ev.Tries, res.Undone)
+	}
+}
+
+// After a long time off, the samples before the boot are stale: the group
+// counts only checks that held in the guards' own baselines (round 7,
+// minor 6). Here the check failed in the guard's baseline, so its failing
+// after the boot doesn't count.
+func TestStaleSamplesFallBack(t *testing.T) {
+	tr := newTrial(t, "backup", "")
+	g := mptcpGuard(t)
+	tr.tested(g)
+	tr.tick()
+	tr.fail[site] = "down during the baseline"
+	tr.clock = tr.clock.Add(-time.Minute)
+	tr.putOn(g)
+	delete(tr.fail, site)
+	for i := 0; i < 10; i++ {
+		tr.step(time.Minute)
+	}
+	tr.step(time.Minute)                    // a pre-boot sample with the check passing...
+	tr.clock = tr.clock.Add(48 * time.Hour) // ...two days before the boot
+	if err := tr.a.Boot(ctx); err != nil {
+		t.Fatal(err)
+	}
+	tr.fail[site] = "down after the boot"
+	for i := 0; i < 25; i++ {
+		if res := tr.step(time.Minute); len(res.Undone) > 0 {
+			t.Fatalf("a check that didn't hold in the guard's own baseline counted: %+v", res.Undone)
+		}
+	}
+	if e := tr.entry(g); e == nil || !e.Booted {
+		t.Fatalf("not booted: %+v", e)
+	}
+}
+
+// A kept guard watched at a boot counts as booted only when the boot's
+// window for its other guards has its verdict (round 7, minor 4).
+func TestObservedWaitsForTheVerdict(t *testing.T) {
+	tr := newTrial(t, "backup", "")
+	w := mptcpGuard(t)
+	tr.tested(w)
+	tr.tick()
+	tr.onAndConfirmed(w)
+	k := ksmbdGuard(t)
+	ev := &Evidence{Guard: k.Canonical(), Yeses: map[string]*approve.Yes{"A": {Hash: k.Hash(), Tiers: []string{"A"}, Until: tr.clock.Add(24 * time.Hour), Mode: "keep"}}}
+	if err := tr.a.saveEvidence(k.Hash(), ev); err != nil {
+		t.Fatal(err)
+	}
+	tr.step(time.Minute) // the keep goes on
+	tr.step(time.Minute)
+	if err := tr.a.Boot(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5; i++ {
+		tr.step(time.Minute)
+		if e := tr.entry(k); e.Booted {
+			t.Fatalf("the kept guard booted at minute %d, before the window's verdict", i+1)
+		}
+	}
+	for i := 0; i < 8; i++ {
+		tr.step(time.Minute)
+	}
+	if e := tr.entry(k); !e.Booted {
+		t.Fatalf("the kept guard after the verdict: %+v", e)
+	}
+}

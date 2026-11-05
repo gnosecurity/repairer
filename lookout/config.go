@@ -75,10 +75,38 @@ func (s SSH) Run(ctx context.Context, target string, stdin []byte) ([]byte, erro
 		"-i", s.Key, "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes",
 		"-o", "StrictHostKeyChecking=yes", "-o", "UserKnownHostsFile="+s.KnownHosts,
 		"-o", "ConnectTimeout=10", "-o", "ClearAllForwardings=yes", "-T", "--", target)
-	var out, errb bytes.Buffer
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = bytes.NewReader(stdin), &out, &errb
+	out := &capped{max: MaxReport}
+	var errb bytes.Buffer
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = bytes.NewReader(stdin), out, &capped{max: 64 << 10, w: &errb}
 	if err := cmd.Run(); err != nil {
+		if out.over {
+			return nil, fmt.Errorf("ssh %s: more than %d bytes", target, MaxReport)
+		}
 		return nil, fmt.Errorf("ssh %s: %v: %s", target, err, strings.TrimSpace(errb.String()))
 	}
-	return out.Bytes(), nil
+	return out.buf.Bytes(), nil
+}
+
+// MaxReport caps what one machine's report may be, so a taken-over machine
+// can't run the lookout out of memory and stop delivery to the rest.
+const MaxReport = 16 << 20
+
+// capped keeps at most max bytes, then fails the writes.
+type capped struct {
+	max  int
+	buf  bytes.Buffer
+	w    *bytes.Buffer
+	over bool
+}
+
+func (c *capped) Write(p []byte) (int, error) {
+	dst := &c.buf
+	if c.w != nil {
+		dst = c.w
+	}
+	if dst.Len()+len(p) > c.max {
+		c.over = true
+		return 0, errors.New("too much output")
+	}
+	return dst.Write(p)
 }

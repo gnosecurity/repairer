@@ -69,6 +69,9 @@ func (c *Collector) collectOne(ctx context.Context, k policy.Key, chain string, 
 	if err != nil {
 		return fmt.Errorf("fetching: %w", err)
 	}
+	if len(b) > MaxReport {
+		return fmt.Errorf("the report is %d bytes, more than %d", len(b), MaxReport)
+	}
 	body, err := approve.VerifyReport(b, k.Hex)
 	if err != nil {
 		return err

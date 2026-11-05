@@ -13,9 +13,10 @@ import (
 	"time"
 )
 
-// UserAgent names the lookout to the feeds it reads: a generic client
-// name, nothing about whose lookout it is.
-const UserAgent = "autopatch-lookout (+https://github.com/jaekwon/autopatch)"
+// UserAgent is what the lookout calls itself to the feeds: Go's own
+// default, which countless programs send, so a feed can't tell a lookout
+// (and with few users, whose) from anything else.
+const UserAgent = "Go-http-client/1.1"
 
 // Fetcher downloads public feeds whole, asking each time only for what
 // changed (ETag, Last-Modified), so the lookout's hourly reads are cheap

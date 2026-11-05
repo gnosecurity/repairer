@@ -137,6 +137,28 @@ func PrepareOn(p *policy.Policy, g *guard.Guard, hosts []string, seq uint64) (*S
 		}}, nil
 }
 
+// PrepareCancel readies the owner's Cancel of a pending policy change. It
+// is signed with the key of the policy in force, which a pending change of
+// key doesn't change until it takes effect.
+func PrepareCancel(cur *policy.Policy, pending string, seq uint64) (*Statement, error) {
+	memo, err := approve.MemoCancel(cur.Fleet, pending)
+	if err != nil {
+		return nil, err
+	}
+	chain, _, err := chainOf(cur)
+	if err != nil {
+		return nil, err
+	}
+	return &Statement{Func: "Cancel", Args: []string{pending}, Memo: memo, Chain: chain, Seq: seq,
+		verify: func(tx, owner []byte) error {
+			st, err := approve.VerifyGnokey(tx, chain, seq, owner, memo)
+			if err == nil && (st.Call.Func != "Cancel" || len(st.Call.Args) != 1 || st.Call.Args[0] != pending) {
+				err = errors.New("signer: the signed Cancel says something else")
+			}
+			return err
+		}}, nil
+}
+
 // PreparePolicy readies a policy change: the memo is the full diff against
 // the policy it replaces.
 func PreparePolicy(old, new *policy.Policy, seq uint64) (*Statement, error) {

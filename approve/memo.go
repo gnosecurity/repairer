@@ -233,6 +233,14 @@ func VerifyYes(txJSON []byte, chainID string, seq uint64, ownerPub []byte, g *gu
 	return y, nil
 }
 
+// MemoCancel writes the memo for cancelling a pending policy change.
+func MemoCancel(fleet, pending string) (string, error) {
+	if !isHash(pending) {
+		return "", errors.New("approve: Cancel names a policy by its hash")
+	}
+	return checkMemo(fmt.Sprintf("%s Cancel %s %s", MemoVersion, fleet, pending[:16]))
+}
+
 // MemoVersion starts every memo, so that a release can change the memo
 // format without the agents and signing tools of one fleet disagreeing.
 const MemoVersion = "autopatch/1"

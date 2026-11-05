@@ -14,6 +14,12 @@
 <td><a href="/admin/guard/{{.Hash}}">guard {{short .Hash}}</a></td></tr>{{end}}</table>
 {{else}}<p class="small">Nothing on its way.</p>{{end}}
 
+<h2>Flaws reaching your machines</h2>
+{{if .Findings}}<table><tr><th>Machine</th><th>Flaw</th><th>Package</th><th>Where it stands</th></tr>
+{{range .Findings}}<tr><td>{{.Host}}</td><td{{if .Exploited}} class="bad"{{end}}>{{.Flaw}}{{if .Exploited}} (exploited){{end}}</td>
+<td>{{.Package}} {{.Version}}</td><td>{{.State}}{{if .Fix}} ({{.Fix}}){{end}}</td></tr>{{end}}</table>
+{{else}}<p class="small">None found yet, or the feeds haven't run.</p>{{end}}
+
 <h2>Machines</h2>
 <table><tr><th>Machine</th><th>Last report</th><th>Guards on</th><th>Notes</th></tr>
 {{range .Machines}}<tr><td>{{.Host}}</td>

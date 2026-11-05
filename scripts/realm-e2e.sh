@@ -10,7 +10,9 @@
 # drawn checkers commit and open their transcripts; the agreement waits out
 # its objection window and is finalized; the level param says "tested". Then
 # a ticket nobody drew is unstaked and withdrawn, which takes its weight out
-# of the tree at once, since no round waits. Then a dispute: a second filing
+# of the tree at once, since no round waits. With POOL of 80 or more, 72
+# owners leave while a round waits, one withdraws while it still waits,
+# and Compact parks the rest at the end. Then a dispute: a second filing
 # where one drawn checker lies goes, with no reruns in this build, to a panel
 # of 7 seats drawn by stake, from every ticket, from a later real round; its
 # word, after the appeal window, slashes the liar. Prints the gas each call
@@ -43,7 +45,8 @@ find "$ws" -name '*_test.gno' -delete
 python3 -I - "$ws/r/guards" "$POOL" <<'PY'
 import re, sys
 win = "50" if sys.argv[2] == "0" else "400" # a 31-seat panel's commitments take two heights each on gnodev
-for f, sets in [("guards.gno", [("MinTicketAge", "3"), ("RevealWindow", win), ("CheckWindow", win), ("DrawDeadline", "40"),
+dl = "40" if sys.argv[2] == "0" else "400" # 72 leaves and an unbonding wait inside one waiting round
+for f, sets in [("guards.gno", [("MinTicketAge", "3"), ("RevealWindow", win), ("CheckWindow", win), ("DrawDeadline", dl),
                                 ("UnbondBlocks", "60"), ("DrawDelay", "3"), ("ObjectionWindow", "2"), ("LevelFloor", "1")]),
                 ("dispute.gno", [("AppealWindow", "2")])]:
     p = sys.argv[1] + "/" + f
@@ -116,7 +119,7 @@ call() { # key func [-send N] args...
   local key=$1 fn=$2; shift 2
   echo "" | "$B/gnokey" maketx call -home "$D/kb" -insecure-password-stdin -pkgpath "$REALM" \
     -func "$fn" -gas-fee 10000000ugnot -gas-wanted 900000000 -broadcast -chainid dev -remote "$RPC" "$@" "$key" > "$D/call.out" 2>&1 \
-    || { echo "call $key $fn: $(tail -8 "$D/call.out")"; tail -20 "$D/node.log"; exit 1; }
+    || { echo "call $key $fn: $(grep -m4 -E 'Data:|Log:|panic|insufficient|out of gas|unauthorized' "$D/call.out")"; tail -8 "$D/call.out"; exit 1; }
   printf '%-14s %s\n' "$fn" "$(grep -oE 'GAS USED: +[0-9]+' "$D/call.out" | grep -oE '[0-9]+')" >> "$gaslog"
 }
 send() { # key to amount
@@ -130,16 +133,18 @@ for k in c1 c2 c3 c4 c5 c6 c7; do send test1 "$(addr $k)" 100000000ugnot; done
 for k in c1 c2 c3 c4 c5 c6 c7; do call "$k" StakeTicket -send 10000000ugnot; done
 if [ "$POOL" -gt 0 ]; then
   # POOL more owners: keys from test1's seed at other indexes, funded by one
-  # MsgRun, each staking a ticket.
+  # MsgRun, each staking a ticket. Each gets its stake and the fees of ten
+  # calls, with room for storage deposits: an owner drawn as a checker and
+  # then onto the panel makes five calls with its stake.
   seed="source bonus chronic canvas draft south burst lottery vacant surface solve popular case indicate oppose farm nothing bullet exhibit title speed wink action roast"
   for i in $(seq 1 "$POOL"); do
     printf '%s\n\n\n' "$seed" | "$B/gnokey" add -home "$D/kb" -recover -index "$i" -insecure-password-stdin "p$i" >/dev/null 2>&1
   done
   "$B/gnokey" list -home "$D/kb" > "$D/keys"
   { printf 'package main\n\nimport (\n\t"chain"\n\t"chain/banker"\n)\n\nfunc main(cur realm) {\n\tb := banker.NewBanker(banker.BankerTypeRealmSend, cur)\n'
-    for i in $(seq 1 "$POOL"); do printf '\tb.SendCoins(cur.Address(), address("%s"), chain.Coins{chain.NewCoin("ugnot", 60000000)})\n' "$(addr "p$i")"; done
+    for i in $(seq 1 "$POOL"); do printf '\tb.SendCoins(cur.Address(), address("%s"), chain.Coins{chain.NewCoin("ugnot", 120000000)})\n' "$(addr "p$i")"; done
     printf '}\n'; } > "$D/fund.gno"
-  echo "" | "$B/gnokey" maketx run -gas-fee 100000000ugnot -gas-wanted 2900000000 -send "$(( POOL * 60000000 ))ugnot" -broadcast -chainid dev \
+  echo "" | "$B/gnokey" maketx run -gas-fee 100000000ugnot -gas-wanted 2900000000 -send "$(( POOL * 120000000 ))ugnot" -broadcast -chainid dev \
     -remote "$RPC" -home "$D/kb" -insecure-password-stdin test1 "$D/fund.gno" > "$D/fund.out" 2>&1 || { echo "funding: $(tail -5 "$D/fund.out")"; exit 1; }
   for i in $(seq 1 "$POOL"); do call "p$i" StakeTicket -send 10000000ugnot; done
   echo "a pool of $(( POOL + 7 )) owners"
@@ -207,6 +212,16 @@ commit2=$(python3 -I -c 'import hashlib,sys; a,gh,sysn,tc=sys.argv[1:5]; print(h
 call test1 Fund -send 2000000ugnot # the dispute fund pays the panel: 7 seats
 call test1 Commit -send 1000000ugnot -args "$commit2"
 call test1 Reveal -args 1 -args "$guard2" -args "ubuntu 24.04" -args "$tc" -args s
+if [ "$POOL" -ge 80 ]; then
+  # While this round waits, 72 pool owners begin leaving (marked, pending);
+  # after unbonding, one withdraws while the round still waits (marked
+  # withdrawn); the draws compact 4 each, and Compact parks the rest at the
+  # end, once no round waits (round 12, minor 5; round 13, minor 4).
+  for i in $(seq 1 72); do call "p$i" Unstake -args $(( i + 6 )); done
+  for i in $(seq 1 61); do call test1 Fund -send 1ugnot; done
+  call p1 Withdraw -args 7
+  echo "withdrew a ticket while a round waits"
+fi
 round2=$(qeval 'State(1)' | grep -oE '\([0-9]+ uint64\)' | grep -oE '[0-9]+' | head -1)
 call test1 SubmitBeacon -args "$round2" -args "$(waitround "$round2")"
 call test1 Draw -args 1
@@ -238,5 +253,11 @@ case $lk in c*) ltid=$(( ${lk#c} - 1 ));; p*) ltid=$(( ${lk#p} + 6 ));; esac # c
 lstake=$(qeval "TicketOf($ltid)" | grep -oE '\([0-9]+ int64\)' | head -1 | grep -oE '[0-9]+' | head -1)
 [ "$lstake" = 9000000 ] || { echo "the liar's stake is $lstake"; exit 1; }
 echo "the liar lost Slash: its ticket holds $lstake ugnot"
+if [ "$POOL" -ge 80 ]; then
+  call test1 Compact
+  left=$(grep -oE '\([0-9]+ int\)' "$D/call.out" | grep -oE '[0-9]+' | head -1)
+  [ "$left" = 0 ] || { echo "Compact left $left pending: $(tail -5 "$D/call.out")"; exit 1; }
+  echo "compacted the 64 tickets left pending"
+fi
 grep -v '^Fund' "$gaslog" | sort | awk '{n[$1]++; s[$1]+=$2; if ($2>m[$1]) m[$1]=$2} END {for (f in n) printf "%-14s %3d calls, most %11d gas, mean %11d\n", f, n[f], m[f], s[f]/n[f]}' | sort
 echo "realm-e2e: ok, level tested on chain at round $round; a dispute settled by a panel at round $round3"

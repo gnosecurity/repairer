@@ -3,6 +3,7 @@ package signer
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -393,5 +394,58 @@ func TestGnokeyTiersChain(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("policy-%d.json", i)), p.Canonical(), 0o644); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+// The "skips" chain continues the tiers chain with statements an agent
+// takes but can't act on, then one it must still act on: 9 a Cancel (a kind
+// no agent acts on yet), 10 a Yes in a newer memo format, 11 a Policy whose
+// file this release can't read, 12 Off(mail). Signed into GOLDEN_OUT/tiers.
+func TestGnokeySkipsChain(t *testing.T) {
+	bin, home, out := os.Getenv("GNOKEY_BIN"), os.Getenv("GNOKEY_HOME"), os.Getenv("GOLDEN_OUT")
+	if bin == "" || home == "" || out == "" {
+		t.Skip("set GNOKEY_BIN, GNOKEY_HOME, GNOKEY_KEY, GNOKEY_PASSWORD and GOLDEN_OUT")
+	}
+	gk := Gnokey{Bin: bin, Home: home, Key: os.Getenv("GNOKEY_KEY"), Password: os.Getenv("GNOKEY_PASSWORD")}
+	ps := TiersPolicies(t)
+	b, err := os.ReadFile("../guard/testdata/cve-2026-98432-ipopt.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := guard.Parse(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chain, _, _ := chainOf(ps[0])
+	unread := []byte(`{"fleet":"tiers","flavor":"newer"}`)
+	sum := sha256.Sum256(unread)
+	unreadHash := hex.EncodeToString(sum[:])
+	none := func([]byte, []byte) error { return nil }
+	yes := approve.Yes{Hash: g.Hash(), Tiers: []string{"A"}, Until: time.Date(2026, 11, 6, 0, 0, 0, 0, time.UTC), Mode: "undo"}
+	off, err := PrepareOff(ps[0], g, []string{"mail"}, 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stmts := []*Statement{
+		{Func: "Cancel", Args: []string{ps[2].Hash()}, Memo: "autopatch/1 Cancel tiers " + ps[2].Hash()[:16], Chain: chain, Seq: 9, verify: none},
+		{Func: "Yes", Args: yes.Args(), Memo: "autopatch/2 Yes " + g.Name() + " in a format from the future", Chain: chain, Seq: 10, verify: none},
+		{Func: "Policy", Args: []string{unreadHash, ps[2].Hash()}, Memo: "autopatch/1 Policy tiers " + unreadHash[:16] + " replaces " + ps[2].Hash()[:16] + ": flavor newer", Chain: chain, Seq: 11, verify: none},
+		off,
+	}
+	dir := filepath.Join(out, "tiers")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, st := range stmts {
+		signed, err := gk.Sign(context.Background(), st, owner(t))
+		if err != nil {
+			t.Fatalf("statement %d: %v", st.Seq, err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("%d.json", st.Seq)), signed, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "policy-unread.json"), unread, 0o644); err != nil {
+		t.Fatal(err)
 	}
 }

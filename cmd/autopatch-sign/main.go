@@ -31,7 +31,7 @@ import (
 	"github.com/jaekwon/autopatch/signer"
 )
 
-const usage = `usage: autopatch-sign <yes|off|policy> [flags] FILE
+const usage = `usage: autopatch-sign <yes|off|on|policy> [flags] FILE
 
   yes    GUARD.json   the owner's yes to a guard: -tiers A,B -until RFC3339 [-mode undo|keep] [-nocanary] [-kev KEV.json]
   off    GUARD.json   take a guard off some hosts and keep it off there: -hosts mail,web
@@ -113,6 +113,13 @@ func run(ctx context.Context, cmd string, args []string, stdout io.Writer) error
 	if err != nil {
 		return err
 	}
+	// After you sign a change of key, statements signed with the old key
+	// would hold every machine once the change is in force there.
+	if st.NewestPolicy != nil {
+		if np, err := policy.Parse(st.NewestPolicy); err == nil && np.Signers.Me.Hex != cur.Signers.Me.Hex {
+			return fmt.Errorf("you signed a change of your key (policy %.16s); once the reports show it in force on every machine, sign with the new key and -policy that policy", np.Hash())
+		}
+	}
 	// Reports are checked only against agent keys in the newest policy this
 	// tool signed; before it has signed one, the policy given.
 	keysFrom := cur
@@ -121,7 +128,7 @@ func run(ctx context.Context, cmd string, args []string, stdout io.Writer) error
 			return fmt.Errorf("the newest policy this tool signed (%s): %w", statePath, err)
 		}
 	}
-	checked, err := signer.CheckReports(*reports, keysFrom, split(*unchecked), time.Now())
+	checked, err := signer.CheckReports(*reports, keysFrom, split(*unchecked), time.Now(), cur)
 	if err != nil {
 		return err
 	}
@@ -178,12 +185,19 @@ func run(ctx context.Context, cmd string, args []string, stdout io.Writer) error
 		fs.Visit(func(f *flag.Flag) { nocanarySet = nocanarySet || f.Name == "nocanary" })
 		if *mode == "keep" && g.Later() && !nocanarySet {
 			*nocanary = true
-			notes = append(notes, "nocanary too, since the guard bites later and is kept (-nocanary=false to wait for a canary's boot)")
+			notes = append(notes, "nocanary too, since the guard bites later and is kept: no machine will boot with it first (-nocanary=false waits for a canary's boot)")
 		}
 		for host, offs := range checked.Off {
 			for _, h := range offs {
 				if h == g.Hash() {
 					notes = append(notes, "this Yes doesn't put the guard back on "+host+", where you took it off; sign `on` for that")
+				}
+			}
+		}
+		for host, held := range checked.HeldByHand {
+			for _, h := range held {
+				if h == g.Hash() {
+					notes = append(notes, "this Yes doesn't put the guard back on "+host+", where root took it off by hand; sign `on` for that")
 				}
 			}
 		}
@@ -239,6 +253,15 @@ func run(ctx context.Context, cmd string, args []string, stdout io.Writer) error
 		*out = fmt.Sprintf("%s-%d.json", strings.ToLower(stmt.Func), stmt.Seq)
 	}
 	if err := os.WriteFile(*out, append(msg, '\n'), 0o644); err != nil {
+		return err
+	}
+	// A copy of every statement signed, by fleet and number: a machine held
+	// at a number can be given it again.
+	kept := filepath.Join(*configDir, "statements", cur.Fleet, fmt.Sprintf("%d.json", stmt.Seq))
+	if err := os.MkdirAll(filepath.Dir(kept), 0o700); err != nil {
+		return err
+	}
+	if err := os.WriteFile(kept, append(msg, '\n'), 0o600); err != nil {
 		return err
 	}
 	st.LastSeq = stmt.Seq

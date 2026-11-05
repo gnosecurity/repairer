@@ -148,6 +148,7 @@ type machineRow struct {
 	Policy  string // "" when the same as the lookout's
 	Pending string
 	Held    string
+	Skipped []string
 	Guards  []string
 	Failing []string
 	Wants   int
@@ -178,8 +179,11 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 			if rep.Pending != nil {
 				row.Pending = rep.Pending.Hash
 			}
+			row.Held = rep.Held
+			for _, sk := range rep.Skipped {
+				row.Skipped = append(row.Skipped, fmt.Sprintf("%d %s: %s", sk.Seq, sk.What, sk.Why))
+			}
 			if rep.Tick != nil {
-				row.Held = rep.Tick.Held
 				for k, why := range rep.Tick.Health {
 					row.Failing = append(row.Failing, k+": "+why)
 				}

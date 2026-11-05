@@ -48,7 +48,21 @@ type Fleet struct {
 	Off     []string       `json:"off,omitempty"` // guard hashes the owner took off this host
 	// ReportSeq numbers this agent's signed reports.
 	ReportSeq uint64 `json:"report_seq"`
+	// Held says why the owner's statements stop where they do, until it
+	// clears; Skipped lists the newest statements taken but not acted on.
+	Held    string    `json:"held,omitempty"`
+	Skipped []Skipped `json:"skipped,omitempty"`
 }
+
+// Skipped is an owner statement this agent took but couldn't act on.
+type Skipped struct {
+	Seq  uint64 `json:"seq"`
+	What string `json:"what"`
+	Why  string `json:"why"`
+}
+
+// maxSkipped is how many skipped statements the fleet file keeps.
+const maxSkipped = 20
 
 // PendingPolicy is a signed policy change counting down its delay from when
 // this agent first saw it.

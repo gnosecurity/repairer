@@ -50,8 +50,12 @@ type FleetReport struct {
 	Wants   []Want           `json:"wants,omitempty"`
 	Healthy []approve.Signed `json:"healthy,omitempty"`
 	Tick    *TickResult      `json:"tick,omitempty"`
-	Errors  []string         `json:"errors,omitempty"`
-	Facts   *Report          `json:"facts,omitempty"`
+	// Held says why the owner's statements stop where they do; Skipped
+	// lists statements taken but not acted on, and why.
+	Held    string    `json:"held,omitempty"`
+	Skipped []Skipped `json:"skipped,omitempty"`
+	Errors  []string  `json:"errors,omitempty"`
+	Facts   *Report   `json:"facts,omitempty"`
 }
 
 // PendingReport is a policy change waiting out its delay.
@@ -82,6 +86,7 @@ type OnTheWay struct {
 	Tries       int       `json:"tries,omitempty"`
 	RetryAt     time.Time `json:"retry_at,omitzero"`
 	Ask         bool      `json:"ask,omitempty"`
+	Held        bool      `json:"held,omitempty"` // taken off by hand: off until the owner's On
 	Last        string    `json:"last,omitempty"`
 	Refused     string    `json:"refused,omitempty"`
 	RefusedCode string    `json:"refused_code,omitempty"`
@@ -98,7 +103,8 @@ func (a *Agent) writeReport(ctx context.Context, f *Fleet, p *policy.Policy, res
 	owner, _ := hex.DecodeString(p.Signers.Me.Hex)
 	f.ReportSeq++
 	r := &FleetReport{Version: approve.MemoVersion, Kind: "report", Chain: approve.ChainID(owner, p.Fleet),
-		Host: f.Host, Seq: f.ReportSeq, Time: a.now().UTC(), Policy: p.Hash(), OwnerSeq: f.LastSeq, Off: f.Off, Tick: res}
+		Host: f.Host, Seq: f.ReportSeq, Time: a.now().UTC(), Policy: p.Hash(), OwnerSeq: f.LastSeq, Off: f.Off, Tick: res,
+		Held: f.Held, Skipped: f.Skipped}
 	if f.Pending != nil {
 		if np, err := policy.Parse(f.Pending.Policy); err == nil {
 			r.Pending = &PendingReport{Hash: np.Hash(), FirstSeen: f.Pending.FirstSeen}
@@ -126,7 +132,7 @@ func (a *Agent) writeReport(ctx context.Context, f *Fleet, p *policy.Policy, res
 		if on[h] {
 			continue
 		}
-		w := OnTheWay{Hash: h, Tries: ev.Tries, RetryAt: ev.RetryAt, Ask: ev.Ask, Last: ev.Last, Refused: ev.Refused, RefusedCode: ev.RefusedCode}
+		w := OnTheWay{Hash: h, Tries: ev.Tries, RetryAt: ev.RetryAt, Ask: ev.Ask, Held: ev.Held, Last: ev.Last, Refused: ev.Refused, RefusedCode: ev.RefusedCode}
 		if g, err := guard.Parse(ev.Guard); err == nil {
 			w.Name = g.Name()
 		}
@@ -134,7 +140,7 @@ func (a *Agent) writeReport(ctx context.Context, f *Fleet, p *policy.Policy, res
 			w.Baseline = ev.Trial.Samples
 		}
 		r.OnTheWay = append(r.OnTheWay, w)
-		if !canary && ev.Nonce != "" && !ev.Ask && !containsHash(f.Off, h) {
+		if !canary && ev.Nonce != "" && !ev.Ask && !ev.Held && !containsHash(f.Off, h) {
 			r.Wants = append(r.Wants, Want{Guard: h, Nonce: ev.Nonce})
 		}
 	}

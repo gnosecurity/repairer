@@ -209,6 +209,19 @@ func (g *Guard) Later() bool {
 	return false
 }
 
+// BitesAtBoot reports whether some block bites when a boot brings things up:
+// a module at its next load, a setting for new sockets or processes. A
+// strip bites at a program's next run, which a boot may not bring.
+func (g *Guard) BitesAtBoot() bool {
+	for _, b := range g.Blocks {
+		switch b.Effect() {
+		case NextLoad, NewSockets, NewProcesses:
+			return true
+		}
+	}
+	return false
+}
+
 // Auto reports whether every block may go on without the owner's yes.
 func (g *Guard) Auto() bool {
 	for _, b := range g.Blocks {

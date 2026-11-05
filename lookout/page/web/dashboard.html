@@ -21,7 +21,8 @@
 <td>{{if .Guards}}<ul>{{range .Guards}}<li>{{.}}</li>{{end}}</ul>{{else}}<span class="small">none</span>{{end}}</td>
 <td>{{if .Policy}}<span class="bad">runs policy {{short .Policy}}</span><br>{{end}}
 {{if .Pending}}<span class="bad">policy {{short .Pending}} PENDING: if you didn't sign it, cancel it</span><br>{{end}}
-{{if .Held}}<span class="bad">{{.Held}}</span><br>{{end}}
+{{if .Held}}<span class="bad">your statements: {{.Held}}</span><br>{{end}}
+{{range .Skipped}}<span class="small">skipped statement {{.}}</span><br>{{end}}
 {{range .Failing}}<span class="bad">failing: {{.}}</span><br>{{end}}
 {{if .Wants}}<span class="small">waits for a canary on {{.Wants}}</span>{{end}}</td></tr>{{end}}
 </table>

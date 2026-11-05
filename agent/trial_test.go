@@ -35,6 +35,13 @@ const site = "203.0.113.5:443"
 
 func newTrial(t *testing.T, host, extra string) *trial {
 	t.Helper()
+	return newTrialTier(t, host, `"hosts":["backup","mail"]`, extra)
+}
+
+// newTrialTier is newTrial with tier A's hosts (and anything else of the
+// tier's) given.
+func newTrialTier(t *testing.T, host, tierA, extra string) *trial {
+	t.Helper()
 	a, sys, timer := newAgent(t)
 	tr := &trial{t: t, a: a, sys: sys, timer: timer, clock: time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC),
 		keys: map[string]ed25519.PrivateKey{}, fail: map[string]string{}}
@@ -54,7 +61,7 @@ func newTrial(t *testing.T, host, extra string) *trial {
 		"rig":[{"name":"rig1","key":"` + pub(tr.rig) + `"}],
 		"agents":[{"name":"backup","key":"` + pub(tr.keys["backup"]) + `","host":"backup"},
 		          {"name":"mail","key":"` + pub(tr.keys["mail"]) + `","host":"mail"}]},
-		"tiers":[{"name":"A","hosts":["backup","mail"],"admit":["me","rig"],"canaries":["backup"]}],
+		"tiers":[{"name":"A",` + tierA + `,"admit":["me","rig"],"canaries":["backup"]}],
 		"health":[{"hosts":["backup","mail"],"kind":"tcp","target":"` + site + `","want":""}]` + extra + `}`))
 	if err != nil {
 		t.Fatal(err)
@@ -676,11 +683,21 @@ func TestKeepLater(t *testing.T) {
 	if e := tr.entry(g); e.Status != Confirmed || !e.Keep || e.Booted {
 		t.Fatalf("%+v", e)
 	}
+	// After a boot, a kept later guard has no window; it counts as booted
+	// once every check that held before the boot has passed since.
+	tr.step(time.Minute) // a sample before the boot, the check passing
+	tr.fail[site] = "still starting"
 	if err := tr.a.Boot(ctx); err != nil {
 		t.Fatal(err)
 	}
+	tr.step(time.Minute)
+	if e := tr.entry(g); e.Status != Confirmed || e.Booted || e.BootWindow {
+		t.Fatalf("booted before the check came back: %+v", e)
+	}
+	delete(tr.fail, site)
+	tr.step(time.Minute)
 	if e := tr.entry(g); e.Status != Confirmed || !e.Booted || e.BootWindow {
-		t.Fatalf("a keep guard after a boot: %+v", e)
+		t.Fatalf("a keep guard after a boot, the check back: %+v", e)
 	}
 
 	tr2 := newTrial(t, "backup", "")
@@ -689,7 +706,7 @@ func TestKeepLater(t *testing.T) {
 	tr2.tick()
 	tr2.clock = tr2.clock.Add(-time.Minute)
 	tr2.putOn(g2)
-	if on, err := tr2.a.SetKeep(ctx, g2.Hash()); err != nil || !on {
+	if on, err := tr2.a.SetKeep(ctx, g2.Hash(), true); err != nil || !on {
 		t.Fatal(on, err)
 	}
 	if e := tr2.entry(g2); e.Status != Confirmed || !e.Keep {
@@ -737,4 +754,185 @@ func (tr *trial) reportOf() *FleetReport {
 		tr.t.Fatal(err)
 	}
 	return &r
+}
+
+func ksmbdGuard(t *testing.T) *guard.Guard {
+	return parse(t, `{"id": "test/ksmbd", "version": 1, "flaws": ["CVE-2099-31"],
+		"for": [{"os": "ubuntu", "releases": ["24.04"]}],
+		"blocks": [{"module": {"name": "ksmbd"}}], "breaks": "the in-kernel SMB server"}`)
+}
+
+// The guards a boot brings back share one baseline, the machine's last
+// samples before the boot, and none is confirmed until all can be (round 6,
+// new major 2). Y's own baseline missed the check (it was failing then);
+// the shared one counts it. The check never comes back after the boot:
+// both come off, neither is marked booted.
+func TestBootGroupSharedBaseline(t *testing.T) {
+	tr := newTrial(t, "backup", "")
+	x, y := mptcpGuard(t), ksmbdGuard(t)
+	if !x.BitesAtBoot() || !y.BitesAtBoot() {
+		t.Fatal("both should bite at a boot")
+	}
+	tr.tested(x)
+	tr.tested(y)
+	tr.tick()
+	tr.clock = tr.clock.Add(-time.Minute)
+	first, second := x, y
+	if y.Hash() < x.Hash() {
+		first, second = y, x
+	}
+	tr.putOn(first)
+	for i := 0; i < 10; i++ {
+		tr.step(time.Minute)
+	}
+	tr.fail[site] = "down during the second guard's baseline"
+	tr.clock = tr.clock.Add(-time.Minute)
+	tr.putOn(second)
+	delete(tr.fail, site)
+	for i := 0; i < 10; i++ {
+		tr.step(time.Minute)
+	}
+	if tr.entry(first).Status != Confirmed || tr.entry(second).Status != Confirmed {
+		t.Fatal("not both confirmed")
+	}
+	for i := 0; i < 3; i++ {
+		tr.step(time.Minute) // samples before the boot: the check passing
+	}
+	if err := tr.a.Boot(ctx); err != nil {
+		t.Fatal(err)
+	}
+	tr.fail[site] = "never back after the boot"
+	var undone []string
+	for m := 1; m <= 15 && len(undone) == 0; m++ {
+		res := tr.step(time.Minute)
+		undone = res.Undone
+		if len(res.Confirmed) > 0 {
+			t.Fatalf("confirmed at minute %d with the check down", m)
+		}
+	}
+	if len(undone) != 2 {
+		t.Fatalf("both should come off: %v", undone)
+	}
+	for _, g := range []*guard.Guard{x, y} {
+		if e := tr.entry(g); e != nil {
+			t.Fatalf("%s still on: %+v", g.Name(), e)
+		}
+	}
+}
+
+// For a later guard that hasn't booted yet, only the window after its
+// boot starts the count of tries again (round 6, minor 1).
+func TestTriesLaterGuard(t *testing.T) {
+	tr := newTrial(t, "backup", "")
+	g := mptcpGuard(t)
+	tr.tested(g)
+	tr.tick()
+	tr.clock = tr.clock.Add(-time.Minute)
+	tr.putOn(g)
+	tr.fail[site] = "x"
+	for i := 0; i < 3; i++ {
+		tr.step(time.Minute)
+	}
+	delete(tr.fail, site)
+	tr.clock = tr.clock.Add(retries[0] - time.Minute)
+	tr.putOn(g)
+	for i := 0; i < 10; i++ {
+		tr.step(time.Minute)
+	}
+	if ev := tr.evidence(g); tr.entry(g).Status != Confirmed || ev.Tries != 1 {
+		t.Fatalf("a later guard's first window reset its tries: %d", ev.Tries)
+	}
+	if err := tr.a.Boot(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 11; i++ {
+		tr.step(time.Minute)
+	}
+	if ev := tr.evidence(g); !tr.entry(g).Booted || ev.Tries != 0 {
+		t.Fatalf("after its boot window: booted %v, tries %d", tr.entry(g).Booted, ev.Tries)
+	}
+}
+
+// Spacing waits only after a canary's Healthy (round 6, new major 3): with
+// the owner's nocanary, mail (second in line after web) takes the guard at
+// once; via the canary it waits its place.
+func TestSpacingOnlyAfterTheCanary(t *testing.T) {
+	g := ipoptGuard(t)
+	for _, nocanary := range []bool{true, false} {
+		tr := newTrialTier(t, "mail", `"hosts":["backup","web","mail"],"spacing_seconds":900`, "")
+		if nocanary {
+			ev := &Evidence{Guard: g.Canonical(), Yeses: map[string]*approve.Yes{"A": {Hash: g.Hash(), Tiers: []string{"A"}, Until: tr.clock.Add(24 * time.Hour), Mode: "undo", NoCanary: true}}}
+			if err := tr.a.saveEvidence(g.Hash(), ev); err != nil {
+				t.Fatal(err)
+			}
+			if res := tr.tick(); len(res.Baseline) != 1 {
+				t.Fatalf("nocanary waited: %+v", res)
+			}
+			continue
+		}
+		tr.tested(g)
+		tr.tick()
+		nonce := tr.evidence(g).Nonce
+		sg, _ := approve.SignStatement(tr.keys["backup"], approve.Statement{Version: approve.MemoVersion, Kind: approve.KindHealthy,
+			Chain: tr.chain(), Guard: g.Hash(), Host: "backup", State: approve.StateOn, Nonce: nonce})
+		tr.deliver(Bundle{Signed: []approve.Signed{sg}})
+		if res := tr.step(time.Minute); len(res.Baseline) != 0 || !strings.Contains(strings.Join(res.Waiting, " "), "spacing") {
+			t.Fatalf("via the canary, mail didn't wait its place: %+v", res)
+		}
+		if res := tr.step(15 * time.Minute); len(res.Baseline) != 1 {
+			t.Fatalf("after the spacing: %+v", res)
+		}
+	}
+}
+
+// A keep goes on even while another guard's window is open (round 6).
+func TestKeepDuringAWindow(t *testing.T) {
+	tr := newTrial(t, "backup", "")
+	g1 := ipoptGuard(t)
+	tr.tested(g1)
+	tr.tick()
+	tr.clock = tr.clock.Add(-time.Minute)
+	tr.putOn(g1) // in its window now
+	g2 := portGuard(t, "test/udp5353", "udp", "5353")
+	ev := &Evidence{Guard: g2.Canonical(), Yeses: map[string]*approve.Yes{"A": {Hash: g2.Hash(), Tiers: []string{"A"}, Until: tr.clock.Add(time.Hour), Mode: "keep"}}}
+	if err := tr.a.saveEvidence(g2.Hash(), ev); err != nil {
+		t.Fatal(err)
+	}
+	if res := tr.step(time.Minute); len(res.Applied) != 1 || res.Applied[0] != g2.Name() {
+		t.Fatalf("the keep waited for the window: %+v", res)
+	}
+	if tr.entry(g1).Status != Pending {
+		t.Fatal("the first guard's window should still be open")
+	}
+}
+
+// A strip bites at a program's next run, which a boot may not bring: it
+// gets no window after a boot, and counts as booted once the checks that
+// held before the boot have passed since (round 6).
+func TestStripNoBootWindow(t *testing.T) {
+	tr := newTrial(t, "backup", "")
+	tr.sys.addFile("/usr/bin/pkexec", 0o4755)
+	g := parse(t, `{"id": "test/pkexec", "version": 1, "flaws": ["CVE-2021-4034"],
+		"for": [{"os": "ubuntu", "releases": ["24.04"]}],
+		"blocks": [{"strip": {"path": "/usr/bin/pkexec"}}], "breaks": "pkexec"}`)
+	if !g.Later() || g.BitesAtBoot() {
+		t.Fatal("a strip bites later, but not at a boot")
+	}
+	tr.tested(g)
+	tr.tick()
+	tr.clock = tr.clock.Add(-time.Minute)
+	tr.putOn(g)
+	for i := 0; i < 10; i++ {
+		tr.step(time.Minute)
+	}
+	if err := tr.a.Boot(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if e := tr.entry(g); e.Status != Confirmed || e.BootWindow {
+		t.Fatalf("a strip got a window after the boot: %+v", e)
+	}
+	tr.step(time.Minute)
+	if e := tr.entry(g); !e.Booted {
+		t.Fatalf("not booted with the checks back: %+v", e)
+	}
 }

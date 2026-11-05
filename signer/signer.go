@@ -327,6 +327,11 @@ type reportBody struct {
 	} `json:"pending"`
 	OwnerSeq uint64   `json:"owner_seq"`
 	Off      []string `json:"off"`
+	Held     string   `json:"held"`
+	OnTheWay []struct {
+		Hash string `json:"hash"`
+		Held bool   `json:"held"`
+	} `json:"on_the_way"`
 }
 
 // Checked is what the reports say, for the owner to read before signing.
@@ -334,8 +339,10 @@ type Checked struct {
 	Lines    []string // one per machine
 	Pending  bool     // some machine has a policy change pending
 	OwnerSeq uint64   // the highest owner sequence any agent has accepted
-	// Off holds, for each machine, the guards the owner took off there.
-	Off map[string][]string
+	// Off holds, for each machine, the guards the owner took off there, and
+	// HeldByHand the guards root took off there by hand.
+	Off        map[string][]string
+	HeldByHand map[string][]string
 }
 
 // CheckReports reads each machine's signed report from dir (<host>.json),
@@ -343,10 +350,20 @@ type Checked struct {
 // owner signed with this tool. A machine without a fresh, valid report must
 // be one the owner named in unchecked; otherwise the check fails, so a
 // lookout can't hide a pending policy by withholding a report.
-func CheckReports(dir string, keysFrom *policy.Policy, unchecked []string, now time.Time) (*Checked, error) {
+//
+// A report names the chain id of the policy its machine runs, so the
+// chain ids of the policies in also count too (the policy in force, while
+// a newer one waits out its delay).
+func CheckReports(dir string, keysFrom *policy.Policy, unchecked []string, now time.Time, also ...*policy.Policy) (*Checked, error) {
 	chain, _, err := chainOf(keysFrom)
 	if err != nil {
 		return nil, err
+	}
+	chains := map[string]bool{chain: true}
+	for _, p := range also {
+		if c, _, err := chainOf(p); err == nil {
+			chains[c] = true
+		}
 	}
 	named := map[string]bool{}
 	for _, h := range unchecked {
@@ -358,7 +375,7 @@ func CheckReports(dir string, keysFrom *policy.Policy, unchecked []string, now t
 	c := &Checked{}
 	var missing []string
 	for _, k := range keysFrom.Signers.Agents {
-		line, r, err := checkOne(dir, k, chain, now)
+		line, r, err := checkOne(dir, k, chains, now)
 		if err != nil {
 			if named[k.Host] {
 				c.Lines = append(c.Lines, k.Host+": not checked ("+err.Error()+"); you named it")
@@ -380,6 +397,14 @@ func CheckReports(dir string, keysFrom *policy.Policy, unchecked []string, now t
 			}
 			c.Off[k.Host] = r.Off
 		}
+		for _, w := range r.OnTheWay {
+			if w.Held {
+				if c.HeldByHand == nil {
+					c.HeldByHand = map[string][]string{}
+				}
+				c.HeldByHand[k.Host] = append(c.HeldByHand[k.Host], w.Hash)
+			}
+		}
 		c.OwnerSeq = max(c.OwnerSeq, r.OwnerSeq)
 	}
 	if len(missing) > 0 {
@@ -388,7 +413,7 @@ func CheckReports(dir string, keysFrom *policy.Policy, unchecked []string, now t
 	return c, nil
 }
 
-func checkOne(dir string, k policy.Key, chain string, now time.Time) (string, *reportBody, error) {
+func checkOne(dir string, k policy.Key, chains map[string]bool, now time.Time) (string, *reportBody, error) {
 	b, err := readAll(filepath.Join(dir, k.Host+".json"), 16<<20)
 	if err != nil {
 		return "", nil, err
@@ -402,16 +427,19 @@ func checkOne(dir string, k policy.Key, chain string, now time.Time) (string, *r
 		return "", nil, err
 	}
 	switch {
-	case r.Kind != "report" || r.Chain != chain || r.Host != k.Host:
+	case r.Kind != "report" || !chains[r.Chain] || r.Host != k.Host:
 		return "", nil, errors.New("the report is for another machine or fleet")
 	case now.Sub(r.Time) > ReportFresh:
 		return "", nil, fmt.Errorf("the report is %s old", now.Sub(r.Time).Round(time.Minute))
 	case r.Time.After(now.Add(time.Minute)):
 		return "", nil, errors.New("the report is from the future")
 	}
-	line := fmt.Sprintf("%s: policy %.16s in force", k.Host, r.Policy)
+	line := fmt.Sprintf("%s: policy %.16s in force; your statements taken up to %d", k.Host, r.Policy, r.OwnerSeq)
 	if r.Pending != nil {
 		line += fmt.Sprintf("; policy %.16s PENDING since %s", r.Pending.Hash, r.Pending.FirstSeen.UTC().Format(time.RFC3339))
+	}
+	if r.Held != "" {
+		line += "; HELD: " + r.Held
 	}
 	return line, &r, nil
 }

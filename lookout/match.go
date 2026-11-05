@@ -158,3 +158,5 @@ func Summary(fs []Finding) string {
 	}
 	return b.String()
 }
+
+func jsonUnmarshal(s string, v any) error { return json.Unmarshal([]byte(s), v) }

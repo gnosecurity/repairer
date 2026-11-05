@@ -859,8 +859,15 @@ func (a *Agent) Boot(ctx context.Context) error {
 	}
 	defer s.close()
 	var errs []error
-	var windows []string
+	var windows, observed []string
+	var off []string
+	if f, err := a.loadFleet(); err == nil {
+		off = f.Off
+	}
 	for _, e := range append([]*Entry(nil), st.Guards...) {
+		if e.Status == Confirmed && containsHash(off, e.Hash) {
+			e.Status = Pending // the owner took it off this host: off it comes, below
+		}
 		if e.Status == Confirmed {
 			why := ""
 			if err := e.Guard.Validate(); err != nil {
@@ -874,13 +881,14 @@ func (a *Agent) Boot(ctx context.Context) error {
 						errs = append(errs, fmt.Errorf("%s: putting back %q: %w", e.Guard.Name(), stp.describe(), err))
 					}
 				}
-				// A guard that bites later gets one more window after its
-				// first boot, with its undo armed: the boot is when it
-				// bites. A keep guard has no window: back on after a boot is
-				// what it can show, and it counts as booted.
+				// A guard that bites when a boot brings things up gets one
+				// more window after its first boot, with its undo armed, and
+				// every such guard of this boot shares it (the boot group).
+				// A keep guard, or a strip, gets no window; it is watched,
+				// and counts as booted once the checks are back.
 				if e.Later && !e.Booted && e.By != "" {
-					if e.Keep {
-						e.Booted = true
+					if e.Keep || !e.Guard.BitesAtBoot() {
+						observed = append(observed, e.Hash)
 					} else {
 						now := a.now()
 						e.Status, e.BootWindow, e.AppliedAt, e.ConfirmBy = Pending, true, now, now.Add(a.bootArm())
@@ -896,6 +904,9 @@ func (a *Agent) Boot(ctx context.Context) error {
 		}
 	}
 	errs = append(errs, a.writeSysctlFile(st), s.save(st))
+	if len(windows)+len(observed) > 0 {
+		errs = append(errs, a.openBootGroup(windows, observed))
+	}
 	for _, h := range windows { // armed after the save, as Apply does
 		if err := a.Timer.Arm(ctx, h, a.bootArm()); err != nil {
 			errs = append(errs, fmt.Errorf("arming the undo for %s's window after boot: %w", h[:12], err))
@@ -918,10 +929,26 @@ func (a *Agent) bootArm() time.Duration {
 	return time.Duration(grace)*time.Second + trialArm
 }
 
-// SetKeep marks a guard on this machine as the owner's keep: a guard in its
-// window is confirmed now, and it gets no window after a boot. It reports
-// whether the guard is on here.
-func (a *Agent) SetKeep(ctx context.Context, hash string) (bool, error) {
+// MarkBooted records that a guard came through a boot with the checks back:
+// what a canary's "booted" says.
+func (a *Agent) MarkBooted(ctx context.Context, hash string) error {
+	s, st, err := a.open()
+	if err != nil {
+		return err
+	}
+	defer s.close()
+	if e := st.find(hash); e != nil && e.Status == Confirmed {
+		e.Booted = true
+		return s.save(st)
+	}
+	return nil
+}
+
+// SetKeep sets whether a guard on this machine is the owner's keep. A kept
+// guard in its window is confirmed now and gets no window after a boot; a
+// guard no longer kept gets the window back. It reports whether the guard
+// is on here.
+func (a *Agent) SetKeep(ctx context.Context, hash string, keep bool) (bool, error) {
 	s, st, err := a.open()
 	if err != nil {
 		return false, err
@@ -934,8 +961,8 @@ func (a *Agent) SetKeep(ctx context.Context, hash string) (bool, error) {
 	if e.Status == Applying {
 		return true, nil // half on: undo or boot deals with it first
 	}
-	e.Keep = true
-	if e.Status == Pending {
+	e.Keep = keep
+	if keep && e.Status == Pending {
 		return true, a.confirm(ctx, s, st, e)
 	}
 	return true, s.save(st)

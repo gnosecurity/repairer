@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/jaekwon/autopatch/approve"
 	"github.com/jaekwon/autopatch/guard"
 	"github.com/jaekwon/autopatch/policy"
@@ -99,9 +100,34 @@ func TestSignYes(t *testing.T) {
 	if err := run(context.Background(), "yes", keepArgs, &out); err != nil {
 		t.Fatalf("%v\n%s", err, out.String())
 	}
-	for _, want := range []string{"as sequence 44", "mode keep+nocanary", "nocanary too", "doesn't put the guard back on mail"} {
+	for _, want := range []string{"as sequence 44", "mode keep+nocanary", "nocanary too", "no machine will boot with it first", "doesn't put the guard back on mail", "taken up to 43"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("output lacks %q:\n%s", want, out.String())
 		}
+	}
+	for _, n := range []string{"42", "43", "44"} {
+		if _, err := os.Stat(filepath.Join(dir, "config", "statements", "signtest", n+".json")); err != nil {
+			t.Errorf("statement %s wasn't kept: %v", n, err)
+		}
+	}
+
+	// A change of the owner's key, signed: after it, the tool won't sign
+	// with the old key (round 6).
+	newOwner, _ := secp256k1.GeneratePrivateKey()
+	np, err := policy.Decode([]byte(strings.Replace(strings.Replace(string(p.Canonical()), ownerHex, hex.EncodeToString(newOwner.PubKey().SerializeCompressed()), 1),
+		`"replaces":""`, `"replaces":"`+p.Hash()+`"`, 1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	npFile := filepath.Join(dir, "policy-new.json")
+	os.WriteFile(npFile, np.Canonical(), 0o644)
+	out.Reset()
+	polArgs := append(append([]string{}, common...), "-confirm-keys", "-out", filepath.Join(dir, "pol.json"), npFile)
+	if err := run(context.Background(), "policy", polArgs, &out); err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	out.Reset()
+	if err := run(context.Background(), "yes", yesArgs, &out); err == nil || !strings.Contains(err.Error(), "change of your key") {
+		t.Fatalf("signed with the old key after a change of key: %v", err)
 	}
 }

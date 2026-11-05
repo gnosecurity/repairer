@@ -2,6 +2,8 @@ package agent
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -149,7 +151,7 @@ func tiersChain(t *testing.T) (*policy.Policy, []Message, *guard.Guard, map[stri
 		t.Fatal(err)
 	}
 	var msgs []Message
-	for i := 1; i <= 8; i++ {
+	for i := 1; i <= 12; i++ {
 		msgs = append(msgs, Message{Seq: uint64(i), Tx: read(fmt.Sprintf("%d.json", i))})
 	}
 	gb, err := os.ReadFile("../guard/testdata/cve-2026-98432-ipopt.json")
@@ -165,6 +167,9 @@ func tiersChain(t *testing.T) (*policy.Policy, []Message, *guard.Guard, map[stri
 		p, _ := policy.Parse(read(fmt.Sprintf("policy-%d.json", i)))
 		pols[p.Hash()] = p.Canonical()
 	}
+	unread := read("policy-unread.json") // a file this release can't read, under its own sha256
+	sum := sha256.Sum256(unread)
+	pols[hex.EncodeToString(sum[:])] = unread
 	return t0, msgs, g, pols
 }
 
@@ -290,7 +295,7 @@ func TestStatementsInOrder(t *testing.T) {
 func TestPolicyChain(t *testing.T) {
 	_, msgs, _, pols := tiersChain(t)
 	backup, tick, setClock := tiersAgentClock(t, "backup")
-	if res := tick(msgs...); len(res.Accepted) != 8 || res.Held != "" {
+	if res := tick(msgs[:8]...); len(res.Accepted) != 8 || res.Held != "" {
 		t.Fatalf("%+v", res)
 	}
 	f, _ := backup.loadFleet()
@@ -300,7 +305,7 @@ func TestPolicyChain(t *testing.T) {
 	}
 	var t2 string
 	for h, b := range pols {
-		if p, _ := policy.Parse(b); p.Tiers[0].SpacingSeconds == 900 {
+		if p, err := policy.Parse(b); err == nil && p.Tiers[0].SpacingSeconds == 900 {
 			t2 = h
 		}
 	}
@@ -327,5 +332,194 @@ func TestStatementUsesHeldGuardFile(t *testing.T) {
 	}
 	if res := tick(); len(res.Off) != 1 || res.Held != "" || isOn(t, mail, g) {
 		t.Fatalf("%+v", res)
+	}
+}
+
+// A statement whose signature checks out is always taken; one this agent
+// can't act on is listed as skipped, and the ones after it still act
+// (round 6, new major 1): a Cancel (no agent acts on it yet), a memo in a
+// newer format, a policy file this release can't read; then an Off.
+func TestSkipsDontHold(t *testing.T) {
+	_, msgs, g, _ := tiersChain(t)
+	mail, tick := tiersAgent(t, "mail")
+	tick(msgs[:8]...)
+	if !isOn(t, mail, g) {
+		t.Fatal("not on after 1 to 8")
+	}
+	res := tick(msgs[8:]...)
+	f, _ := mail.loadFleet()
+	if f.LastSeq != 12 || f.Held != "" || len(res.Off) != 1 || isOn(t, mail, g) {
+		t.Fatalf("last %d held %q: %+v", f.LastSeq, f.Held, res)
+	}
+	var whys []string
+	for _, sk := range f.Skipped {
+		whys = append(whys, fmt.Sprintf("%d %s", sk.Seq, sk.Why))
+	}
+	got := strings.Join(whys, " | ")
+	for _, want := range []string{"9 not a kind of statement this release acts on", "10 its memo is in a format newer", "11 a policy file this release can't read"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("skipped %q lacks %q", got, want)
+		}
+	}
+	// The report carries the skipped statements.
+	if err := mail.writeReport(ctx, f, mustPolicy(t, f), res); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mustPolicy(t *testing.T, f *Fleet) *policy.Policy {
+	p, err := f.InstalledPolicy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// Only a statement that doesn't check out holds the rest: a forged 4 holds
+// 4 to 6, and the hold stays in the fleet file (so in every report) until
+// the real 4 arrives.
+func TestHoldUntilItChecksOut(t *testing.T) {
+	_, msgs, g, _ := tiersChain(t)
+	mail, tick := tiersAgent(t, "mail")
+	tick(msgs[:3]...)
+	forged := Message{Seq: 4, Tx: json.RawMessage(strings.Replace(string(msgs[3].Tx), "hosts mail", "hosts mai1", 1))}
+	res := tick(forged, msgs[4], msgs[5])
+	f, _ := mail.loadFleet()
+	if f.LastSeq != 3 || !strings.Contains(f.Held, "held at statement 4") || !strings.Contains(f.Held, "doesn't check out") {
+		t.Fatalf("last %d held %q: %+v", f.LastSeq, f.Held, res)
+	}
+	if res := tick(); !strings.Contains(res.Held, "held at statement 4") {
+		t.Fatalf("the hold left a later report: %+v", res)
+	}
+	tick(msgs[3], msgs[4], msgs[5])
+	if f, _ = mail.loadFleet(); f.LastSeq != 6 || f.Held != "" || !isOn(t, mail, g) {
+		t.Fatalf("after the real 4: last %d held %q", f.LastSeq, f.Held)
+	}
+}
+
+// A Yes whose guard file isn't here yet holds until a lookout brings it.
+func TestYesWaitsForItsFile(t *testing.T) {
+	_, msgs, g, _ := tiersChain(t)
+	mail, tick := tiersAgent(t, "mail")
+	js, _ := json.Marshal(Bundle{Messages: msgs[:1]}) // no guard file
+	if _, err := Intake(filepath.Join(mail.StateDir, spoolDir), bytes.NewReader(js)); err != nil {
+		t.Fatal(err)
+	}
+	tick()
+	if f, _ := mail.loadFleet(); f.LastSeq != 0 || !strings.Contains(f.Held, "held at statement 1") {
+		t.Fatalf("last %d held %q", f.LastSeq, f.Held)
+	}
+	tick(msgs[0])
+	if f, _ := mail.loadFleet(); f.LastSeq != 1 || f.Held != "" || !isOn(t, mail, g) {
+		t.Fatalf("with its file: last %d held %q", f.LastSeq, f.Held)
+	}
+}
+
+// Every tick takes off whatever is on and on the Off list, and so does a
+// boot (round 6, minor 4): an Off whose undo never ran doesn't stay on.
+func TestOffEveryTickAndBoot(t *testing.T) {
+	_, msgs, g, _ := tiersChain(t)
+	for _, viaBoot := range []bool{false, true} {
+		mail, tick := tiersAgent(t, "mail")
+		tick(msgs[:3]...)
+		f, _ := mail.loadFleet()
+		f.Off = append(f.Off, g.Hash()) // the Off was taken, its undo never ran
+		if err := mail.saveFleet(f); err != nil {
+			t.Fatal(err)
+		}
+		if viaBoot {
+			if err := mail.Boot(ctx); err != nil {
+				t.Fatal(err)
+			}
+		} else {
+			tick()
+		}
+		if isOn(t, mail, g) {
+			t.Fatalf("still on (by boot: %v)", viaBoot)
+		}
+	}
+}
+
+// A guard's keep follows the newest Yes for its tier while it is in force
+// (round 6, minor 5): keep from 1, then the undo Yes 5 clears it; and a
+// hand hold is lifted only by On, not by a Yes.
+func TestKeepFollowsYesAndHolds(t *testing.T) {
+	_, msgs, g, _ := tiersChain(t)
+	mail, tick := tiersAgent(t, "mail")
+	tick(msgs[:3]...)
+	keep := func() bool {
+		for _, e := range load(t, mail).Guards {
+			if e.Hash == g.Hash() {
+				return e.Keep
+			}
+		}
+		t.Fatal("not on")
+		return false
+	}
+	if !keep() {
+		t.Fatal("not kept after the keep Yes")
+	}
+	// Root takes it off by hand: held.
+	if _, err := mail.Undo(ctx, g.Hash(), false); err != nil {
+		t.Fatal(err)
+	}
+	if err := mail.Hold(g.Hash(), "taken off by hand"); err != nil {
+		t.Fatal(err)
+	}
+	tick(msgs[3]) // Off(mail)
+	tick(msgs[4]) // Yes(A, undo): lifts neither the Off nor the hold
+	if isOn(t, mail, g) {
+		t.Fatal("a Yes put back a guard held by hand")
+	}
+	tick(msgs[5]) // On(mail): lifts both
+	if !isOn(t, mail, g) {
+		t.Fatal("On didn't put it back")
+	}
+	if keep() {
+		t.Fatal("still kept, though the newest Yes for the tier says undo")
+	}
+}
+
+// Keep follows the newest Yes while the guard stays on: on backup (which
+// the Off for mail doesn't touch), the keep from 1 is cleared by the undo
+// Yes 5.
+func TestKeepFollowsTheNewestYes(t *testing.T) {
+	_, msgs, g, _ := tiersChain(t)
+	backup, tick := tiersAgent(t, "backup")
+	tick(msgs[:4]...)
+	keep := func() bool {
+		for _, e := range load(t, backup).Guards {
+			if e.Hash == g.Hash() {
+				return e.Keep
+			}
+		}
+		t.Fatal("not on")
+		return false
+	}
+	if !keep() {
+		t.Fatal("not kept after the keep Yes")
+	}
+	tick(msgs[4])
+	if keep() {
+		t.Fatal("still kept after the undo Yes for its tier")
+	}
+}
+
+// Only On lifts a hold made by hand: on backup, held by hand, a Yes for
+// its tier leaves it off, and so does an On that names another host.
+func TestHandHoldOnlyOn(t *testing.T) {
+	_, msgs, g, _ := tiersChain(t)
+	backup, tick := tiersAgent(t, "backup")
+	tick(msgs[:4]...)
+	if _, err := backup.Undo(ctx, g.Hash(), false); err != nil {
+		t.Fatal(err)
+	}
+	if err := backup.Hold(g.Hash(), "taken off by hand"); err != nil {
+		t.Fatal(err)
+	}
+	tick(msgs[4], msgs[5]) // Yes(A), then On(mail)
+	tick()
+	if isOn(t, backup, g) {
+		t.Fatal("back on without an On for backup")
 	}
 }

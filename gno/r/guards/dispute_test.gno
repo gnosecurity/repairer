@@ -151,10 +151,11 @@ func TestFlakyRerun(cur realm, t *testing.T) {
 }
 
 // A checker lies through both reruns. A panel drawn by stake from a later
-// round, never a party, gives its word once every member has revealed;
-// nobody appeals, and at the last word the liar loses Slash: first the
-// panel's fees go back to the fund, then half of the rest to the worker
-// and the honest checkers. Every seat that said it is paid.
+// round, from every eligible ticket, parties' too (round 11, new major 1),
+// gives its word once every member has revealed; nobody appeals, and at the
+// last word the liar loses Slash: first the panel's fees go back to the
+// fund, then half of the rest to the worker and the honest checkers. Every
+// seat that said it is paid.
 func TestPanelSlashesALiar(cur realm, t *testing.T) {
 	reset()
 	owners := ownersN(8)
@@ -211,13 +212,6 @@ func TestPanelSlashesALiar(cur realm, t *testing.T) {
 		t.Fatalf("panel %v, seats %v, of %d", panel, seats, size)
 	}
 	for _, p := range panel {
-		for _, c := range parties {
-			if p == c {
-				t.Fatalf("%s is a party and sits on its panel", p)
-			}
-		}
-	}
-	for _, p := range panel {
 		testing.SetRealm(u(p))
 		CommitCheck(cross(cur), id, Commitment(p, "check", ok, salt(p)))
 	}
@@ -254,21 +248,23 @@ func TestPanelSlashesALiar(cur realm, t *testing.T) {
 	refill := least(taken, int64(size)*PanelFee)
 	rest := taken - refill
 	each := rest * ShowShare / 100 / 3 // the worker and the two honest checkers showed it
-	if stakeOf2(liar, owners) != MinTicket-Slash || bal(liar) != before[liar] || RecordOf(liar).Faults != 1 {
-		t.Errorf("the liar: stake %d, paid %d, record %+v", stakeOf2(liar, owners), bal(liar)-before[liar], RecordOf(liar))
-	}
+	want := map[address]int64{worker: FilingBond - 2*CheckFee - FundFee + each}
 	for _, c := range drawn[1:] {
-		if bal(c)-before[c] != CheckFee+each || stakeOf2(c, owners) != MinTicket {
-			t.Errorf("honest checker %s: paid %d, stake %d", c, bal(c)-before[c], stakeOf2(c, owners))
+		want[c] += CheckFee + each
+	}
+	for _, p := range panel { // every seat said it, a party's too
+		want[p] += PanelFee * int64(seats[p])
+	}
+	for _, a := range append([]address{worker}, owners...) {
+		if got := bal(a) - before[a]; got != want[a] {
+			t.Errorf("%s (%d seats): paid %d, want %d", a, seats[a], got, want[a])
+		}
+		if a != worker && a != liar && stakeOf2(a, owners) != MinTicket {
+			t.Errorf("%s lost stake: %d", a, stakeOf2(a, owners))
 		}
 	}
-	if got := bal(worker) - before[worker]; got != FilingBond-2*CheckFee-FundFee+each {
-		t.Errorf("the worker got %d", got)
-	}
-	for _, p := range panel {
-		if bal(p)-before[p] != PanelFee*int64(seats[p]) || stakeOf2(p, owners) != MinTicket {
-			t.Errorf("panelist %s with %d seats: paid %d", p, seats[p], bal(p)-before[p])
-		}
+	if stakeOf2(liar, owners) != MinTicket-Slash || RecordOf(liar).Faults != 1 {
+		t.Errorf("the liar: stake %d, record %+v", stakeOf2(liar, owners), RecordOf(liar))
 	}
 	if FundBalance() != 1_000_000-int64(size)*PanelFee+FundFee+refill || Burned() != rest-3*each {
 		t.Errorf("fund %d, burned %d", FundBalance(), Burned())
@@ -282,7 +278,8 @@ func TestPanelSlashesALiar(cur realm, t *testing.T) {
 
 // All three checkers lie, and the whole first panel says what they said:
 // its word goes against the honest worker. The worker appeals; the next
-// panel, honest, gives the last word. No honest bond or stake is taken;
+// panel, honest (a lying checker drawn to it says what it says), gives the
+// last word. No honest bond or stake is taken;
 // every lying checker loses Slash, and every lying seat too; the fund is
 // paid back first, then half of the rest goes to the worker, who showed
 // it, and its appeal bond comes back (round 9, new major 3).
@@ -350,11 +347,6 @@ func TestAppealOverturnsAPanel(cur realm, t *testing.T) {
 	seats2 := seatMap(id, second)
 	if size2 != PanelSizes[1] || sumSeats(seats2) != size2 {
 		t.Fatalf("the second panel %v of %d", seats2, size2)
-	}
-	for _, p := range second {
-		if p == worker || p == drawn[0] || p == drawn[1] || p == drawn[2] {
-			t.Fatalf("a party, %s, sits on the second panel", p)
-		}
 	}
 	for _, p := range second {
 		testing.SetRealm(u(p))
@@ -452,9 +444,10 @@ func TestPanelSlashesALyingWorker(cur realm, t *testing.T) {
 	}
 	rest := FilingBond - least(FilingBond, int64(size)*PanelFee)
 	each := rest * ShowShare / 100 / 3
-	for _, c := range drawn {
-		if bal(c)-before[c] != each || stakeOf2(c, owners) != MinTicket {
-			t.Errorf("checker %s: paid %d", c, bal(c)-before[c])
+	seats := seatMap(id, panel)
+	for _, c := range drawn { // a checker drawn to the panel is paid for its seats too
+		if bal(c)-before[c] != each+PanelFee*int64(seats[c]) || stakeOf2(c, owners) != MinTicket {
+			t.Errorf("checker %s with %d seats: paid %d", c, seats[c], bal(c)-before[c])
 		}
 	}
 	if bal(worker) != before[worker] || RecordOf(worker).Faults != 1 {
@@ -462,9 +455,10 @@ func TestPanelSlashesALyingWorker(cur realm, t *testing.T) {
 	}
 }
 
-// Disputes wait while the fund can't pay a panel; anyone may fund it. A
-// round that goes stale meanwhile is replaced by Settle, so a dispute is
-// never stuck.
+// Disputes wait while the fund can't pay a panel, with no round fixed, so
+// whoever tops the fund up can't pick a round already seen; anyone may fund
+// it and ask again (round 11, minor 6). A round that goes stale is replaced
+// by Settle, its fees still set aside, so a dispute is never stuck.
 func TestFundWaits(cur realm, t *testing.T) {
 	reset()
 	Reruns = 0
@@ -488,28 +482,46 @@ func TestFundWaits(cur realm, t *testing.T) {
 	}
 	aim(1003)
 	testing.SetRealm(u(anyone))
-	if s := Settle(cross(cur), id); s != Panel {
-		t.Fatalf("without reruns: %s", s)
+	if s := Settle(cross(cur), id); s != PanelWait {
+		t.Fatalf("without reruns and with an empty fund: %s", s)
 	}
-	SubmitBeacon(cross(cur), 1003, sig1003)
-	refuses(t, "disputes wait for it", func() { DrawPanel(cross(cur), id) })
-	refuses(t, "the panel can still be drawn", func() { Settle(cross(cur), id) })
-	testing.SkipHeights(DrawDeadline + 1)
-	send(int64(PanelSizes[0]) * PanelFee)
+	if roundsWait() {
+		t.Fatal("a round was fixed for a panel the fund can't pay")
+	}
+	refuses(t, "not waiting for a panel", func() { DrawPanel(cross(cur), id) })
+	send(panelCost(0) - 1)
 	Fund(cross(cur))
 	send(0)
+	if s := RequestPanel(cross(cur), id); s != PanelWait {
+		t.Fatalf("one ugnot short: %s", s)
+	}
+	send(1)
+	Fund(cross(cur))
+	send(0)
+	if s := RequestPanel(cross(cur), id); s != Panel || FundBalance() != 0 {
+		t.Fatalf("funded: %s, fund %d", s, FundBalance())
+	}
+	if _, r, _ := State(id); r != 1003 {
+		t.Fatalf("the panel's round is %d", r)
+	}
+	refuses(t, "not waiting for the fund", func() { RequestPanel(cross(cur), id) })
+	refuses(t, "the panel can still be drawn", func() { Settle(cross(cur), id) })
+	testing.SkipHeights(DrawDeadline + 1)
 	refuses(t, "the panel's deadline has passed", func() { DrawPanel(cross(cur), id) })
 	aim(1004)
-	if s := Settle(cross(cur), id); s != Panel {
-		t.Fatalf("after the deadline: %s", s)
+	if s := Settle(cross(cur), id); s != Panel || FundBalance() != 0 {
+		t.Fatalf("after the deadline: %s, fund %d", s, FundBalance())
+	}
+	if waits.Size() != 1 {
+		t.Errorf("%d rounds kept waiting; the stale one should be let go", waits.Size())
 	}
 	if _, r, _ := State(id); r != 1004 {
 		t.Fatalf("the new round is %d", r)
 	}
 	SubmitBeacon(cross(cur), 1004, sig1004)
 	DrawPanel(cross(cur), id)
-	if st, _, _ := State(id); st != Panelled || FundBalance() != 0 {
-		t.Fatalf("after funding: %s, fund %d", st, FundBalance())
+	if st, _, _ := State(id); st != Panelled || FundBalance() != 0 || roundsWait() {
+		t.Fatalf("after the draw: %s, fund %d, a round waits: %v", st, FundBalance(), roundsWait())
 	}
 }
 
@@ -598,7 +610,11 @@ func TestSplitPanelEscalates(cur realm, t *testing.T) {
 	refuses(t, "still waiting for commitments", func() { Settle(cross(cur), id) })
 	testing.SkipHeights(CheckWindow + 1)
 	testing.SetRealm(u(anyone))
-	Settle(cross(cur), id) // the silent member's seats are out; the rest may reveal
+	f0, b0 := FundBalance(), Burned()
+	Settle(cross(cur), id)                                                 // the silent member's seats are out; the rest may reveal
+	if FundBalance()-f0 != Slash*int64(seats2[silent]) || Burned() != b0 { // silence pays the fund (round 11, minor 3)
+		t.Errorf("the silent member's slash: fund +%d, burned +%d", FundBalance()-f0, Burned()-b0)
+	}
 	for _, p := range second {
 		if p != silent {
 			testing.SetRealm(u(p))
@@ -671,8 +687,12 @@ func TestSilentInARerun(cur realm, t *testing.T) {
 	}
 	testing.SkipHeights(CheckWindow + 1)
 	testing.SetRealm(u(anyone))
+	f0 := FundBalance()
 	if s := Settle(cross(cur), id); s != Rerun {
 		t.Fatalf("after a silence in the rerun's commitments: %s", s)
+	}
+	if FundBalance()-f0 != Slash || Burned() != 0 { // silence pays the fund (round 11, minor 3)
+		t.Errorf("the silent checker's slash: fund +%d, burned %d", FundBalance()-f0, Burned())
 	}
 	for _, c := range []address{worker, drawn[1], drawn[2]} {
 		testing.SetRealm(u(c))
@@ -846,6 +866,7 @@ func TestLosingAppeal(cur realm, t *testing.T) {
 	SubmitBeacon(cross(cur), 1003, sig1003)
 	DrawPanel(cross(cur), id)
 	first, size1 := PanelOf(id)
+	seats1 := seatMap(id, first)
 	for _, p := range first {
 		testing.SetRealm(u(p))
 		CommitCheck(cross(cur), id, Commitment(p, "check", ok, salt(p)))
@@ -864,17 +885,12 @@ func TestLosingAppeal(cur realm, t *testing.T) {
 	send(bond)
 	Appeal(cross(cur), id)
 	send(0)
-	if !party(get(id), liar) {
-		t.Fatal("the appellant isn't a party, so its ticket could sit on the panel judging its appeal")
-	}
 	testing.SetRealm(u(anyone))
 	SubmitBeacon(cross(cur), 1004, sig1004)
 	DrawPanel(cross(cur), id)
 	second, size2 := PanelOf(id)
-	for _, p := range second {
-		if p == liar {
-			t.Fatal("the appellant sits on the panel that judges its appeal")
-		}
+	seats2 := seatMap(id, second)
+	for _, p := range second { // drawn from every ticket, the appellant's too (round 11, new major 1)
 		testing.SetRealm(u(p))
 		CommitCheck(cross(cur), id, Commitment(p, "check", ok, salt(p)))
 	}
@@ -894,16 +910,20 @@ func TestLosingAppeal(cur realm, t *testing.T) {
 	refill := least(taken, cost)
 	rest := taken - refill
 	each := rest * ShowShare / 100 / 3 // the worker and the two honest checkers
-	if bal(liar) != before[liar] || stakeOf2(liar, owners) != MinTicket-Slash || RecordOf(liar).Faults != 1 {
-		t.Errorf("the appellant: paid %d, stake %d, record %+v", bal(liar)-before[liar], stakeOf2(liar, owners), RecordOf(liar))
-	}
-	if got := bal(worker) - before[worker]; got != FilingBond-2*CheckFee-FundFee+each {
-		t.Errorf("the worker got %d", got)
-	}
+	want := map[address]int64{worker: FilingBond - 2*CheckFee - FundFee + each}
 	for _, c := range drawn[1:] {
-		if got := bal(c) - before[c]; got != CheckFee+each {
-			t.Errorf("honest checker %s got %d", c, got)
+		want[c] += CheckFee + each
+	}
+	for _, o := range owners { // every seat of both panels said the last word
+		want[o] += PanelFee * int64(seats1[o]+seats2[o])
+	}
+	for _, a := range append([]address{worker}, owners...) {
+		if got := bal(a) - before[a]; got != want[a] {
+			t.Errorf("%s (seats %d and %d): got %d, want %d", a, seats1[a], seats2[a], got, want[a])
 		}
+	}
+	if stakeOf2(liar, owners) != MinTicket-Slash || RecordOf(liar).Faults != 1 {
+		t.Errorf("the appellant: stake %d, record %+v", stakeOf2(liar, owners), RecordOf(liar))
 	}
 	if FundBalance() != 10_000_000-cost+FundFee+refill || Burned() != rest-3*each {
 		t.Errorf("fund %d, burned %d", FundBalance(), Burned())
@@ -953,19 +973,12 @@ func TestFrivolousObjection(cur realm, t *testing.T) {
 	send(ObjectionBond)
 	Object(cross(cur), id, fails)
 	send(0)
-	if !party(get(id), objector) {
-		t.Fatal("the objector isn't a party, so its ticket could sit on its own panel")
-	}
 	testing.SetRealm(u(anyone))
 	SubmitBeacon(cross(cur), 1003, sig1003)
 	DrawPanel(cross(cur), id)
 	panel, size := PanelOf(id)
-	for _, p := range panel {
-		if p == objector {
-			t.Fatalf("the objector sits on the panel judging it: %v", panel)
-		}
-	}
-	for _, p := range panel {
+	seats := seatMap(id, panel)
+	for _, p := range panel { // every ticket may sit, the objector's too (round 11, new major 1)
 		testing.SetRealm(u(p))
 		CommitCheck(cross(cur), id, Commitment(p, "check", ok, salt(p)))
 	}
@@ -982,16 +995,20 @@ func TestFrivolousObjection(cur realm, t *testing.T) {
 	}
 	rest := ObjectionBond - least(ObjectionBond, int64(size)*PanelFee)
 	each := rest * ShowShare / 100 / 4 // the worker and the three checkers
-	if bal(objector) != before[objector] || RecordOf(objector).Faults != 1 {
-		t.Errorf("the objector: paid %d, record %+v", bal(objector)-before[objector], RecordOf(objector))
-	}
+	want := map[address]int64{worker: FilingBond - 3*CheckFee - FundFee + each}
 	for _, c := range drawn {
-		if got := bal(c) - before[c]; got != CheckFee+each {
-			t.Errorf("checker %s got %d", c, got)
+		want[c] += CheckFee + each
+	}
+	for _, p := range panel {
+		want[p] += PanelFee * int64(seats[p])
+	}
+	for _, a := range append([]address{worker}, owners...) {
+		if got := bal(a) - before[a]; got != want[a] {
+			t.Errorf("%s (%d seats): got %d, want %d", a, seats[a], got, want[a])
 		}
 	}
-	if got := bal(worker) - before[worker]; got != FilingBond-3*CheckFee-FundFee+each {
-		t.Errorf("the worker got %d", got)
+	if RecordOf(objector).Faults != 1 {
+		t.Errorf("the objector's record: %+v", RecordOf(objector))
 	}
 }
 
@@ -1111,16 +1128,11 @@ func TestAnyoneAppeals(cur realm, t *testing.T) {
 	send(bond)
 	Appeal(cross(cur), id)
 	send(0)
-	if !party(get(id), honest) {
-		t.Fatal("the appellant isn't a party")
-	}
 	testing.SetRealm(u(anyone))
 	SubmitBeacon(cross(cur), 1004, sig1004)
 	DrawPanel(cross(cur), id)
-	second, _ := PanelOf(id)
-	if SeatsOf(id, honest) != 0 {
-		t.Fatal("the appellant sits on the panel that judges its appeal")
-	}
+	second, size2 := PanelOf(id)
+	seats2 := seatMap(id, second) // the appellant's tickets may sit too (round 11, new major 1)
 	for _, p := range second {
 		testing.SetRealm(u(p))
 		CommitCheck(cross(cur), id, Commitment(p, "check", fails, salt(p)))
@@ -1136,8 +1148,14 @@ func TestAnyoneAppeals(cur realm, t *testing.T) {
 	if s := Settle(cross(cur), id); s != Failed || lvl() != "" {
 		t.Fatalf("the last word: %s, level %q", s, lvl())
 	}
-	if got := bal(honest) - before[honest]; got != bond {
-		t.Errorf("the honest appellant got back %d of %d", got, bond)
+	// The appellant changed the word: its bond back, and ShowShare of what
+	// is left once the fund is paid back, as the only one who showed it
+	// (round 11, minor 3).
+	taken := FilingBond + ObjectionBond + int64(3+sumSeats(seats1))*Slash
+	refill := least(taken, int64(size2)*PanelFee) // what the fund paid out: the second panel's seats
+	share := (taken - refill) * ShowShare / 100
+	if got := bal(honest) - before[honest]; got != bond+share+PanelFee*int64(seats2[honest]) {
+		t.Errorf("the honest appellant got %d: bond %d, share %d, %d seats", got, bond, share, seats2[honest])
 	}
 	if bal(worker) != before[worker] || RecordOf(worker).Faults != 1 {
 		t.Errorf("the liar's worker: paid %d", bal(worker)-before[worker])

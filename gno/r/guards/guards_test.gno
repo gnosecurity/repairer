@@ -52,7 +52,7 @@ var (
 func reset() {
 	tickets, nTickets, filings, nFilings = avl.NewTree(), 0, avl.NewTree(), 0
 	levels, records, beacon, burned, fund = avl.NewTree(), avl.NewTree(), avl.NewTree(), 0, 0
-	sumRoot, active = nil, 0
+	sumRoot, active, pending, waits = &sumNode{}, 0, nil, avl.NewTree()
 	votes, allVotes, openVotes = map[int]*poolVote{}, nil, nil
 	texts, byGuard = avl.NewTree(), avl.NewTree()
 	MinTicketAge, RevealWindow, CheckWindow, DrawDeadline, UnbondBlocks, DrawDelay = 10, 5, 20, 30, 60, 3
@@ -60,6 +60,7 @@ func reset() {
 	Reruns, PanelSizes = 2, []int{4, 7}
 	PoolCommitWindow, PoolRevealWindow, PoolFee, PoolClaimWindow = 5, 5, 1_000_000, 50
 	AppealBond, RerunFee, MaxSettle = 1_000_000, 500_000, 64
+	DrawFee, FilingBond = 0, 1_000_000 // TestDrawPaysTheDrawer and the tests after it set their own DrawFee
 }
 
 func u(a address) runtime.Realm { return testing.NewUserRealm(a) }
@@ -311,6 +312,9 @@ func TestLazyChecker(cur realm, t *testing.T) {
 		t.Errorf("the lazy checker kept %d", got)
 	}
 	drawn2 := draw(t, cur, id, 1002, sig1002)
+	if roundsWait() {
+		t.Error("after the redraw's draw a round still holds the tree") // fixRound let go of the first
+	}
 	var fresh address
 	for _, c := range drawn2 {
 		if c == lazy {
@@ -342,8 +346,8 @@ func TestLazyChecker(cur realm, t *testing.T) {
 	if got := bal(worker) - before[worker]; got != FilingBond-int64(Checkers)*CheckFee-FundFee {
 		t.Errorf("worker got back %d", got)
 	}
-	if Burned() != NoShowFine {
-		t.Errorf("burned %d", Burned())
+	if Burned() != 0 || FundBalance() != FundFee+NoShowFine { // silence pays the fund (round 11, minor 3)
+		t.Errorf("burned %d, fund %d", Burned(), FundBalance())
 	}
 }
 
@@ -483,8 +487,8 @@ func TestLiarAndSilent(cur realm, t *testing.T) {
 			t.Errorf("%s: stake %d, paid %d", c, stakeOf(tid), bal(c)-before[c])
 		}
 	}
-	if bal(worker) != before[worker] || Burned() != NoShowFine {
-		t.Errorf("worker paid %d, burned %d", bal(worker)-before[worker], Burned())
+	if bal(worker) != before[worker] || Burned() != 0 || FundBalance() != NoShowFine {
+		t.Errorf("worker paid %d, burned %d, fund %d", bal(worker)-before[worker], Burned(), FundBalance())
 	}
 }
 
@@ -581,8 +585,9 @@ func TestCopierAndFlood(cur realm, t *testing.T) {
 
 // A ticket staked less than MinTicketAge before a filing, even by one
 // block, can't be drawn into it, nor one staked after it, nor one unstaked
-// before its round was fixed. A filing not drawn by its deadline may be
-// abandoned by anyone: the bond goes back, less FundFee (round 9, minor 10).
+// before its round was fixed. A draw that finds too few owners abandons the
+// filing at once: the bond goes back, less FundFee (round 9, minor 10;
+// round 11, minor 6).
 func TestYoungTickets(cur realm, t *testing.T) {
 	reset()
 	for _, w := range []address{alice, bob, carol} {
@@ -610,17 +615,45 @@ func TestYoungTickets(cur realm, t *testing.T) {
 	Reveal(cross(cur), id, guardText, sys, tc, "s")
 	testing.SetRealm(u(anyone))
 	SubmitBeacon(cross(cur), 1001, sig1001)
-	refuses(t, "too few staked checkers", func() { Draw(cross(cur), id) })
-	if st, _, drawn := State(id); st != Revealed || len(drawn) != 0 {
-		t.Errorf("a failed draw left %s with %v", st, drawn)
+	if s := Draw(cross(cur), id); s != Abandoned {
+		t.Fatalf("a draw with too few owners left the filing %s", s)
 	}
+	if _, _, drawn := State(id); len(drawn) != 0 || roundsWait() {
+		t.Errorf("the abandoned filing drew %v; a round still waits: %v", drawn, roundsWait())
+	}
+	if got := bal(worker) - before; got != FilingBond-FundFee || FundBalance() != FundFee {
+		t.Errorf("worker got back %d, fund %d", got, FundBalance())
+	}
+	refuses(t, "not waiting for a draw", func() { Abandon(cross(cur), id) })
+}
+
+// A filing nobody draws by its deadline, though it could have been drawn,
+// loses its bond to the fund when abandoned: letting a disliked draw lapse
+// and filing again costs the bond (round 11, minor 6). Checkers kept from
+// an earlier draw are paid first.
+func TestLapsedDrawLosesBond(cur realm, t *testing.T) {
+	reset()
+	for _, w := range []address{alice, bob, carol, dave} {
+		testing.SetRealm(u(w))
+		stakeOne(t, cur)
+	}
+	testing.SkipHeights(MinTicketAge)
+	before := bal(worker)
+	testing.SetRealm(u(worker))
+	id := file(t, cur, ok, 1001)
+	testing.SetRealm(u(anyone))
 	refuses(t, "it can still be drawn", func() { Abandon(cross(cur), id) })
 	testing.SkipHeights(DrawDeadline + 1)
 	refuses(t, "the draw's deadline has passed", func() { Draw(cross(cur), id) })
-	testing.SetRealm(u(eve))
+	if roundsWait() {
+		t.Error("a round past its deadline still holds the tree")
+	}
 	Abandon(cross(cur), id)
-	if got := bal(worker) - before; got != FilingBond-FundFee || FundBalance() != FundFee {
-		t.Errorf("worker got back %d, fund %d", got, FundBalance())
+	if st, _, _ := State(id); st != Abandoned || waits.Size() != 0 {
+		t.Fatalf("abandoned: %s, %d rounds kept", st, waits.Size())
+	}
+	if got := bal(worker) - before; got != 0 || FundBalance() != FilingBond {
+		t.Errorf("the filer got back %d of its bond; fund %d", got, FundBalance())
 	}
 }
 
@@ -650,8 +683,8 @@ func TestNobodyAnswers(cur realm, t *testing.T) {
 	if s := Settle(cross(cur), id); s != Abandoned || lvl() != "" {
 		t.Fatalf("checked by nobody: %s", s)
 	}
-	if got := bal(worker) - before; got != FilingBond-FundFee || Burned() != 3*NoShowFine {
-		t.Errorf("worker got back %d, burned %d", got, Burned())
+	if got := bal(worker) - before; got != FilingBond-FundFee || Burned() != 0 || FundBalance() != FundFee+3*NoShowFine {
+		t.Errorf("worker got back %d, burned %d, fund %d", got, Burned(), FundBalance())
 	}
 }
 
@@ -725,7 +758,9 @@ func TestSilentOwnerNotRedrawn(cur realm, t *testing.T) {
 		t.Fatalf("after the window: %s", s)
 	}
 	SubmitBeacon(cross(cur), 1002, sig1002)
-	refuses(t, "too few staked checkers", func() { Draw(cross(cur), id) })
+	if s := Draw(cross(cur), id); s != Abandoned { // only the silent owner is left to draw
+		t.Fatalf("the redraw: %s", s)
+	}
 }
 
 // The draw takes its pool as it was when the round was fixed: unstaking
@@ -825,9 +860,11 @@ func TestFloor(cur realm, t *testing.T) {
 	}
 }
 
-// The draw reads the version of the tree its round was fixed on:
-// withdrawing tickets unstaked long before, after the beacon is out,
-// changes no pick (round 10, new major 1).
+// Withdrawing tickets that started leaving while an earlier round waited,
+// after a later round is fixed and before its draw, changes no pick: their
+// weight stays where draws see it, marked withdrawn, until no round waits;
+// then the draw's compaction takes it out (round 10, new major 1; round 11,
+// new major 2).
 func TestWithdrawMovesNoDraw(cur realm, t *testing.T) {
 	owners := []address{alice, bob, carol, dave, eve, anyone}
 	spares := []address{testutils.TestAddress("s1"), testutils.TestAddress("s2"), testutils.TestAddress("s3")}
@@ -838,23 +875,37 @@ func TestWithdrawMovesNoDraw(cur realm, t *testing.T) {
 			testing.SetRealm(u(w))
 			stakeOne(t, cur)
 		}
-		for i, w := range spares { // staked and unstaked at once: never drawn, but in the tree until withdrawn
+		for i, w := range spares {
 			testing.SetRealm(u(w))
 			send(MinTicket + int64(i+1))
 			StakeTicket(cross(cur))
 			send(0)
+		}
+		testing.SkipHeights(MinTicketAge)
+		testing.SetRealm(u(worker))
+		file(t, cur, ok, 1001) // an earlier filing, whose round waits while the spares leave
+		for i, w := range spares {
+			testing.SetRealm(u(w))
 			Unstake(cross(cur), len(owners)+i)
 		}
-		testing.SkipHeights(UnbondBlocks)
+		if len(pending) != 3 {
+			t.Fatalf("%d leaving while a round waits are pending", len(pending))
+		}
+		testing.SkipHeights(UnbondBlocks) // the earlier round lapses; nobody compacts
 		testing.SetRealm(u(worker))
 		id := file(t, cur, ok, 1001)
 		if pass == 1 {
-			for i, w := range spares { // after the round is fixed, before the draw
+			for i, w := range spares { // after the round is fixed, before its draw
 				testing.SetRealm(u(w))
 				Withdraw(cross(cur), len(owners)+i)
 			}
-			if sumBelow(sumRoot, nTickets) != 6*MinTicket || sumBelow(get(id).pool, nTickets) != 9*MinTicket+6 {
-				t.Fatalf("the newest tree weighs %d, the round's %d", sumBelow(sumRoot, nTickets), sumBelow(get(id).pool, nTickets))
+			sum, left, gone, parked := below(nTickets)
+			if sum != 9*MinTicket+6 || left != 3*MinTicket+6 || gone != 3*MinTicket+6 || parked != 0 || len(pending) != 3 {
+				t.Fatalf("while the round waits the tree holds %d, %d leaving, %d withdrawn, %d parked; %d pending", sum, left, gone, parked, len(pending))
+			}
+			testing.SetRealm(u(anyone))
+			if n := Compact(cross(cur)); n != 3 {
+				t.Fatalf("Compact took withdrawn weight out while a round waited: %d left", n)
 			}
 		}
 		testing.SetRealm(u(anyone))
@@ -862,6 +913,9 @@ func TestWithdrawMovesNoDraw(cur realm, t *testing.T) {
 		if pass == 0 {
 			first = drawn
 			continue
+		}
+		if sum, left, gone, parked := below(nTickets); sum != 6*MinTicket || left != 0 || gone != 0 || parked != 0 || len(pending) != 0 {
+			t.Fatalf("after the draw the tree holds %d, %d leaving, %d withdrawn, %d parked; %d pending", sum, left, gone, parked, len(pending))
 		}
 		for i := range drawn {
 			if drawn[i] != first[i] {

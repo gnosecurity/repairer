@@ -174,18 +174,22 @@ func TestPoolDecides(cur realm, t *testing.T) {
 			t.Errorf("%s withdrew %d, want %d", a, got, MinTicket-wrong[a])
 		}
 	}
-	if Burned() != rest-rest*ShowShare/100+2*Slash || LiveStake() != 0 {
-		t.Errorf("burned %d, live stake %d", Burned(), LiveStake())
+	// The two wrong votes' charges go to the fund as their tickets leave
+	// (round 11, minor 3), after the sweep.
+	swept := PoolFee - 6*(PoolFee/6)
+	if Burned() != rest-rest*ShowShare/100 || LiveStake() != 0 || FundBalance() != FundFee+int64(wrongSeats)*PanelFee+refill+swept+2*Slash {
+		t.Errorf("burned %d, live stake %d, fund %d", Burned(), LiveStake(), FundBalance())
 	}
 }
 
-// Five of eight owners commit and four open: under two thirds of the stake.
-// The tally waits while a committed vote may still open. No panel ever
-// decided, so nothing is: no level, nobody paid or charged for the dispute,
-// the worker's whole bond back, every ticket let go, and the vote's fee
-// back in the fund. The vote waits for a fund that can pay it; a ticket
-// can't leave while the vote is open; each of the four that didn't vote is
-// charged AbstainShare as it leaves (a stall is the abstainers').
+// Five of eight owners commit and two open: no transcript holds over a
+// third of the stake (round 11, new major 1). The tally waits while a
+// committed vote may still open. Nothing is decided: no level, nobody paid
+// or charged for the dispute, the worker's whole bond back, every ticket
+// let go, and the vote's fee back in the fund. The vote waits for a fund
+// that can pay it; a ticket can't leave while the vote is open; each of the
+// six that didn't vote is charged AbstainShare as it leaves, for the fund
+// (a stall is the abstainers').
 func TestPoolUndecided(cur realm, t *testing.T) {
 	reset()
 	Reruns, PanelSizes = 0, nil // a dispute goes straight to the pool
@@ -245,15 +249,15 @@ func TestPoolUndecided(cur realm, t *testing.T) {
 	refuses(t, "the vote's commit window has passed", func() {
 		CommitVote(cross(cur), id, itoa(ticketIndex(abstain[1], owners)), Commitment(abstain[1], "vote", ok, "v"))
 	})
-	late := voters[len(voters)-1] // commits, never opens: charged as an abstainer
-	for _, a := range voters[:len(voters)-1] {
+	late := voters[2:] // commit, never open: charged as abstainers
+	for _, a := range voters[:2] {
 		testing.SetRealm(u(a))
 		RevealVote(cross(cur), id, ok, "v")
 	}
 	testing.SetRealm(u(anyone))
 	refuses(t, "the vote is still open", func() { Tally(cross(cur), id) })
 	testing.SkipHeights(PoolRevealWindow)
-	testing.SetRealm(u(late))
+	testing.SetRealm(u(late[0]))
 	refuses(t, "the vote's reveal window has passed", func() { RevealVote(cross(cur), id, ok, "v") })
 	testing.SkipHeights(UnbondBlocks)
 	testing.SetRealm(u(idle))
@@ -262,7 +266,7 @@ func TestPoolUndecided(cur realm, t *testing.T) {
 	if s := Tally(cross(cur), id); s != Undecided || lvl() != "" {
 		t.Fatalf("an undecided vote: %s", s)
 	}
-	if !strings.Contains(Render("filing/"+itoa(id)), "- Undecided: under two thirds revealed") {
+	if !strings.Contains(Render("filing/"+itoa(id)), "- Undecided: no transcript held over a third of the stake with no rival") {
 		t.Errorf("the filing's page:\n%s", Render("filing/"+itoa(id)))
 	}
 	if bal(worker)-before != FilingBond || FundBalance() != PoolFee || Burned() != 0 {
@@ -277,8 +281,8 @@ func TestPoolUndecided(cur realm, t *testing.T) {
 		}
 	}
 	testing.SkipHeights(UnbondBlocks)
-	charged := map[address]bool{late: true}
-	for _, a := range abstain {
+	charged := map[address]bool{}
+	for _, a := range append(abstain, late...) {
 		charged[a] = true
 	}
 	for tid, a := range owners {
@@ -293,17 +297,17 @@ func TestPoolUndecided(cur realm, t *testing.T) {
 			t.Errorf("%s withdrew %d, want %d", a, got, want)
 		}
 	}
-	if Burned() != 4*MinTicket*AbstainShare/100 {
-		t.Errorf("burned %d", Burned())
+	if Burned() != 0 || FundBalance() != PoolFee+6*MinTicket*AbstainShare/100 {
+		t.Errorf("burned %d, fund %d", Burned(), FundBalance())
 	}
 }
 
 // A worker a panel found lying appeals to the pool, and the vote stalls:
-// the money is settled by the panel's word. The worker loses its bond and
-// its appeal bond, which pay the fund back and then the checkers who
-// showed it; the panel's seats are paid; no level is written or pulled
-// (round 10, new major 3).
-func TestPoolStallSettlesByPanel(cur realm, t *testing.T) {
+// two owners of eight vote, no transcript holds over a third of the stake.
+// No panel's word settles any money (round 11, new major 1): the worker's
+// bond and appeal bond come back, nobody on the filing or the panel is paid
+// or charged, the fund ends as it began, and no level is written or pulled.
+func TestPoolStallGivesBondsBack(cur realm, t *testing.T) {
 	reset()
 	Reruns, PanelSizes = 0, []int{4}
 	owners := ownersN(8)
@@ -360,7 +364,7 @@ func TestPoolStallSettlesByPanel(cur realm, t *testing.T) {
 	send(0)
 	testing.SetRealm(u(anyone))
 	OpenPool(cross(cur), id)
-	for _, a := range []address{drawn[0], drawn[1]} { // under two thirds of the stake
+	for _, a := range []address{drawn[0], drawn[1]} { // a quarter of the stake
 		testing.SetRealm(u(a))
 		CommitVote(cross(cur), id, itoa(ticketIndex(a, owners)), Commitment(a, "vote", fails, "v"))
 	}
@@ -373,34 +377,26 @@ func TestPoolStallSettlesByPanel(cur realm, t *testing.T) {
 	if s := Tally(cross(cur), id); s != Undecided || lvl() != "" {
 		t.Fatalf("a stalled vote: %s, level %q", s, lvl())
 	}
-	taken := FilingBond + bond
-	refill := least(taken, int64(size)*PanelFee)
-	rest := taken - refill
-	each := rest * ShowShare / 100 / 3
-	if bal(worker) != before[worker] || RecordOf(worker).Faults != 1 {
-		t.Errorf("the lying worker got %d back", bal(worker)-before[worker])
+	if got := bal(worker) - before[worker]; got != FilingBond+bond || RecordOf(worker).Faults != 0 {
+		t.Errorf("the worker got %d back of %d and %d; record %+v", got, FilingBond, bond, RecordOf(worker))
 	}
-	for _, c := range drawn {
-		if got := bal(c) - before[c]; got != each {
-			t.Errorf("checker %s got %d, want %d", c, got, each)
+	for _, a := range owners {
+		if got := bal(a) - before[a]; got != 0 || stakeOf2(a, owners) != MinTicket {
+			t.Errorf("%s (%d seats): paid %d, stake %d", a, seats[a], got, stakeOf2(a, owners))
 		}
 	}
-	for _, p := range panel {
-		if got := bal(p) - before[p]; got != PanelFee*int64(seats[p]) {
-			t.Errorf("panelist %s got %d", p, got)
-		}
-	}
-	if FundBalance() != PoolFee+refill || Burned() != rest-3*each {
+	if FundBalance() != PoolFee+int64(size)*PanelFee || Burned() != 0 {
 		t.Errorf("fund %d, burned %d", FundBalance(), Burned())
 	}
-	if !strings.Contains(Render("filing/"+itoa(id)), "settled the money") {
+	if !strings.Contains(Render("filing/"+itoa(id)), "every bond went back") {
 		t.Errorf("the filing's page:\n%s", Render("filing/"+itoa(id)))
 	}
 }
 
-// A vote that stalls after a panel's passing word settles the money by
-// that word but writes no level: only a word the pool itself reaches, or an
-// agreement, makes a guard tested (round 10, new major 3).
+// A vote nobody votes in, after a panel's passing word that a lying checker
+// appealed: no level, since only a word the pool itself reaches, or an
+// agreement, makes a guard tested; and no money moves by the panel's word
+// (round 11, new major 1): every bond back, the liar's stake untouched.
 func TestPoolStallWritesNoLevel(cur realm, t *testing.T) {
 	reset()
 	Reruns, PanelSizes = 0, []int{4}
@@ -455,14 +451,14 @@ func TestPoolStallWritesNoLevel(cur realm, t *testing.T) {
 	if s := Tally(cross(cur), id); s != Undecided || lvl() != "" {
 		t.Fatalf("a stalled vote after a passing word: %s, level %q", s, lvl())
 	}
-	taken := Slash + bond
-	rest := taken - least(taken, int64(size)*PanelFee)
-	each := rest * ShowShare / 100 / 3 // the worker and the two honest checkers
-	if got := bal(worker) - before[worker]; got != FilingBond-2*CheckFee-FundFee+each {
+	if got := bal(worker) - before[worker]; got != FilingBond {
 		t.Errorf("the worker got %d", got)
 	}
-	if stakeOf2(liar, owners) != MinTicket-Slash || bal(liar) != before[liar] {
+	if stakeOf2(liar, owners) != MinTicket || bal(liar)-before[liar] != bond {
 		t.Errorf("the liar: stake %d, paid %d", stakeOf2(liar, owners), bal(liar)-before[liar])
+	}
+	if FundBalance() != PoolFee+int64(size)*PanelFee || Burned() != 0 {
+		t.Errorf("fund %d, burned %d", FundBalance(), Burned())
 	}
 }
 

@@ -15,13 +15,15 @@ import (
 //   - Then a panel runs it: PanelSizes[0] seats, then the next size when no
 //     side holds more than two thirds of the seats, then the whole pool
 //     (pool.gno). Each seat is a ticket drawn by weight from a beacon round
-//     after the dispute, from the pool as it was then, so an owner's seats
-//     follow its stake however many addresses hold it; an owner answers
-//     once for all its seats; the filing's parties and appellants never sit
-//     (round 10, new major 2). A panel is decided only once every member has
-//     revealed or its reveal window has closed, so nobody revealing in time
-//     is charged (round 9, new major 5). A panel is paid from the dispute
-//     fund, and a dispute waits while the fund can't pay it.
+//     after the dispute, from every eligible ticket, the parties' and
+//     appellants' too, so each owner's seats follow its stake however many
+//     addresses hold it (round 10, new major 2; round 11, new major 1); an
+//     owner answers once for all its seats. A panel is decided only once
+//     every member has revealed or its reveal window has closed, so nobody
+//     revealing in time is charged (round 9, new major 5). The dispute fund
+//     pays a panel's fees and its draw when its round is fixed: while the
+//     fund can't, the dispute waits with no round, so whoever tops the fund
+//     up can't pick a round already seen (round 11, minor 6).
 //   - Anyone may appeal a panel's word within AppealWindow, putting up at
 //     least what the next panel or the vote costs the fund: the next panel,
 //     or the pool, decides. Nothing is paid or taken until the last word
@@ -108,28 +110,54 @@ func rerunsOwed(c *check, t string) int64 {
 	return n
 }
 
-// panelRequest asks for the next panel, drawn from a beacon round after now
-// and the pool as it is now; after the largest, the whole pool decides.
+// panelRequest asks for the next panel; after the largest, the whole pool
+// decides. The fund sets aside the panel's fees and its draw, and the round
+// that draws it is fixed then; while the fund can't pay, the dispute waits
+// for RequestPanel, with no round.
 func panelRequest(f *filing, id int) string {
 	if f.panelLevel >= len(PanelSizes) {
 		f.state = Pool
 		chain.Emit("GuardToPool", "filing", strconv.Itoa(id))
 		return f.state
 	}
-	fixRound(f)
+	cost := panelCost(f.panelLevel)
+	if fund < cost {
+		f.state = PanelWait
+		chain.Emit("GuardPanelWait", "filing", strconv.Itoa(id), "fund", strconv.FormatInt(fund, 10), "cost", strconv.FormatInt(cost, 10))
+		return f.state
+	}
+	fund -= cost
+	f.reserve += cost
+	f.panelCost += cost
+	fixRound(f, id)
 	f.state = Panel
 	chain.Emit("GuardPanel", "filing", strconv.Itoa(id), "size", strconv.Itoa(PanelSizes[f.panelLevel]), "round", strconv.FormatUint(f.round, 10))
 	return f.state
 }
 
-// DrawPanel draws a disputed filing's panel from its beacon round: each seat
-// a ticket drawn by weight, so an owner may hold several, never a party.
-// The fund must hold the panel's fees, which it sets aside; when the pool
-// has too few eligible tickets, the whole pool decides instead. Anyone may
-// call it, within DrawDeadline of the round being fixed; after that, Settle
-// fixes a new one.
-func DrawPanel(cur realm, id int) {
+// panelCost is what a panel costs the fund: each seat's PanelFee, and its
+// draw.
+func panelCost(level int) int64 { return int64(PanelSizes[level])*PanelFee + DrawFee }
+
+// RequestPanel asks again for a panel the fund couldn't pay. Anyone may
+// call it.
+func RequestPanel(cur realm, id int) string {
 	caller(cur)
+	f := get(id)
+	if f.state != PanelWait {
+		panic("guards: not waiting for the fund")
+	}
+	return panelRequest(f, id)
+}
+
+// DrawPanel draws a disputed filing's panel from its beacon round: each seat
+// a ticket drawn by weight, so an owner may hold several. The caller is paid
+// DrawFee from what the fund set aside; when the pool has too few eligible
+// tickets, the seats' fees go back and the whole pool decides instead.
+// Anyone may call it, within DrawDeadline of the round being fixed; after
+// that, Settle fixes a new one.
+func DrawPanel(cur realm, id int) {
+	who := caller(cur)
 	f := get(id)
 	switch {
 	case f.state != Panel:
@@ -138,19 +166,19 @@ func DrawPanel(cur realm, id int) {
 		panic("guards: the panel's deadline has passed; settle it for a new round")
 	}
 	size := PanelSizes[f.panelLevel]
-	fee := int64(size) * PanelFee
-	if fund < fee {
-		panic("guards: the dispute fund can't pay this panel yet; disputes wait for it")
-	}
 	picks := pick(roundSig(f), "panel", id, f.panelLevel, size, f, true)
+	unwait(f, id)
+	f.reserve -= DrawFee
+	pay(cur, who, DrawFee)
 	if picks == nil {
+		fee := int64(size) * PanelFee
+		f.reserve -= fee
+		f.panelCost -= fee
+		fund += fee
 		f.state = Pool
 		chain.Emit("GuardToPool", "filing", strconv.Itoa(id))
 		return
 	}
-	fund -= fee
-	f.reserve += fee
-	f.panelCost += fee
 	var panel []*check
 	for _, p := range picks {
 		p.open++
@@ -181,7 +209,7 @@ func settlePanel(cur realm, f *filing, id int) string {
 	}
 	f.panels[last] = keepAnswering(f.panels[last], func(c *check) bool { return !c.revealed })
 	if t, ok := supermajority(f.panels[last], size); ok {
-		f.state, f.verdict, f.until, f.lastWord = Appealable, t, now()+AppealWindow, t
+		f.state, f.verdict, f.until = Appealable, t, now()+AppealWindow
 		chain.Emit("GuardPanelWord", "filing", strconv.Itoa(id), "until", strconv.FormatInt(f.until, 10))
 		return f.state
 	}
@@ -193,8 +221,8 @@ func settlePanel(cur realm, f *filing, id int) string {
 // appeal, not only the parties, so a decoy objection leaves nobody honest
 // without a way on (round 10, new major 2); the appellant puts up what the
 // next step costs the fund, at least AppealBond, which comes back if the
-// last word differs from the word appealed. An appellant never sits on the
-// filing's panels.
+// last word differs from the word appealed, with a share of what is taken
+// (round 11, minor 3).
 func Appeal(cur realm, id int) string {
 	who := caller(cur)
 	f := get(id)
@@ -214,7 +242,7 @@ func AppealCost(id int) int64 {
 	f := get(id)
 	cost := PoolFee
 	if next := f.panelLevel + 1; next < len(PanelSizes) {
-		cost = int64(PanelSizes[next]) * PanelFee
+		cost = panelCost(next)
 	}
 	if cost < AppealBond {
 		cost = AppealBond
@@ -245,13 +273,13 @@ func supermajority(panel []*check, size int) (string, bool) {
 	return "", false
 }
 
-// slashSilent takes Slash from each checker silent in a rerun, locks it
-// here for good, and drops it from the filing.
+// slashSilent takes Slash from each checker silent in a rerun, for the fund
+// (round 11, minor 3), and drops it from the filing.
 func slashSilent(f *filing, silent func(*check) bool) {
 	keep := f.checks[:1]
 	for _, c := range f.checks[1:] {
 		if silent(c) {
-			burned += slash(c, Slash)
+			fund += slash(c, Slash)
 			release(c)
 			f.silent[c.owner] = true
 			rec(c.owner).Silent++
@@ -262,14 +290,14 @@ func slashSilent(f *filing, silent func(*check) bool) {
 	f.checks = keep
 }
 
-// keepAnswering drops a panel's silent seats, taking Slash for each, locked
-// here for good.
+// keepAnswering drops a panel's silent seats, taking Slash for each, for the
+// fund (round 11, minor 3).
 func keepAnswering(panel []*check, silent func(*check) bool) []*check {
 	var keep []*check
 	counted := map[address]bool{}
 	for _, c := range panel {
 		if silent(c) {
-			burned += slash(c, Slash)
+			fund += slash(c, Slash)
 			release(c)
 			if !counted[c.owner] {
 				counted[c.owner] = true

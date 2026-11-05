@@ -12,10 +12,12 @@ import (
 // dispute no panel decided or a panel's word appealed past the largest.
 // Every ticket staked MinTicketAge before the filing and not withdrawn
 // votes with its weight: its owner commits once, naming its tickets, then
-// reveals after the commit window. It decides by Tendermint's rule: once
-// more than two thirds of all that weight has revealed, the transcript with
-// the most weight wins, and the dispute ends as a panel's would (final).
-// With liars under a third of the stake, the honest side always wins.
+// reveals after the commit window. A transcript revealed with more than a
+// third of all that weight, when no other is, wins, and the dispute ends as
+// a panel's would (final) (round 11, new major 1). Liars under a third
+// can't make a transcript win alone, and honest runs agree byte for byte,
+// so one that holds over a third has honest weight behind it and is right;
+// only more than half the honest weight staying away stalls the vote.
 //
 // No call walks every ticket or every voter (round 9, new major 6): the
 // total is the stake tree's sum, revealed weight is kept as it comes in,
@@ -23,11 +25,12 @@ import (
 // is settled when it is withdrawn: AbstainShare percent for a ticket that
 // didn't vote (decided or not: a stall is the abstainers'), WrongShare
 // percent, and at least the voter's share of Slash, for one that voted what
-// wasn't decided (round 9, minor 11). A ticket can't leave while a vote it
-// may vote in is open. A vote that never reaches two thirds decides no
-// level; the money is then settled by the last panel's word, and only a
-// dispute no panel ever decided gives every bond back (round 10, new major
-// 3). What winners leave unclaimed for PoolClaimWindow goes to the fund.
+// wasn't decided (round 9, minor 11), each to the fund (round 11, minor 3).
+// A ticket can't leave while a vote it may vote in is open. A vote that
+// stalls decides nothing: no level, every bond back, nobody paid or charged
+// for the dispute but the abstainers, and no panel's word settles any money
+// (round 11, new major 1). What winners leave unclaimed for PoolClaimWindow
+// goes to the fund.
 var (
 	PoolCommitWindow int64 = 10000      // blocks (about 10 hours)
 	PoolRevealWindow int64 = 5000       // blocks
@@ -80,7 +83,8 @@ func OpenPool(cur realm, id int) string {
 	if f.state != Pool {
 		panic("guards: not waiting for the pool")
 	}
-	total := sumBelow(sumRoot, f.oldBelow) // tickets withdrawn by now can't vote
+	sum, _, gone := below(f.oldBelow)
+	total := sum - gone // tickets withdrawn by now can't vote
 	if total <= 0 {
 		return undecided(cur, f, id) // round 9, minor 10
 	}
@@ -188,25 +192,18 @@ func Tally(cur realm, id int) string {
 			break
 		}
 	}
-	if v.revealed*3 <= v.total*2 {
-		fund += v.pot
-		f.panelCost -= v.pot // the vote cost the fund nothing in the end
-		v.pot = 0
-		if f.lastWord == "" {
-			return undecided(cur, f, id)
-		}
-		// No last word from the pool: the last panel's word settles the
-		// money, and no level is written or pulled (round 10, new major 3).
-		settle(cur, f, f.lastWord)
-		f.state = Undecided
-		chain.Emit("GuardUndecided", "filing", strconv.Itoa(id), "hash", f.guardHash, "settled_by", "panel")
-		return f.state
-	}
-	best := ""
+	best, over := "", 0
 	for _, t := range v.order {
-		if v.by[t] > v.by[best] {
+		if v.by[t]*3 > v.total {
 			best = t
+			over++
 		}
+	}
+	if over != 1 { // a stall: nothing decided, every bond back
+		fund += v.pot
+		f.panelCost -= v.pot
+		v.pot = 0
+		return undecided(cur, f, id)
 	}
 	v.decided, v.winners = best, v.by[best]
 	return final(cur, f, id, best)
@@ -246,9 +243,8 @@ func SweepVote(cur realm, id int) int64 {
 	return n
 }
 
-// undecided ends a dispute that no panel ever decided and no vote could:
-// no level, nobody paid or charged for the dispute, every bond back and
-// every ticket let go.
+// undecided ends a dispute whose vote stalled: no level, nobody paid or
+// charged for the dispute, every bond back and every ticket let go.
 func undecided(cur realm, f *filing, id int) string {
 	fund += f.reserve
 	f.reserve = 0
@@ -270,7 +266,7 @@ func undecided(cur realm, f *filing, id int) string {
 		pay(cur, f.objector.owner, f.objBond)
 		f.objBond = 0
 	}
-	f.state, f.pool = Undecided, nil
+	f.state = Undecided
 	chain.Emit("GuardUndecided", "filing", strconv.Itoa(id), "hash", f.guardHash)
 	return f.state
 }
@@ -313,13 +309,13 @@ func settleVotes(t *ticket, max int) {
 		voted := v.voted.Has(key(uint64(t.id))) && vt != nil && vt.revealed
 		switch {
 		case !voted:
-			burned += charge(t, t.stake*AbstainShare/100)
+			fund += charge(t, t.stake*AbstainShare/100)
 		case v.decided != "" && vt.transcript != v.decided:
 			n := t.stake * WrongShare / 100
 			if s := Slash / int64(len(vt.tickets)); s > n {
 				n = s
 			}
-			burned += charge(t, n)
+			fund += charge(t, n)
 		}
 	}
 }

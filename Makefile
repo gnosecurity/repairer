@@ -1,7 +1,7 @@
 # One gate before anything ships: format, vet, unit tests, builds.
 # The integration test needs root and a Linux kernel: make integration.
 # The signing test needs gnokey and a test keybase: make golden (see below).
-.PHONY: qa fmt vet test build integration golden gnotest
+.PHONY: qa fmt vet test build integration golden gnotest site-e2e
 
 qa: fmt vet test build
 
@@ -25,6 +25,7 @@ build:
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o bin/autopatch-lookout-linux-amd64 ./cmd/autopatch-lookout
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o bin/autopatch-gnosh-linux-amd64 ./cmd/autopatch-gnosh
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o bin/autopatch-rig-linux-amd64 ./cmd/autopatch-rig
+	CGO_ENABLED=0 GOOS=openbsd GOARCH=amd64 go build -trimpath -o bin/autopatch-site-openbsd-amd64 ./cmd/autopatch-site
 
 integration:
 	scripts/netns-test.sh
@@ -43,3 +44,8 @@ gnotest:
 	cd gno/p/drandbn254 && GNOROOT=$(GNOROOT) $(GNO_BIN) test .
 	cd gno/r/guards && GNOROOT=$(GNOROOT) $(GNO_BIN) test -v -print-runtime-metrics .
 	GNO_BIN=$(GNO_BIN) GNOROOT=$(GNOROOT) python3 scripts/guards-mutants.py gno
+
+# gno.security's guard pages from the realm on a local chain: GNO_BIN_DIR holds
+# gnodev and gnokey built from gno 5d7d8f5f9, GNOROOT its source.
+site-e2e:
+	GNOROOT=$(GNOROOT) scripts/site-e2e.sh $(GNO_BIN_DIR)

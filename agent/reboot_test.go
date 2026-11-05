@@ -11,9 +11,26 @@ import (
 	"github.com/jaekwon/autopatch/policy"
 )
 
-// A grub.cfg as Ubuntu writes it: the top entry, then a submenu holding
-// each kernel and its recovery entry.
-const grubCfg = `### BEGIN /etc/grub.d/10_linux ###
+// A grub.cfg as update-grub writes it under GRUB_DEFAULT=saved: 00_header's
+// default, the saved entry unless a one-shot is set; then the top entry, and
+// a submenu holding each kernel and its recovery entry.
+const grubCfg = `### BEGIN /etc/grub.d/00_header ###
+if [ "${next_entry}" ] ; then
+   set default="${next_entry}"
+   set next_entry=
+   save_env next_entry
+   set boot_once=true
+else
+   set default="${saved_entry}"
+fi
+function savedefault {
+  if [ -z "${boot_once}" ]; then
+    saved_entry="${chosen}"
+    save_env saved_entry
+  fi
+}
+### END /etc/grub.d/00_header ###
+### BEGIN /etc/grub.d/10_linux ###
 function gfxmode {
 	set gfxpayload="${1}"
 }
@@ -72,6 +89,9 @@ func rebootAgent(t *testing.T, tier string) (*Agent, *fakeSys, *Fleet, *policy.P
 	if err != nil {
 		t.Fatal(err)
 	}
+	for _, rel := range []string{oldRel, newRel, "6.8.0-150-generic"} { // what keepKernel asks of dpkg
+		sys.runOut[keepQuery(rel)] = "linux-image-" + rel + " ii \nlinux-modules-" + rel + " ii \n"
+	}
 	return a, sys, &Fleet{Host: "web"}, p, func(d time.Duration) { clock = clock.Add(d) }
 }
 
@@ -80,6 +100,17 @@ const (
 	mailCheck   = "tcp 127.0.0.1:25 "
 	backupCheck = "tcp 127.0.0.1:873 "
 )
+
+// keepQuery is the call keepKernel makes to find a kernel's packages.
+func keepQuery(rel string) string {
+	return "dpkg-query -W -f ${Package} ${db:Status-Abbrev}\n linux-image-" + rel + " linux-modules-" + rel + " linux-modules-extra-" + rel
+}
+
+// markQuery is the call unmark makes to find which marked packages are
+// still installed.
+func markQuery(pkgs ...string) string {
+	return "dpkg-query -W -f ${Package} ${db:Status-Abbrev}\n " + strings.Join(pkgs, " ")
+}
 
 // dpkgQuery is the call that lists the installed kernels.
 const dpkgQuery = "dpkg-query -W -f ${Package} ${Version} ${db:Status-Abbrev}\n linux-image-[0-9]*"
@@ -611,5 +642,321 @@ func TestRebootTheCanaryBoots(t *testing.T) {
 	holdLater(a)
 	if m := rstep(t, a, f, p, nil); m != "a reboot is owed: this canary boots with "+g.Name()+" before the rest of its tier takes it; this tier waits for your signed Reboot" {
 		t.Fatalf("a yes tier: %q", m)
+	}
+}
+
+// GRUB boots by grub.cfg: a saved default in /etc/default/grub counts only
+// once update-grub has written it there, and entries that save themselves
+// refuse too (round 15, new major 1).
+func TestRebootGrubCfgMustBootSaved(t *testing.T) {
+	for name, cfg := range map[string]string{
+		"default 0":   strings.Replace(grubCfg, `set default="${saved_entry}"`, `set default="0"`, 1),
+		"savedefault": strings.Replace(grubCfg, "\t\tlinux\t/boot/vmlinuz-6.8.0-149-generic root=UUID=0d5a ro panic=10\n\t}\n\tmenuentry 'Ubuntu, with Linux 6.8.0-149-generic (recovery mode)'", "\t\tsavedefault\n\t\tlinux\t/boot/vmlinuz-6.8.0-149-generic root=UUID=0d5a ro panic=10\n\t}\n\tmenuentry 'Ubuntu, with Linux 6.8.0-149-generic (recovery mode)'", 1),
+	} {
+		if cfg == grubCfg {
+			t.Fatalf("%s: the fixture didn't change", name)
+		}
+		a, sys, f, p, _ := rebootAgent(t, `,"reboot":"window","reboot_window":"03:00-04:00"`)
+		sys.files["/boot/grub/grub.cfg"] = cfg
+		if m := rstep(t, a, f, p, nil); !strings.Contains(m, "update-grub") || len(ran(sys, "systemctl reboot")) != 0 {
+			t.Errorf("%s: %q", name, m)
+		}
+	}
+}
+
+// A reboot back that comes up on another kernel than the pinned one (GRUB
+// didn't read the pin) doesn't go back again by itself: it waits for the
+// owner (round 15, new major 1).
+func TestRebootBackThatLandsElsewhere(t *testing.T) {
+	a, sys, f, p, after := rebootAgent(t, `,"reboot":"window","reboot_window":"03:00-04:00"`)
+	rstep(t, a, f, p, nil)
+	after(time.Minute)
+	bootInto(sys, newRel)
+	rstep(t, a, f, p, nil)
+	for i := 0; i < failRun; i++ {
+		after(time.Minute)
+		rstep(t, a, f, p, map[string]string{mailCheck: "refused"})
+	}
+	after(time.Minute)
+	if m := rstep(t, a, f, p, nil); m != "rebooting (back to "+oldRel+")" {
+		t.Fatalf("going back: %q", m)
+	}
+	bootInto(sys, newRel) // GRUB booted entry 0, not the pin
+	if m := rstep(t, a, f, p, nil); !strings.Contains(m, "the reboot back to "+oldRel+" came up on "+newRel) {
+		t.Fatalf("back elsewhere: %q", m)
+	}
+	after(time.Minute)
+	n := len(ran(sys, "systemctl reboot"))
+	if m := rstep(t, a, f, p, nil); !strings.Contains(m, "GRUB didn't boot it the last time, so it waits for your signed Reboot") || len(ran(sys, "systemctl reboot")) != n {
+		t.Fatalf("went back again: %q", m)
+	}
+}
+
+// A reboot into another kernel keeps the fallback's packages from
+// autoremove (apt-mark manual those marked auto), and the marks go back once
+// a kernel settles (round 15, new major 2).
+func TestRebootKeepsTheFallback(t *testing.T) {
+	a, sys, f, p, after := rebootAgent(t, `,"reboot":"window","reboot_window":"03:00-04:00"`)
+	sys.runOut["apt-mark showmanual linux-image-"+oldRel+" linux-modules-"+oldRel] = "linux-image-" + oldRel + "\n"
+	sys.runOut[markQuery("linux-modules-"+oldRel)] = "linux-modules-" + oldRel + " ii \n"
+	if m := rstep(t, a, f, p, nil); m != "rebooting into "+newRel {
+		t.Fatalf("%q", m)
+	}
+	if got := ran(sys, "apt-mark manual"); strings.Join(got, "|") != "apt-mark manual linux-modules-"+oldRel {
+		t.Fatalf("marked %q", got)
+	}
+	after(time.Minute)
+	bootInto(sys, newRel)
+	rstep(t, a, f, p, nil)
+	after(TrialWindow)
+	if m := rstep(t, a, f, p, nil); !strings.HasSuffix(m, "it is the default now") {
+		t.Fatalf("settled: %q", m)
+	}
+	if got := ran(sys, "apt-mark auto"); strings.Join(got, "|") != "apt-mark auto linux-modules-"+oldRel {
+		t.Fatalf("marks put back %q", got)
+	}
+	if st, _ := a.loadReboot(); len(st.Marked) != 0 || st.Held != newRel || st.HeldVersion != "6.8.0-149.149" {
+		t.Fatalf("after settling: %+v", st)
+	}
+}
+
+// When the kernel that last held is gone anyway, the reports say so, and the
+// owner's Reboot of the running kernel goes ahead with the running kernel
+// pinned as the fallback (round 15, new major 2).
+func TestRebootFallbackGoneOwnerGoes(t *testing.T) {
+	a, sys, f, p, after := rebootAgent(t, `,"reboot":"window","reboot_window":"03:00-04:00"`)
+	rstep(t, a, f, p, nil)
+	after(time.Minute)
+	bootInto(sys, newRel)
+	rstep(t, a, f, p, nil)
+	for i := 0; i < failRun; i++ {
+		after(time.Minute)
+		rstep(t, a, f, p, map[string]string{mailCheck: "refused"})
+	}
+	sys.runOut[dpkgQuery] = "linux-image-" + oldRel + " 6.8.0-142.142 rc \nlinux-image-" + newRel + " 6.8.0-149.149 ii \n"
+	delete(sys.files, "/boot/vmlinuz-"+oldRel)
+	delete(sys.files, "/boot/initrd.img-"+oldRel)
+	after(time.Minute)
+	if m := rstep(t, a, f, p, nil); !strings.Contains(m, "a Reboot you sign of the newest kernel or of "+newRel+" goes ahead") {
+		t.Fatalf("gone: %q", m)
+	}
+	f.Reboots = []RebootOrder{{Seq: 1, Kernel: newRel, NotAfter: a.now().Add(time.Hour)}}
+	if m := rstep(t, a, f, p, nil); m != "rebooting (your Reboot #1)" {
+		t.Fatalf("the owner's Reboot: %q", m)
+	}
+	if got := ran(sys, "grub-set-default"); got[len(got)-1] != "grub-set-default "+newEntry {
+		t.Fatalf("pinned %q, not the running kernel", got)
+	}
+}
+
+// An update that keeps the held kernel's name replaces its files in place:
+// the name no longer holds, so every reboot waits for the owner's Reboot,
+// and once one boots the new build and it holds, its version is the one that
+// holds (round 15, new major 3).
+func TestRebootRebuiltUnderItsName(t *testing.T) {
+	a, sys, f, p, after := rebootAgent(t, `,"reboot":"window","reboot_window":"03:00-04:00"`)
+	sys.runOut[dpkgQuery] = "linux-image-" + oldRel + " 6.8.0-142.142 ii \n"
+	sys.files["/run/reboot-required"] = "*** System restart required ***\n"
+	if m := rstep(t, a, f, p, nil); m != "rebooting (the system asked)" {
+		t.Fatalf("first: %q", m)
+	}
+	bootInto(sys, oldRel)
+	delete(sys.files, "/run/reboot-required")
+	rstep(t, a, f, p, nil)
+	after(TrialWindow)
+	if m := rstep(t, a, f, p, nil); !strings.HasSuffix(m, "health held") {
+		t.Fatalf("held: %q", m)
+	}
+	if st, _ := a.loadReboot(); st.HeldVersion != "6.8.0-142.142" {
+		t.Fatalf("held version %q", st.HeldVersion)
+	}
+	// The same release, a new build, and the system asks.
+	sys.runOut[dpkgQuery] = "linux-image-" + oldRel + " 6.8.0-142.145 ii \n"
+	sys.files["/run/reboot-required"] = "*** System restart required ***\n"
+	after(24 * time.Hour)
+	if m := rstep(t, a, f, p, nil); !strings.Contains(m, "the running kernel, "+oldRel+", was replaced in place (6.8.0-142.142 to 6.8.0-142.145); with nothing to fall back on, it waits for your signed Reboot") {
+		t.Fatalf("rebuilt: %q", m)
+	}
+	f.Reboots = []RebootOrder{{Seq: 1, Kernel: oldRel, NotAfter: a.now().Add(time.Hour)}}
+	if m := rstep(t, a, f, p, nil); m != "rebooting (the system asked; "+oldRel+" rebuilt)" {
+		t.Fatalf("on your Reboot: %q", m)
+	}
+	bootInto(sys, oldRel)
+	delete(sys.files, "/run/reboot-required")
+	rstep(t, a, f, p, nil)
+	after(TrialWindow)
+	rstep(t, a, f, p, nil)
+	if st, _ := a.loadReboot(); st.HeldVersion != "6.8.0-142.145" {
+		t.Fatalf("the new build didn't become the one that holds: %q", st.HeldVersion)
+	}
+}
+
+// Before its first reboot the agent keeps the running kernel's version as
+// first seen, so a rebuild in place shows even then; nothing asked, the
+// rebuild alone owes a reboot, which waits for the owner (round 15, new
+// major 3).
+func TestRebootRebuiltBeforeAnyReboot(t *testing.T) {
+	a, sys, f, p, _ := rebootAgent(t, `,"reboot":"window","reboot_window":"03:00-04:00"`)
+	sys.runOut[dpkgQuery] = "linux-image-" + oldRel + " 6.8.0-142.142 ii \n"
+	if m := rstep(t, a, f, p, nil); m != "" {
+		t.Fatalf("nothing owed: %q", m)
+	}
+	if st, _ := a.loadReboot(); st.Held != oldRel || st.HeldVersion != "6.8.0-142.142" || st.Phase != "" {
+		t.Fatalf("first sight: %+v", st)
+	}
+	sys.runOut[dpkgQuery] = "linux-image-" + oldRel + " 6.8.0-142.145 ii \n"
+	if m := rstep(t, a, f, p, nil); m != "a reboot is owed: the running kernel, "+oldRel+", was replaced in place (6.8.0-142.142 to 6.8.0-142.145); with nothing to fall back on, it waits for your signed Reboot" ||
+		len(ran(sys, "systemctl reboot")) != 0 {
+		t.Fatalf("rebuilt: %q", m)
+	}
+	// Booted by hand into another kernel before any reboot, that one is
+	// taken as the one that holds.
+	sys.runOut[dpkgQuery] = "linux-image-" + oldRel + " 6.8.0-142.145 ii \nlinux-image-" + newRel + " 6.8.0-149.149 ii \n"
+	bootInto(sys, newRel)
+	if m := rstep(t, a, f, p, nil); m != "" {
+		t.Fatalf("on %s: %q", newRel, m)
+	}
+	if st, _ := a.loadReboot(); st.Held != newRel || st.HeldVersion != "6.8.0-149.149" {
+		t.Fatalf("taken: %+v", st)
+	}
+}
+
+// Off the kernel that last held (booted outside the agent), nothing asked
+// owes no reboot; a plain reboot boots the kernel that last held (the pin)
+// and is called a back; the owner's Reboot of the running kernel tries it as
+// a new kernel; going back to the newest kernel, the one that last held, is
+// owed; a kernel that last held and later failed waits for the owner (round
+// 15, minor 1).
+func TestRebootOffTheHeldKernel(t *testing.T) {
+	setup := func() (*Agent, *fakeSys, *Fleet, *policy.Policy, func(time.Duration)) {
+		a, sys, f, p, after := rebootAgent(t, `,"reboot":"window","reboot_window":"03:00-04:00"`)
+		if err := a.saveReboot(&rebootState{Phase: Settled, Held: oldRel, HeldVersion: "6.8.0-142.142"}); err != nil {
+			t.Fatal(err)
+		}
+		bootInto(sys, newRel) // by hand
+		return a, sys, f, p, after
+	}
+	a, sys, f, p, _ := setup()
+	if m := rstep(t, a, f, p, nil); m != "the agent didn't boot "+newRel+": a reboot boots "+oldRel+", the kernel that last held, unless your Reboot names "+newRel+", which tries it as a new kernel" ||
+		len(ran(sys, "systemctl reboot")) != 0 {
+		t.Fatalf("nothing asked: %q", m)
+	}
+	sys.files["/run/reboot-required"] = "*** System restart required ***\n"
+	if m := rstep(t, a, f, p, nil); m != "rebooting (back to "+oldRel+"; the system asked)" {
+		t.Fatalf("the system asks: %q", m)
+	}
+	if got := ran(sys, "grub-set-default", "grub-reboot"); strings.Join(got, "|") != "grub-set-default "+oldEntry {
+		t.Fatalf("ran %q", got)
+	}
+	bootInto(sys, oldRel)
+	if m := rstep(t, a, f, p, nil); m != "rebooted (back to "+oldRel+"; the system asked); its health window runs" {
+		t.Fatalf("back: %q", m)
+	}
+
+	// The owner's Reboot of the running kernel tries it.
+	a, sys, f, p, after := setup()
+	f.Reboots = []RebootOrder{{Seq: 1, Kernel: newRel, NotAfter: a.now().Add(time.Hour)}}
+	if m := rstep(t, a, f, p, nil); m != "rebooting into "+newRel {
+		t.Fatalf("your Reboot: %q", m)
+	}
+	if got := ran(sys, "grub-set-default", "grub-reboot"); strings.Join(got, "|") != "grub-set-default "+oldEntry+"|grub-reboot "+newEntry {
+		t.Fatalf("ran %q", got)
+	}
+	bootInto(sys, newRel)
+	rstep(t, a, f, p, nil)
+	after(TrialWindow)
+	if m := rstep(t, a, f, p, nil); m != "rebooted into "+newRel+"; it is the default now" {
+		t.Fatalf("settled: %q", m)
+	}
+	if st, _ := a.loadReboot(); st.Held != newRel || st.HeldVersion != "6.8.0-149.149" {
+		t.Fatalf("held: %+v", st)
+	}
+
+	// The newest kernel is the one that last held: back to it is owed.
+	a, sys, f, p, _ = rebootAgent(t, `,"reboot":"window","reboot_window":"03:00-04:00"`)
+	if err := a.saveReboot(&rebootState{Phase: Settled, Held: newRel, HeldVersion: "6.8.0-149.149", Began: a.now().Add(-time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	if m := rstep(t, a, f, p, nil); !strings.HasPrefix(m, "a reboot back to "+newRel+", the newest kernel and the one that last held, is owed: the agent didn't boot "+oldRel+"; this machine rebooted less than 20 hours ago") {
+		t.Fatalf("back to the newest, within 20 hours: %q", m)
+	}
+	if err := a.saveReboot(&rebootState{Phase: Settled, Held: newRel, HeldVersion: "6.8.0-149.149"}); err != nil {
+		t.Fatal(err)
+	}
+	if m := rstep(t, a, f, p, nil); m != "rebooting (back to "+newRel+")" {
+		t.Fatalf("back to the newest: %q", m)
+	}
+	if got := ran(sys, "grub-set-default", "grub-reboot"); strings.Join(got, "|") != "grub-set-default "+newEntry {
+		t.Fatalf("ran %q", got)
+	}
+
+	// The kernel that last held failed since: the owner decides.
+	b, bsys, bf, bp, _ := rebootAgent(t, `,"reboot":"window","reboot_window":"03:00-04:00"`)
+	if err := b.saveReboot(&rebootState{Phase: Settled, Held: oldRel, HeldVersion: "6.8.0-142.142", Failed: []string{oldRel}}); err != nil {
+		t.Fatal(err)
+	}
+	bsys.runOut[dpkgQuery] = "linux-image-" + oldRel + " 6.8.0-142.142 ii \nlinux-image-6.8.0-150-generic 6.8.0-150.150 ii \n"
+	if m := rstep(t, b, bf, bp, nil); !strings.Contains(m, "the kernel that last held, "+oldRel+", failed since") {
+		t.Fatalf("a held kernel that failed: %q", m)
+	}
+}
+
+// Marks put back: of the packages still installed only, and when apt-mark
+// fails at the settling, at a later tick (round 15, new major 2).
+func TestRebootMarksPutBackLater(t *testing.T) {
+	a, sys, f, p, after := rebootAgent(t, `,"reboot":"window","reboot_window":"03:00-04:00"`)
+	sys.runOut["apt-mark showmanual linux-image-"+oldRel+" linux-modules-"+oldRel] = ""
+	rstep(t, a, f, p, nil)
+	if st, _ := a.loadReboot(); strings.Join(st.Marked, " ") != "linux-image-"+oldRel+" linux-modules-"+oldRel {
+		t.Fatalf("marked %q", st.Marked)
+	}
+	after(time.Minute)
+	bootInto(sys, newRel)
+	rstep(t, a, f, p, nil)
+	after(TrialWindow)
+	sys.runOut[markQuery("linux-image-"+oldRel, "linux-modules-"+oldRel)] = "linux-image-" + oldRel + " ii \n" // the modules package removed since
+	sys.failOn = "apt-mark auto"
+	if m := rstep(t, a, f, p, nil); !strings.HasPrefix(m, "rebooted into "+newRel+"; it is the default now; putting back apt's marks of linux-image-"+oldRel+": fake failure") {
+		t.Fatalf("settled, apt locked: %q", m)
+	}
+	if st, _ := a.loadReboot(); len(st.Marked) != 2 {
+		t.Fatalf("marks dropped: %+v", st.Marked)
+	}
+	sys.failOn = ""
+	after(time.Minute)
+	if m := rstep(t, a, f, p, nil); m != "" {
+		t.Fatalf("later: %q", m)
+	}
+	if got := ran(sys, "apt-mark auto"); got[len(got)-1] != "apt-mark auto linux-image-"+oldRel {
+		t.Fatalf("put back %q", got)
+	}
+	if st, _ := a.loadReboot(); len(st.Marked) != 0 || st.Why != "" {
+		t.Fatalf("after: %+v", st)
+	}
+}
+
+// A running kernel no package owns (built by hand) is a fallback apt can't
+// remove: nothing to mark, and going back to it is owed as to any other
+// (round 15, new major 2).
+func TestRebootUnpackagedFallback(t *testing.T) {
+	a, sys, f, p, after := rebootAgent(t, `,"reboot":"window","reboot_window":"03:00-04:00"`)
+	sys.runOut[dpkgQuery] = "linux-image-" + newRel + " 6.8.0-149.149 ii \n"
+	sys.runOut[keepQuery(oldRel)] = ""
+	if m := rstep(t, a, f, p, nil); m != "rebooting into "+newRel {
+		t.Fatalf("%q", m)
+	}
+	if got := ran(sys, "apt-mark"); len(got) != 0 {
+		t.Fatalf("marked %q", got)
+	}
+	after(time.Minute)
+	bootInto(sys, newRel)
+	rstep(t, a, f, p, nil)
+	for i := 0; i < failRun; i++ {
+		after(time.Minute)
+		rstep(t, a, f, p, map[string]string{mailCheck: "refused"})
+	}
+	after(time.Minute)
+	if m := rstep(t, a, f, p, nil); m != "rebooting (back to "+oldRel+")" {
+		t.Fatalf("back: %q", m)
 	}
 }

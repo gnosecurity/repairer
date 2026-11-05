@@ -7,7 +7,7 @@ qa: fmt vet test build
 
 # vendor/ holds decred's secp256k1, pinned and reviewed; it is checked as shipped.
 fmt:
-	@out=$$(gofmt -l admit agent approve cmd guard lookout nft policy scripts signer); if [ -n "$$out" ]; then echo "gofmt needed:"; echo "$$out"; exit 1; fi
+	@out=$$(gofmt -l admit agent approve cmd gnosh guard lookout nft policy scripts signer); if [ -n "$$out" ]; then echo "gofmt needed:"; echo "$$out"; exit 1; fi
 
 vet:
 	go vet ./...
@@ -22,6 +22,8 @@ build:
 	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -o bin/autopatch-sign-darwin-arm64 ./cmd/autopatch-sign
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o bin/autopatch-sign-linux-amd64 ./cmd/autopatch-sign
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o bin/autopatch-lookout-linux-amd64 ./cmd/autopatch-lookout
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o bin/autopatch-gnosh-linux-amd64 ./cmd/autopatch-gnosh
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o bin/autopatch-rig-linux-amd64 ./cmd/autopatch-rig
 
 integration:
 	scripts/netns-test.sh

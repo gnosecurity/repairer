@@ -432,14 +432,16 @@ func (a *Agent) hitNewSince(ctx context.Context, b *hitBudget, what string, sinc
 
 // onlyVanished says whether find's failure was only processes that ended
 // while it walked /proc: its errors, read whole, each say so of a path in
-// /proc (round 15, minor 4).
+// /proc (round 15, minor 4). find names itself as it was run, by its path:
+// "/usr/bin/find: '/proc/2/exe': No such file or directory".
 func onlyVanished(o Output) bool {
 	if o.ErrCapped {
 		return false
 	}
 	ls := lines(o.Err)
 	for _, l := range ls {
-		if !strings.HasPrefix(l, "find: ") || !strings.Contains(l, "/proc/") || !strings.HasSuffix(l, ": No such file or directory") {
+		prog, rest, _ := strings.Cut(l, ": ")
+		if filepath.Base(prog) != "find" || !strings.HasPrefix(rest, "'/proc/") || !strings.HasSuffix(rest, "': No such file or directory") {
 			return false
 		}
 	}

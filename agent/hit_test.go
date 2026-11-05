@@ -354,6 +354,9 @@ func TestHitPartialAndClipped(t *testing.T) {
 		want bool
 	}{
 		{Output{Err: []byte(vanished + vanished)}, true},
+		{Output{Err: []byte("/usr/bin/find: '/proc/2/exe': No such file or directory\n")}, true}, // find names itself by its path (seen in hit-e2e run 3)
+		{Output{Err: []byte("/usr/bin/find: '/home/x': No such file or directory\n")}, false},
+		{Output{Err: []byte("/usr/bin/sh: '/proc/2/exe': No such file or directory\n")}, false},
 		{Output{Err: []byte(denied)}, false},
 		{Output{Err: []byte(strings.Repeat(vanished, 500) + denied)}, false}, // read whole: an error after many others counts
 		{Output{Err: []byte(vanished), ErrCapped: true}, false},              // what was cut off could be anything

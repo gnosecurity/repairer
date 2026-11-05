@@ -77,7 +77,7 @@ mods=$(ask 5 foreign-modules 4 ""); log "modules: $mods"
 auth=$(ask 6 log-auth 5 ""); log "auth log: $auth"
 unit=$(ask 7 log-unit 6 ""); log "ssh's journal: $unit"
 ok=no
-[[ $clean == *"flag=false count=0"* ]] && [[ $setuid == *"flag=true"*"/var/tmp/.s"* ]] && [[ $deleted == *"flag=true"*"/var/tmp/sl"* ]] &&
+[[ $clean == *"flag=false count=0"* ]] && [[ $setuid == *"flag=true"*"/var/tmp/.s"* ]] && [[ $deleted == *"flag=true"*'error=""'*"/var/tmp/sl"* ]] &&
   [[ $files == *"flag=true count=2 "*"conf=1 "*"/$pkgfile"* ]] && [[ $files == *"/$fifo"* ]] && [[ $files == *"conf_paths=/etc/issue.net"* ]] &&
   [[ $mods == *'flag=false count=0 '*'capped="" error=""'* ]] &&
   [[ $auth == *'flag=true '*'capped="" error=""'* ]] && [[ $unit == *'flag=true '*'capped="" error=""'* ]] && ok=yes

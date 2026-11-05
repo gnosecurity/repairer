@@ -154,6 +154,41 @@ func TestRebootInTheWindow(t *testing.T) {
 	if m := rstep(t, a, f, p, nil); m != "" {
 		t.Fatalf("nothing owed now: %q", m)
 	}
+	// The next kernel's one-shot pins the kernel that settled, the one that
+	// last held (round 14, new major 3).
+	after(24 * time.Hour)
+	sys.runOut[dpkgQuery] += "linux-image-6.8.0-150-generic 6.8.0-150.150 ii \n"
+	sys.files["/boot/vmlinuz-6.8.0-150-generic"] = "kernel"
+	sys.files["/boot/initrd.img-6.8.0-150-generic"] = "initrd"
+	sys.files["/boot/grub/grub.cfg"] = strings.ReplaceAll(grubCfg, "6.8.0-142", "6.8.0-150") // 149 and 150
+	if m := rstep(t, a, f, p, nil); m != "rebooting into 6.8.0-150-generic" {
+		t.Fatalf("the next kernel: %q", m)
+	}
+	if got := ran(sys, "grub-set-default"); got[len(got)-1] != "grub-set-default "+newEntry {
+		t.Fatalf("pinned %q, not the kernel that last held", got)
+	}
+}
+
+// When the kernel that last held is gone (its package removed, its files
+// with it), there is nothing to fall back on: the reboot back waits for the
+// owner rather than boot an entry with no kernel behind it.
+func TestRebootNothingToFallBackOn(t *testing.T) {
+	a, sys, f, p, after := rebootAgent(t, `,"reboot":"window","reboot_window":"03:00-04:00"`)
+	rstep(t, a, f, p, nil)
+	after(time.Minute)
+	bootInto(sys, newRel)
+	rstep(t, a, f, p, nil)
+	for i := 0; i < failRun; i++ {
+		after(time.Minute)
+		rstep(t, a, f, p, map[string]string{mailCheck: "refused"})
+	}
+	sys.runOut[dpkgQuery] = "linux-image-" + oldRel + " 6.8.0-142.142 rc \nlinux-image-" + newRel + " 6.8.0-149.149 ii \n"
+	delete(sys.files, "/boot/vmlinuz-"+oldRel)
+	delete(sys.files, "/boot/initrd.img-"+oldRel)
+	after(time.Minute)
+	if m := rstep(t, a, f, p, nil); !strings.Contains(m, "the kernel that last held, "+oldRel+", is gone") || len(ran(sys, "systemctl reboot")) != 1 {
+		t.Fatalf("%q", m)
+	}
 }
 
 // A new kernel that doesn't boot: the machine comes back on the pinned
@@ -332,7 +367,13 @@ func TestRebootHealthWindow(t *testing.T) {
 	rstep(t, a, f, p, map[string]string{mailCheck: "refused"})
 	after(time.Minute)
 	rstep(t, a, f, p, map[string]string{mailCheck: "refused"}) // two in a row, then it passes
-	after(TrialWindow - 2*time.Minute - time.Second)
+	after(time.Minute)
+	rstep(t, a, f, p, nil)
+	after(time.Minute)
+	if m := rstep(t, a, f, p, map[string]string{mailCheck: "refused"}); !strings.HasPrefix(m, "booted into ") { // one more: the streak began again
+		t.Fatalf("a failure after a pass: %q", m)
+	}
+	after(TrialWindow - 4*time.Minute - time.Second)
 	if m := rstep(t, a, f, p, nil); !strings.HasPrefix(m, "booted into ") {
 		t.Fatalf("the window counts from when every check armed: %q", m)
 	}

@@ -564,17 +564,20 @@ func TestCopierAndFlood(cur realm, t *testing.T) {
 	}
 }
 
-// Names staked after a filing can't be drawn into it, and a ticket unstaked
-// before its round was fixed isn't either. A filing not drawn by its
-// deadline may be abandoned by anyone: the bond goes back, less FundFee
-// (round 9, minor 10).
+// A ticket staked less than MinTicketAge before a filing, even by one
+// block, can't be drawn into it, nor one staked after it, nor one unstaked
+// before its round was fixed. A filing not drawn by its deadline may be
+// abandoned by anyone: the bond goes back, less FundFee (round 9, minor 10).
 func TestYoungTickets(cur realm, t *testing.T) {
 	reset()
 	for _, w := range []address{alice, bob, carol} {
 		testing.SetRealm(u(w))
 		stakeOne(t, cur)
 	}
-	testing.SkipHeights(MinTicketAge)
+	testing.SkipHeights(1)
+	testing.SetRealm(u(dave))
+	stakeOne(t, cur) // one block too young for the filing below
+	testing.SkipHeights(MinTicketAge - 1)
 	testing.SetRealm(u(carol))
 	Unstake(cross(cur), 2) // leaving before the round is fixed: never drawn
 	before := bal(worker)
@@ -583,7 +586,7 @@ func TestYoungTickets(cur realm, t *testing.T) {
 	send(FilingBond)
 	id := Commit(cross(cur), Commitment(worker, "guard", GuardHash(guardText)+"\x00"+tc, "s"))
 	send(0)
-	for _, w := range []address{dave, eve, anyone} { // staked for the attack
+	for _, w := range []address{eve, anyone} { // staked for the attack, after the filing
 		testing.SetRealm(u(w))
 		stakeOne(t, cur)
 	}

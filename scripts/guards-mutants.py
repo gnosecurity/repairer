@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Mutation pass over the Guards realm: each mutant must make `gno test` fail.
-# Usage: GNO_BIN=/path/to/gno GNOROOT=/path/to/gno-source JOBS=4 python3 scripts/guards-mutants.py gno
-import os, shutil, subprocess, sys, tempfile
+# Usage: GNO_BIN=/path/to/gno GNOROOT=/path/to/gno-source JOBS=4 [ONLY=regexp] python3 scripts/guards-mutants.py gno
+import os, re, shutil, subprocess, sys, tempfile
 from concurrent.futures import ThreadPoolExecutor
 
 SRC = sys.argv[1] if len(sys.argv) > 1 else "gno"
@@ -31,7 +31,7 @@ M = [
     ("silent worker's checkers unpaid", G, '\t\tif c.revealed || c.prev != "" {\n\t\t\tpay(cur, c.owner, CheckFee)', '\t\tif c.revealed || c.prev != "" {\n\t\t\tpay(cur, c.owner, 0)'),
     ("no level written", G, "setLevel(f.guardHash, Tested)", 'setLevel(f.guardHash, "")'),
     ("no param written", G, 'params.SetString("lvl_"+hash, level)', "_ = hash"),
-    ("bad beacons accepted", G, "if !drandbn254.Verify(drandPub, round, sig) {", "if false {"),
+    ("bad beacons accepted", G, "if !drandbn254.Verify(drandPub, round, sig) {", "if !drandbn254.Verify(drandPub, round, sig) && false {"),
     ("forfeits not locked", G, "\tburned += f.bond\n", "\tburned += 0\n"),
     ("a silent worker's bond not locked", G, "\tburned += bond\n\tf.bond, f.state = 0, Forfeited", "\tburned += 0\n\tf.bond, f.state = 0, Forfeited"),
     ("double draw", G, 'case f.state != Revealed:\n\t\tpanic("guards: not waiting for a draw")', 'case false:\n\t\tpanic("guards: not waiting for a draw")'),
@@ -88,20 +88,20 @@ M = [
     ("no reruns", D, "if f.reruns >= Reruns {", "if f.reruns >= 0 {"),
     ("an objection reruns", G, "\tf.verdict, f.until = \"\", 0\n\tchain.Emit(\"GuardObjected\", \"filing\", strconv.Itoa(id), \"by\", string(who))\n\tpanelRequest(f, id)", "\tf.verdict, f.until = \"\", 0\n\tchain.Emit(\"GuardObjected\", \"filing\", strconv.Itoa(id), \"by\", string(who))\n\tdispute(f, id)"),
     ("a rerun's silent checker goes free", D, "burned += slash(c, Slash)\n\t\t\trelease(c)\n\t\t\tf.silent[c.owner] = true", "burned += 0\n\t\t\trelease(c)\n\t\t\tf.silent[c.owner] = true"),
-    ("a rerun's agreement ignored", D, "if match && len(f.checks) > 1 {", "if false {"),
+    ("a rerun's agreement ignored", D, "if match && len(f.checks) > 1 {", "if match && len(f.checks) > 1 && false {"),
     ("the worker alone agrees", D, "if match && len(f.checks) > 1 {", "if match {"),
     ("a panel without the fund", D, "if fund < fee {", "if fund < 0 {"),
     ("a panel after its deadline", D, "case now() > f.fixedAt+DrawDeadline:", "case false:"),
     ("never the pool", D, "if f.panelLevel >= len(PanelSizes) {\n\t\tf.state = Pool", "if f.panelLevel >= 99 {\n\t\tf.state = Pool"),
-    ("a panel decides early", D, "!all && now() <= f.allIn+RevealWindow {", "false {"),
+    ("a panel decides early", D, "!all && now() <= f.allIn+RevealWindow {", "!all && now() <= f.allIn+RevealWindow && false {"),
     ("a half panel decides", D, "votes[c.transcript]*3 > size*2", "votes[c.transcript]*2 >= size"),
     ("a silent panelist goes free", D, "burned += slash(c, Slash)\n\t\t\trelease(c)\n\t\t\trec(c.owner).Silent++", "burned += 0\n\t\t\trelease(c)\n\t\t\trec(c.owner).Silent++"),
-    ("anyone appeals", D, "if !against {", "if false {"),
+    ("anyone appeals", D, "if !against {", "if !against && false {"),
     ("a late appeal", D, "if f.state != Appealable || now() > f.until {", "if f.state != Appealable {"),
     ("an appeal to the same panel size", D, "\tf.panelLevel++\n\tchain.Emit(\"GuardAppealed\"", "\tchain.Emit(\"GuardAppealed\""),
     # pool.gno: the pool's vote
     ("pool: under two thirds decides", P, "if v.revealed*3 <= v.total*2 {", "if v.revealed*3 <= v.total {"),
-    ("pool: an early tally", P, "if !done {", "if false {"),
+    ("pool: an early tally", P, "if !done {", "if !done && false {"),
     ("pool: tally before every reveal", P, "v.reveals == v.committed", "v.reveals > 0"),
     ("pool: abstainers free", P, "burned += charge(t, t.stake*AbstainShare/100)", "burned += charge(t, 0)"),
     ("pool: wrong voters free", P, "burned += charge(t, n)", "burned += charge(t, 0)"),
@@ -128,6 +128,9 @@ M = [
     ("render: a short fence", R, "max3(longest+1)", "max3(longest)"),
 ]
 
+if os.environ.get("ONLY"):  # a regular expression over mutant names
+    M = [m for m in M if re.search(os.environ["ONLY"], m[0])]
+
 survived = []
 files = {}
 for name, path, old, new in M:
@@ -148,7 +151,20 @@ def run(m):
         r = subprocess.run([GNO, "test", "."], cwd=os.path.join(work, "r/guards"), capture_output=True, text=True, timeout=900)
     if r.returncode == 0:
         return name, f"SURVIVED {name}", False
-    return name, f"killed   {name}", True
+    # Name the tests that caught it, so a failure that has nothing to do
+    # with the mutant (a build error, a crash) can't pass for a catch.
+    # gno prints a test that panics as "panic: ..." with no "--- FAIL" line;
+    # its stack names the test file's line.
+    out = r.stdout + r.stderr
+    caught = sorted(set(re.findall(r"--- FAIL: (Test\w+)", out)))
+    p = re.search(r"^panic: (.*)$", out, re.M)
+    if p:
+        at = re.search(r"(\w+_test\.gno:\d+)", out[p.end():])
+        caught.append(f"panic at {at.group(1) if at else '?'}: {p.group(1)[:80]}")
+    if not caught:
+        last = out.strip().splitlines()[-1:] or ["no output"]
+        return name, f"ERROR    {name}: no test failed ({last[0]})", False
+    return name, f"killed   {name} ({'; '.join(caught)})", True
 
 
 with ThreadPoolExecutor(JOBS) as ex:

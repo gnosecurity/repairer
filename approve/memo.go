@@ -233,6 +233,72 @@ func VerifyYes(txJSON []byte, chainID string, seq uint64, ownerPub []byte, g *gu
 	return y, nil
 }
 
+// Reboot is the owner's word that a host may reboot into a kernel, once,
+// before a deadline (B3): Reboot(host, kernel, not after). The deadline is
+// on a whole minute, so the memo shows it exactly.
+type Reboot struct {
+	Host     string
+	Kernel   string // the release, as uname -r gives it: 6.8.0-149-generic
+	NotAfter int64  // Unix seconds
+}
+
+// Args are the Reboot's arguments as signed.
+func (r Reboot) Args() []string {
+	return []string{r.Host, r.Kernel, strconv.FormatInt(r.NotAfter, 10)}
+}
+
+var kernelRelease = regexp.MustCompile(`^[0-9]+\.[0-9]+[0-9A-Za-z.+~_-]{0,60}$`)
+
+// ParseReboot reads a Reboot from a statement's call, strictly.
+func ParseReboot(c Call) (Reboot, error) {
+	if c.Func != "Reboot" || len(c.Args) != 3 {
+		return Reboot{}, errors.New("approve: not a Reboot with three arguments")
+	}
+	r := Reboot{Host: c.Args[0], Kernel: c.Args[1]}
+	if !hostRe.MatchString(r.Host) {
+		return Reboot{}, fmt.Errorf("approve: host %q", r.Host)
+	}
+	if !kernelRelease.MatchString(r.Kernel) {
+		return Reboot{}, fmt.Errorf("approve: %q isn't a kernel release", r.Kernel)
+	}
+	n, err := strconv.ParseInt(c.Args[2], 10, 64)
+	if err != nil || n <= 0 || n%60 != 0 || strconv.FormatInt(n, 10) != c.Args[2] {
+		return Reboot{}, fmt.Errorf("approve: the deadline %q isn't Unix seconds on a whole minute", c.Args[2])
+	}
+	r.NotAfter = n
+	return r, nil
+}
+
+// MemoReboot writes the memo for letting a host reboot into a kernel, in
+// words and the deadline in UTC, so the Ledger shows what it allows.
+func MemoReboot(r Reboot) (string, error) {
+	return checkMemo(fmt.Sprintf("%s Reboot %s into %s, once, not after %s UTC", MemoVersion, r.Host, r.Kernel,
+		time.Unix(r.NotAfter, 0).UTC().Format("2006-01-02 15:04")))
+}
+
+// VerifyReboot checks an owner's Reboot in gnokey's signed transaction
+// file: the arguments read from it, the memo rewritten from them, and the
+// signature over both.
+func VerifyReboot(txJSON []byte, chainID string, seq uint64, ownerPub []byte) (Reboot, error) {
+	var tx GnokeyTx
+	if err := json.Unmarshal(txJSON, &tx); err != nil || len(tx.Msg) != 1 {
+		return Reboot{}, errors.New("approve: not one message")
+	}
+	m := tx.Msg[0]
+	r, err := ParseReboot(Call{Caller: m.Caller, Func: m.Func, Args: m.Args})
+	if err != nil {
+		return Reboot{}, err
+	}
+	memo, err := MemoReboot(r)
+	if err != nil {
+		return Reboot{}, err
+	}
+	if _, err := VerifyGnokey(txJSON, chainID, seq, ownerPub, memo); err != nil {
+		return Reboot{}, err
+	}
+	return r, nil
+}
+
 // MemoCancel writes the memo for cancelling a pending policy change.
 func MemoCancel(fleet, pending string) (string, error) {
 	if !isHash(pending) {

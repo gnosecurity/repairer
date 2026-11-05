@@ -168,6 +168,7 @@ func DrawPanel(cur realm, id int) {
 	size := PanelSizes[f.panelLevel]
 	picks := pick(roundSig(f), "panel", id, f.panelLevel, size, f, true)
 	unwait(f, id)
+	compact(4)
 	f.reserve -= DrawFee
 	pay(cur, who, DrawFee)
 	if picks == nil {

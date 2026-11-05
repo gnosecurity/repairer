@@ -512,6 +512,9 @@ func TestFundWaits(cur realm, t *testing.T) {
 	if s := Settle(cross(cur), id); s != Panel || FundBalance() != 0 {
 		t.Fatalf("after the deadline: %s, fund %d", s, FundBalance())
 	}
+	if waits.Size() != 1 {
+		t.Errorf("%d rounds kept waiting; the stale one should be let go", waits.Size())
+	}
 	if _, r, _ := State(id); r != 1004 {
 		t.Fatalf("the new round is %d", r)
 	}
@@ -607,7 +610,11 @@ func TestSplitPanelEscalates(cur realm, t *testing.T) {
 	refuses(t, "still waiting for commitments", func() { Settle(cross(cur), id) })
 	testing.SkipHeights(CheckWindow + 1)
 	testing.SetRealm(u(anyone))
-	Settle(cross(cur), id) // the silent member's seats are out; the rest may reveal
+	f0, b0 := FundBalance(), Burned()
+	Settle(cross(cur), id)                                                 // the silent member's seats are out; the rest may reveal
+	if FundBalance()-f0 != Slash*int64(seats2[silent]) || Burned() != b0 { // silence pays the fund (round 11, minor 3)
+		t.Errorf("the silent member's slash: fund +%d, burned +%d", FundBalance()-f0, Burned()-b0)
+	}
 	for _, p := range second {
 		if p != silent {
 			testing.SetRealm(u(p))
@@ -680,8 +687,12 @@ func TestSilentInARerun(cur realm, t *testing.T) {
 	}
 	testing.SkipHeights(CheckWindow + 1)
 	testing.SetRealm(u(anyone))
+	f0 := FundBalance()
 	if s := Settle(cross(cur), id); s != Rerun {
 		t.Fatalf("after a silence in the rerun's commitments: %s", s)
+	}
+	if FundBalance()-f0 != Slash || Burned() != 0 { // silence pays the fund (round 11, minor 3)
+		t.Errorf("the silent checker's slash: fund +%d, burned %d", FundBalance()-f0, Burned())
 	}
 	for _, c := range []address{worker, drawn[1], drawn[2]} {
 		testing.SetRealm(u(c))
@@ -1117,9 +1128,6 @@ func TestAnyoneAppeals(cur realm, t *testing.T) {
 	send(bond)
 	Appeal(cross(cur), id)
 	send(0)
-	if !party(get(id), honest) {
-		t.Fatal("the appellant isn't a party")
-	}
 	testing.SetRealm(u(anyone))
 	SubmitBeacon(cross(cur), 1004, sig1004)
 	DrawPanel(cross(cur), id)

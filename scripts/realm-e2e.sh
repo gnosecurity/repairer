@@ -42,7 +42,8 @@ find "$ws" -name '*_test.gno' -delete
 # transaction), a floor of 1 ugnot, a draw three beacon rounds out.
 python3 -I - "$ws/r/guards" "$POOL" <<'PY'
 import re, sys
-for f, sets in [("guards.gno", [("MinTicketAge", "3"), ("RevealWindow", "50"), ("CheckWindow", "50"), ("DrawDeadline", "40"),
+win = "50" if sys.argv[2] == "0" else "400" # a 31-seat panel's commitments take two heights each on gnodev
+for f, sets in [("guards.gno", [("MinTicketAge", "3"), ("RevealWindow", win), ("CheckWindow", win), ("DrawDeadline", "40"),
                                 ("UnbondBlocks", "60"), ("DrawDelay", "3"), ("ObjectionWindow", "2"), ("LevelFloor", "1")]),
                 ("dispute.gno", [("AppealWindow", "2")])]:
     p = sys.argv[1] + "/" + f

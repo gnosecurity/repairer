@@ -88,6 +88,7 @@ func newFakeSys() *fakeSys {
 		tables:   map[string]*fakeTable{},
 		units:    map[string]*fakeUnit{},
 		inUse:    map[string]string{},
+		runOut:   map[string]string{},
 		modules:  map[string]string{"ksmbd": "loadable", "sctp": "loadable", "ext4": "builtin"},
 		sshPorts: []int{22},
 		ephLo:    32768,

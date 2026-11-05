@@ -27,7 +27,7 @@ qemu-system-x86_64 -enable-kvm -cpu host -m 2048 -smp 2 \
   -display none -serial file:"$w/console.log" -daemonize -pidfile "$w/qemu.pid"
 cleanup() { kill "$(cat "$w/qemu.pid" 2>/dev/null)" 2>/dev/null || true; rm -f "$w/disk.qcow2"; }
 trap cleanup EXIT
-S=(ssh -q -i "$R/rig_ed25519" -p "$port" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -o BatchMode=yes rig@127.0.0.1)
+S=(ssh -q -i "$R/rig_ed25519" -p "$port" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 -o BatchMode=yes rig@127.0.0.1) # a reboot mid-call ends the call
 waitssh() { for i in $(seq 1 120); do "${S[@]}" true 2>/dev/null && return 0; sleep 2; done; return 1; }
 log() { echo "$(date -u +%H:%M:%S) $*" | tee -a "$w/log.txt"; }
 waitssh

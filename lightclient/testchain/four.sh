@@ -20,7 +20,7 @@ cleanup() {
 }
 trap cleanup EXIT
 log() { echo "$(date -u +%H:%M:%S) $*"; }
-rpcport() { echo $((36650 + $1)); }
+rpcport() { echo $((21650 + $1)); } # below the ephemeral range (32768 on), so no outgoing connection holds one
 R=127.0.0.1:$(rpcport 1)
 : > "$D/empty.jsonl"
 
@@ -35,11 +35,11 @@ pub() { "$B/gnoland" secrets get -data-dir "$D/n$1/secrets" validator_key.pub_ke
 for i in 1 2 3 4 5; do
   peers=""
   for j in 1 2 3 4 5; do
-    [ "$i" = "$j" ] || peers="$peers${peers:+,}$(id "$j")@127.0.0.1:$((36660 + j))"
+    [ "$i" = "$j" ] || peers="$peers${peers:+,}$(id "$j")@127.0.0.1:$((21660 + j))"
   done
   c=(-config-path "$D/n$i/config/config.toml")
   "$B/gnoland" config set "${c[@]}" rpc.laddr "tcp://127.0.0.1:$(rpcport "$i")" >/dev/null
-  "$B/gnoland" config set "${c[@]}" p2p.laddr "tcp://127.0.0.1:$((36660 + i))" >/dev/null
+  "$B/gnoland" config set "${c[@]}" p2p.laddr "tcp://127.0.0.1:$((21660 + i))" >/dev/null
   "$B/gnoland" config set "${c[@]}" p2p.persistent_peers "$peers" >/dev/null
   "$B/gnoland" config set "${c[@]}" p2p.allow_duplicate_ip true >/dev/null
   "$B/gnoland" config set "${c[@]}" p2p.pex false >/dev/null

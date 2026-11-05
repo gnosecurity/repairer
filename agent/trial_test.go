@@ -1698,3 +1698,27 @@ func TestObservedSharesOnlyItsFirstBoot(t *testing.T) {
 		t.Fatalf("the block at the strip's second boot: on %v, suspect %v, tries %d", tr.entry(w) != nil, ev.Suspect, ev.Tries)
 	}
 }
+
+// A reboot under way or in its health window is a change in flight: no
+// guard's trial starts then, so neither is blamed for the other's failure
+// (round 14, minor 3). Once the reboot settles, the guard goes on.
+func TestNoTrialDuringAReboot(t *testing.T) {
+	tr := newTrial(t, "backup", "")
+	g := ipoptGuard(t)
+	tr.sys.files["/proc/sys/kernel/osrelease"] = "6.8.0-149-generic\n" // running the kernel on trial
+	if err := tr.a.saveReboot(&rebootState{Kernel: "6.8.0-149-generic", Phase: Booted, Since: tr.clock}); err != nil {
+		t.Fatal(err)
+	}
+	tr.tested(g)
+	for i := 0; i < 5; i++ {
+		if res := tr.step(time.Minute); len(res.Baseline)+len(res.Applied) != 0 {
+			t.Fatalf("a trial began in a reboot's window: %+v", res)
+		}
+	}
+	if err := tr.a.saveReboot(&rebootState{Kernel: "6.8.0-149-generic", Phase: Settled, Since: tr.clock}); err != nil {
+		t.Fatal(err)
+	}
+	if res := tr.step(time.Minute); len(res.Baseline) != 1 {
+		t.Fatalf("after the reboot settled: %+v", res)
+	}
+}

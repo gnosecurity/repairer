@@ -21,20 +21,22 @@ import (
 // Reboots by tier (B3; AUTOPATCH.md, "Reboots and kernels"). A reboot is
 // owed when the newest installed kernel isn't the one running. The tier
 // says who may reboot: "window", the agent itself inside the tier's window,
-// once a day, never while a guard is on trial; "yes", only on the owner's
-// signed Reboot; "never". Every reboot is a one-shot boot: GRUB's saved
-// default is pinned to the running kernel, the new one is booted once with
-// grub-reboot, and it becomes the default only after health holds through
-// a trial window. A boot that panics (panic= on the command line) comes
-// back on the old default; the agent marks that kernel failed and never
-// tries it again by itself. The owner's signed Reboot(host, kernel, not
-// after) lets one reboot into that kernel happen at the next tick the gates
-// pass, whatever the tier says, once. With no newer kernel, a plain reboot
-// into the running kernel is owed when the system asks for one
-// (/run/reboot-required, left by packages such as libc6), or when this
-// machine is a canary of its tier holding an admitted guard that takes
-// effect only after a boot, which the rest of the tier waits for (rule 4;
-// once for each such guard): the same rules, and the health window after
+// at most once in 20 hours, never while a guard is on trial; "yes", only on
+// the owner's signed Reboot; "never". Every reboot first pins the kernel
+// that last held here as GRUB's saved default; a new kernel is then booted
+// once with grub-reboot, and becomes the default only after health holds
+// through a trial window, judged as a boot's window is. A boot that panics
+// (panic= on the command line) comes back on the pinned kernel; a kernel
+// that didn't boot or didn't hold is marked failed and never tried again
+// by itself, and a machine left on one owes a reboot back to the kernel
+// that last held. The owner's signed Reboot(host, kernel, not after) lets
+// one reboot into that kernel happen at the next tick the gates pass,
+// whatever the tier says, once. With no newer kernel, a plain reboot is owed
+// when the system asks for one (/run/reboot-required, left by packages such
+// as libc6), when this machine is a canary of its tier holding an admitted
+// guard that takes effect only after a boot, which the rest of the tier
+// waits for (rule 4; once for each such guard), or on the owner's Reboot
+// naming the running kernel: the same rules, and the health window after
 // it. Whether the machine went down is told by the kernel's boot id, which
 // changes on every boot.
 
@@ -55,24 +57,43 @@ const (
 
 // rebootState is the agent's record of its reboots, in reboot.json.
 type rebootState struct {
-	Kernel  string    `json:"kernel,omitempty"` // the release it booted into, or tried to
-	Entry   string    `json:"entry,omitempty"`  // the GRUB entry booted once
+	Kernel  string    `json:"kernel,omitempty"` // the release it rebooted into, or tried to
+	Entry   string    `json:"entry,omitempty"`  // a new kernel's GRUB entry: booted once, the default once it holds
 	Phase   string    `json:"phase,omitempty"`
 	Since   time.Time `json:"since,omitempty"` // when the phase began
 	Why     string    `json:"why,omitempty"`
-	Day     string    `json:"day,omitempty"`     // the UTC day of the last reboot it began
-	Failing []string  `json:"failing,omitempty"` // checks failing just before it rebooted
+	Began   time.Time `json:"began,omitzero"`    // when the last reboot began: a window tier waits 20 hours after it
+	Failing []string  `json:"failing,omitempty"` // checks failing just before it rebooted: not the reboot's fault
 	Failed  []string  `json:"failed,omitempty"`  // kernels that didn't boot or didn't hold
 	// Spent is the owner sequence of the newest Reboot a reboot began on:
 	// that one and every older one are spent. It is kept here, written
 	// before the machine reboots, so no Reboot is used twice.
-	Spent uint64 `json:"spent,omitempty"`
-	Boot  string `json:"boot,omitempty"` // the boot id when the reboot began
-	Same  bool   `json:"same,omitempty"` // a reboot into the running kernel
-	For   string `json:"for,omitempty"`  // why that one: the system asked, or a canary's boot
-	// CanaryBoots are the later guards this canary has rebooted for once.
+	Spent   uint64 `json:"spent,omitempty"`
+	Boot    string `json:"boot,omitempty"`     // the boot id when the reboot began
+	NewBoot string `json:"new_boot,omitempty"` // the boot id it came up on: another during the window fails it
+	Same    bool   `json:"same,omitempty"`     // a reboot into a kernel that ran here: plain, or back
+	For     string `json:"for,omitempty"`      // why that one: the system asked, a canary's boot, back
+	// Held is the kernel that last held here: the running one before the
+	// first reboot, then each that settled. Every reboot pins it as GRUB's
+	// default, never a kernel in Failed (round 14, new major 3).
+	Held string `json:"held,omitempty"`
+	// The health window, judged as a boot's (bootgroup.go): the checks
+	// armed (passed since the boot, or out of their grace), each one's
+	// failures in a row, and when every check was armed (round 14, new major
+	// 2).
+	Armed    map[string]bool `json:"armed,omitempty"`
+	Streak   map[string]int  `json:"streak,omitempty"`
+	ArmedAll time.Time       `json:"armed_all,omitzero"`
+	// Canary are the later guards this reboot is a canary's boot for;
+	// CanaryBoots those it has booted with once, listed when the boot is
+	// seen (round 14, minor 2).
+	Canary      []string `json:"canary,omitempty"`
 	CanaryBoots []string `json:"canary_boots,omitempty"`
 }
+
+// rebootGap is how long a window tier waits after a reboot began before it
+// begins another: a window that wraps midnight holds one reboot, not two.
+var rebootGap = 20 * time.Hour
 
 // maxFailed is how many failed kernels reboot.json remembers.
 const maxFailed = 8
@@ -116,19 +137,18 @@ func (st *rebootState) fail(now time.Time, why string) {
 }
 
 // order finds the owner's Reboot that lets this machine reboot into target
-// now, if one does. It drops the spent ones, those a day past their
-// deadline, and those for the kernel running when no reboot into it is
-// owed (same says one is: the system asked); notes says why the others wait.
-func (st *rebootState) order(f *Fleet, now time.Time, target, running string, same bool) (use *RebootOrder, notes []string) {
+// now, if one does. It drops the spent ones and those a day past their
+// deadline; notes says why the others wait.
+func (st *rebootState) order(f *Fleet, now time.Time, target string) (use *RebootOrder, notes []string) {
 	var keep []RebootOrder
 	for _, o := range f.Reboots {
 		switch {
-		case o.Seq <= st.Spent || (o.Kernel == running && !same) || now.After(o.NotAfter.Add(24*time.Hour)):
+		case o.Seq <= st.Spent || now.After(o.NotAfter.Add(24*time.Hour)):
 			continue
 		case now.After(o.NotAfter):
 			notes = append(notes, fmt.Sprintf("your Reboot #%d into %s passed its deadline unused", o.Seq, o.Kernel))
 		case o.Kernel != target:
-			notes = append(notes, fmt.Sprintf("your Reboot #%d names %s, but the newest kernel installed is %s", o.Seq, o.Kernel, target))
+			notes = append(notes, fmt.Sprintf("your Reboot #%d names %s, not %s, the kernel a reboot now would boot", o.Seq, o.Kernel, target))
 		default:
 			o := o
 			use = &o // the newest one, as the list is oldest first
@@ -137,6 +157,47 @@ func (st *rebootState) order(f *Fleet, now time.Time, target, running string, sa
 	}
 	f.Reboots = keep
 	return use, notes
+}
+
+// judge reads one tick's sample into a reboot's health window, as a boot's
+// window is read (bootgroup.go): a check arms once it passes since the boot
+// or its grace runs out, and failRun failures in a row of an armed check, at
+// any tick, fail the reboot. A check failing before the reboot isn't its
+// fault. It says the checks that failed.
+func (st *rebootState) judge(checks []policy.Health, sample map[string]string, now time.Time) []string {
+	if st.Armed == nil {
+		st.Armed = map[string]bool{}
+	}
+	if st.Streak == nil {
+		st.Streak = map[string]int{}
+	}
+	all := true
+	var bad []string
+	for _, h := range checks {
+		k := checkKey(h)
+		if contains(st.Failing, k) {
+			continue
+		}
+		why, failing := sample[k]
+		if !st.Armed[k] {
+			if failing && now.Sub(st.Since) < time.Duration(h.Grace())*time.Second {
+				all = false
+				continue
+			}
+			st.Armed[k] = true
+		}
+		if !failing {
+			delete(st.Streak, k)
+			continue
+		}
+		if st.Streak[k]++; st.Streak[k] >= failRun {
+			bad = append(bad, k+": "+why)
+		}
+	}
+	if all && st.ArmedAll.IsZero() {
+		st.ArmedAll = now
+	}
+	return bad
 }
 
 // running is the release of the running kernel (uname -r).
@@ -250,7 +311,11 @@ var menuID = regexp.MustCompile(`\$menuentry_id_option '([^']+)'`)
 
 // grubEntry finds release rel's normal (not recovery) menu entry in
 // grub.cfg, as grub-reboot and grub-set-default take it: "submenu>entry".
+// The entry's id is 10_linux's "gnulinux-<rel>-advanced-<root>", matched
+// from its start, so 6.8.0-147-generic never matches 6.8.0-147-generic-64k;
+// more than one match refuses (round 14, minor 6).
 func grubEntry(cfg []byte, rel string) (string, error) {
+	var found []string
 	var submenus []string // the ids of the submenus open at this line
 	depth := []bool{}     // for each open brace: whether it opened a submenu
 	sc := bufio.NewScanner(bytes.NewReader(cfg))
@@ -266,9 +331,8 @@ func grubEntry(cfg []byte, rel string) (string, error) {
 			submenus = append(submenus, id)
 			depth = append(depth, true)
 		case strings.HasPrefix(line, "menuentry ") && strings.HasSuffix(line, "{"):
-			if m := menuID.FindStringSubmatch(line); m != nil && strings.Contains(m[1], "-"+rel+"-") && !strings.Contains(m[1], "recovery") {
-				path := append(append([]string{}, submenus...), m[1])
-				return strings.Join(path, ">"), nil
+			if m := menuID.FindStringSubmatch(line); m != nil && strings.HasPrefix(m[1], "gnulinux-"+rel+"-advanced-") {
+				found = append(found, strings.Join(append(append([]string{}, submenus...), m[1]), ">"))
 			}
 			depth = append(depth, false)
 		case line == "}":
@@ -282,7 +346,13 @@ func grubEntry(cfg []byte, rel string) (string, error) {
 			depth = append(depth, false) // if, function and the like
 		}
 	}
-	return "", fmt.Errorf("no menu entry for %s in grub.cfg", rel)
+	switch len(found) {
+	case 0:
+		return "", fmt.Errorf("no menu entry for %s in grub.cfg", rel)
+	case 1:
+		return found[0], nil
+	}
+	return "", fmt.Errorf("%d menu entries for %s in grub.cfg: which one boots is unclear", len(found), rel)
 }
 
 // rebootStep moves a reboot a step, after the guards' step: it follows a
@@ -296,6 +366,12 @@ func (a *Agent) rebootStep(ctx context.Context, f *Fleet, p *policy.Policy, samp
 	}
 	now := a.now().UTC()
 	running := a.running()
+	what := func() string { // the reboot in flight, in words
+		if st.Same {
+			return "(" + st.For + ")"
+		}
+		return "into " + st.Kernel
+	}
 	switch st.Phase {
 	case Rebooting:
 		// Up on a new boot: on the kernel it rebooted into, or back on
@@ -305,61 +381,63 @@ func (a *Agent) rebootStep(ctx context.Context, f *Fleet, p *policy.Policy, samp
 		switch {
 		case booted && running == st.Kernel:
 			// GRUB clears the one-shot entry as it boots it; if it didn't,
-			// clear it now, so a panic from here on comes back to the old
-			// kernel, the default.
-			st.Phase, st.Since = Booted, now
+			// clear it now, so a panic from here on comes back to the pinned
+			// kernel. A canary's boot counts once the boot is seen.
+			st.Phase, st.Since, st.NewBoot = Booted, now, a.bootID()
+			st.Armed, st.Streak, st.ArmedAll = nil, nil, time.Time{}
+			st.judge(checksFor(p, f.Host), sample, now) // the window's first sample: it arms what passes
+			st.CanaryBoots = lastN(append(st.CanaryBoots, st.Canary...), 32)
+			st.Canary = nil
 			msg := "booted into " + running + "; its health window runs"
 			if st.Same {
-				msg = "rebooted (" + st.For + "); its health window runs"
+				msg = "rebooted " + what() + "; its health window runs"
 			}
 			return msg, false, errors.Join(a.oneShotGone(ctx), a.saveReboot(st))
 		case booted:
 			st.fail(now, st.Kernel+" didn't boot: back on "+running)
 			return st.Why, false, errors.Join(a.oneShotGone(ctx), a.saveReboot(st))
 		case now.Sub(st.Since) < RebootDeadline:
-			if st.Same {
-				return "rebooting (" + st.For + ")", false, nil
-			}
-			return "rebooting into " + st.Kernel, false, nil
+			return "rebooting " + what(), false, nil
 		}
 		// Still the same boot by the deadline: the machine never went down.
 		// The one-shot boot is taken back, so a later reboot doesn't try the
 		// kernel unasked, and the reboot waits for the owner.
-		st.fail(now, "the machine didn't go down to reboot into "+st.Kernel)
+		st.fail(now, "the machine didn't go down to reboot "+what())
 		return st.Why, false, errors.Join(a.oneShotGone(ctx), a.saveReboot(st))
 	case Booted:
-		if running != st.Kernel {
+		switch {
+		case running != st.Kernel:
 			st.fail(now, "back on "+running+" before "+st.Kernel+" settled")
 			return st.Why, false, a.saveReboot(st)
+		case st.NewBoot != "" && a.bootID() != st.NewBoot:
+			st.fail(now, st.Kernel+" restarted during its health window")
+			return st.Why, false, a.saveReboot(st)
 		}
-		if now.Sub(st.Since) < TrialWindow {
+		if bad := st.judge(checksFor(p, f.Host), sample, now); len(bad) > 0 {
+			why := "health failed on " + running + ": " + strings.Join(bad, "; ") + "; a reboot back to " + st.Held + " is owed"
 			if st.Same {
-				return "rebooted (" + st.For + "); its health window runs", false, nil
-			}
-			return "booted into " + running + "; its health window runs", false, nil
-		}
-		var fresh []string // checks failing now that held before the reboot
-		for _, name := range sortedKeys(sample) {
-			if !contains(st.Failing, name) {
-				fresh = append(fresh, name+": "+sample[name])
-			}
-		}
-		if len(fresh) > 0 {
-			why := "health failed on " + running + ": " + strings.Join(fresh, "; ") + "; the old kernel is still the default"
-			if st.Same {
-				why = "health failed after the reboot: " + strings.Join(fresh, "; ")
+				why = "health failed after the reboot " + what() + ": " + strings.Join(bad, "; ")
 			}
 			st.fail(now, why)
 			return st.Why, false, a.saveReboot(st)
 		}
+		if st.ArmedAll.IsZero() || now.Sub(st.ArmedAll) < TrialWindow {
+			msg := "booted into " + running + "; its health window runs"
+			if st.Same {
+				msg = "rebooted " + what() + "; its health window runs"
+			}
+			return msg, false, a.saveReboot(st) // the window's streaks, each tick
+		}
+		if !st.Same {
+			if _, err := a.Sys.Run(ctx, nil, "grub-set-default", st.Entry); err != nil {
+				return "", false, fmt.Errorf("making %s the default: %w", st.Kernel, err)
+			}
+		}
+		st.Held = st.Kernel
+		st.Phase, st.Since, st.Why, st.Armed, st.Streak = Settled, now, "", nil, nil
 		if st.Same {
-			st.Phase, st.Since, st.Why = Settled, now, ""
-			return "rebooted (" + st.For + "); health held", false, a.saveReboot(st)
+			return "rebooted " + what() + "; health held", false, a.saveReboot(st)
 		}
-		if _, err := a.Sys.Run(ctx, nil, "grub-set-default", st.Entry); err != nil {
-			return "", false, fmt.Errorf("making %s the default: %w", st.Kernel, err)
-		}
-		st.Phase, st.Since, st.Why = Settled, now, ""
 		return "rebooted into " + running + "; it is the default now", false, a.saveReboot(st)
 	}
 
@@ -367,14 +445,32 @@ func (a *Agent) rebootStep(ctx context.Context, f *Fleet, p *policy.Policy, samp
 	if err != nil || newest == "" {
 		return "", false, nil
 	}
-	// What is owed: a reboot into the newest kernel, or, with none newer, a
-	// plain reboot the system asks for, or a canary's boot for its later
-	// guards.
-	target, asked := newest, ""
+	held := st.Held
+	if held == "" {
+		held = running // before the first reboot, the running kernel is the one that holds
+	}
+	// What is owed, in order: back to the kernel that last held, from one
+	// that failed its trial; a reboot into the newest kernel; or, with none
+	// newer, a plain reboot the system asks for, a canary's boot for its
+	// later guards, or the owner's Reboot of the running kernel.
+	var target, owed string
+	var why, whys []string // a reboot into a kernel that ran here: its reasons, for the record and in words
 	var entries []*Entry
 	var later, laterNames []string // later guards this canary must boot with
-	if newest == running {
-		asked = a.rebootAsked()
+	same, back := false, false
+	switch {
+	case st.failed(running) && held != running:
+		target, same, back = held, true, true
+		why = []string{"back to " + held}
+		owed = "a reboot back to " + held + " is owed: " + running + " failed its trial"
+	case newest != running:
+		target = newest
+		owed = "a reboot into " + newest + " is owed"
+	default:
+		target, same = running, true
+		if asked := a.rebootAsked(); asked != "" {
+			why, whys = append(why, "the system asked"), append(whys, "the system asks for one"+asked)
+		}
 		if tier, ok := p.TierOf(f.Host); ok && contains(tier.Canaries, f.Host) {
 			if entries, _, err = a.Status(ctx); err != nil {
 				return "", false, err
@@ -385,33 +481,24 @@ func (a *Agent) rebootStep(ctx context.Context, f *Fleet, p *policy.Policy, samp
 				}
 			}
 		}
+		if len(later) > 0 {
+			why = append(why, "a canary's boot for "+strings.Join(laterNames, ", "))
+			whys = append(whys, "this canary boots with "+strings.Join(laterNames, ", ")+" before the rest of its tier takes it")
+		}
 	}
-	same := asked != "" || len(later) > 0
-	var why []string // a plain reboot's reasons
-	if asked != "" {
-		why = append(why, "the system asked")
-	}
-	if len(later) > 0 {
-		why = append(why, "a canary's boot for "+strings.Join(laterNames, ", "))
-	}
-	use, notes := st.order(f, now, target, running, same)
+	use, notes := st.order(f, now, target)
 	say := func(s string) string {
 		if s == "" {
 			return strings.Join(notes, "; ")
 		}
 		return strings.Join(append([]string{s}, notes...), "; ")
 	}
-	if target == running && !same {
-		return say(""), false, nil // nothing owed
-	}
-	owed := "a reboot into " + target + " is owed"
-	if same {
-		var whys []string
-		if asked != "" {
-			whys = append(whys, "the system asks for one"+asked)
-		}
-		if len(later) > 0 {
-			whys = append(whys, "this canary boots with "+strings.Join(laterNames, ", ")+" before the rest of its tier takes it")
+	if same && !back {
+		if len(why) == 0 {
+			if use == nil {
+				return say(""), false, nil // nothing owed
+			}
+			why, whys = []string{fmt.Sprintf("your Reboot #%d", use.Seq)}, []string{fmt.Sprintf("your Reboot #%d names the running kernel", use.Seq)}
 		}
 		owed = "a reboot is owed: " + strings.Join(whys, ", and ")
 	}
@@ -438,8 +525,10 @@ func (a *Agent) rebootStep(ctx context.Context, f *Fleet, p *policy.Policy, samp
 			if !tier.InWindow(now) {
 				return say(owed + "; it waits for the window " + tier.RebootWindow + " UTC"), false, nil
 			}
-			if st.Day == now.Format("2006-01-02") {
-				return say(owed + "; this machine rebooted today"), false, nil
+			// Once in 20 hours, so a window across midnight holds one reboot;
+			// going back from a kernel that failed its trial doesn't wait.
+			if !back && !st.Began.IsZero() && now.Sub(st.Began) < rebootGap {
+				return say(owed + "; this machine rebooted less than 20 hours ago"), false, nil
 			}
 		}
 		if tier.RebootAfter != "" {
@@ -465,19 +554,28 @@ func (a *Agent) rebootStep(ctx context.Context, f *Fleet, p *policy.Policy, samp
 	if len(bad) > 0 {
 		return say(owed + "; the gates hold it: " + strings.Join(bad, "; ")), false, nil
 	}
-	var newEntry, oldEntry string
-	if !same { // a one-shot boot of the new kernel
-		if err := a.grubReady(ctx); err != nil {
-			return say(owed + "; " + err.Error()), false, nil
+	// Every reboot, a plain one too, pins the kernel that last held as
+	// GRUB's default, so GRUB boots exactly it, or the new kernel once
+	// (round 14, new major 1).
+	if err := a.grubReady(ctx); err != nil {
+		return say(owed + "; " + err.Error()), false, nil
+	}
+	cfg, err := a.Sys.ReadFile("/boot/grub/grub.cfg")
+	if err != nil {
+		return say(owed + "; can't read grub.cfg: " + err.Error()), false, nil
+	}
+	pinEntry, err := grubEntry(cfg, held)
+	if err != nil {
+		return say(owed + "; the kernel that last held, " + held + ", has no GRUB entry to fall back on: " + err.Error()), false, nil
+	}
+	for _, fl := range []string{"/boot/vmlinuz-" + held, "/boot/initrd.img-" + held} {
+		if fi, err := a.Sys.Stat(fl); err != nil || fi.Size() == 0 {
+			return say(owed + "; the kernel that last held, " + held + ", is gone (" + fl + "): there is nothing to fall back on"), false, nil
 		}
-		cfg, err := a.Sys.ReadFile("/boot/grub/grub.cfg")
-		if err != nil {
-			return say(owed + "; can't read grub.cfg: " + err.Error()), false, nil
-		}
+	}
+	var newEntry string
+	if !same {
 		if newEntry, err = grubEntry(cfg, target); err != nil {
-			return say(owed + "; " + err.Error()), false, nil
-		}
-		if oldEntry, err = grubEntry(cfg, running); err != nil {
 			return say(owed + "; " + err.Error()), false, nil
 		}
 	}
@@ -485,28 +583,33 @@ func (a *Agent) rebootStep(ctx context.Context, f *Fleet, p *policy.Policy, samp
 	if use != nil {
 		spent = max(spent, use.Seq) // order drops it from the fleet file at the next tick
 	}
-	canaryBoots := append(st.CanaryBoots, later...)
-	if n := len(canaryBoots); n > 32 {
-		canaryBoots = canaryBoots[n-32:]
-	}
-	*st = rebootState{Kernel: target, Entry: newEntry, Phase: Rebooting, Since: now, Day: now.Format("2006-01-02"),
+	*st = rebootState{Kernel: target, Entry: newEntry, Phase: Rebooting, Since: now, Began: now,
 		Failing: sortedKeys(sample), Failed: st.Failed, Spent: spent, Boot: a.bootID(), Same: same,
-		For: strings.Join(why, "; "), CanaryBoots: canaryBoots}
+		For: strings.Join(why, "; "), Held: held, Canary: later, CanaryBoots: st.CanaryBoots}
 	if err := a.saveReboot(st); err != nil {
 		return "", false, err
 	}
-	if same {
-		return "rebooting (" + st.For + ")", true, nil
+	// The kernel that last held is the default, so a boot that panics comes
+	// back to it; a new kernel boots once.
+	cmds := [][]string{{"grub-set-default", pinEntry}}
+	if !same {
+		cmds = append(cmds, []string{"grub-reboot", newEntry})
 	}
-	// The running kernel is the default, so a boot that panics comes back
-	// to it; the new one boots once.
-	for _, c := range [][]string{{"grub-set-default", oldEntry}, {"grub-reboot", newEntry}} {
+	for _, c := range cmds {
 		if _, err := a.Sys.Run(ctx, nil, c[0], c[1:]...); err != nil {
 			st.fail(now, c[0]+": "+err.Error())
-			return "", false, errors.Join(fmt.Errorf("rebooting into %s: %s: %w", target, c[0], err), a.saveReboot(st))
+			return "", false, errors.Join(fmt.Errorf("rebooting %s: %s: %w", what(), c[0], err), a.saveReboot(st))
 		}
 	}
-	return "rebooting into " + target, true, nil
+	return "rebooting " + what(), true, nil
+}
+
+// lastN keeps the last n of xs.
+func lastN(xs []string, n int) []string {
+	if len(xs) > n {
+		return xs[len(xs)-n:]
+	}
+	return xs
 }
 
 // oneShotGone clears GRUB's one-shot entry, if one is set.
@@ -526,7 +629,7 @@ func (a *Agent) rebootNow(ctx context.Context) error {
 			return errors.Join(err, uerr, lerr)
 		}
 		st.fail(a.now().UTC(), "systemctl reboot: "+err.Error())
-		return errors.Join(fmt.Errorf("rebooting into %s: %w", st.Kernel, err), uerr, a.saveReboot(st))
+		return errors.Join(fmt.Errorf("rebooting %s: %w", map[bool]string{true: "(" + st.For + ")", false: "into " + st.Kernel}[st.Same], err), uerr, a.saveReboot(st))
 	}
 	return nil
 }

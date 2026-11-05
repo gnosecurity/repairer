@@ -17,6 +17,7 @@ import (
 
 	"github.com/jaekwon/autopatch/admit"
 	"github.com/jaekwon/autopatch/approve"
+	"github.com/jaekwon/autopatch/check"
 	"github.com/jaekwon/autopatch/guard"
 	"github.com/jaekwon/autopatch/policy"
 )
@@ -30,6 +31,7 @@ type Bundle struct {
 	Messages []Message         `json:"messages,omitempty"`
 	Guards   map[string][]byte `json:"guards,omitempty"`   // guard hash to canonical file
 	Policies map[string][]byte `json:"policies,omitempty"` // policy hash to canonical file
+	Checks   map[string][]byte `json:"checks,omitempty"`   // was-I-hit check hash to canonical file
 	Signed   []approve.Signed  `json:"signed,omitempty"`
 	// Wants are other machines' requests for this canary's Healthy.
 	Wants []Want `json:"wants,omitempty"`
@@ -212,6 +214,9 @@ type TickResult struct {
 	Health map[string]string
 	// Reboot says where a reboot into a newer kernel stands (B3).
 	Reboot string `json:",omitempty"`
+	// Hits names the was-I-hit checks run this tick (W1); their results
+	// are in the report.
+	Hits []string `json:",omitempty"`
 }
 
 // Tick is what the minute timer runs: take in the spool, take off what the
@@ -1195,6 +1200,39 @@ func (a *Agent) ownerMessage(ctx context.Context, f *Fleet, p *policy.Policy, bu
 			return what, "the pending change here is another policy", nil
 		}
 		f.Pending = nil
+		return what, "", nil
+	case "Check":
+		// A Check runs a was-I-hit check once, here if it is for this
+		// system; the memo is rebuilt from the check's file, which the
+		// statement waits for, as a Policy waits for its file.
+		h, err := approve.ParseCheck(approve.Call{Func: "Check", Args: args})
+		if err != nil {
+			return what, err.Error(), nil
+		}
+		what = "Check " + h[:16]
+		file := bun.Checks[h]
+		if file == nil || fileHash(file) != h {
+			return "", "", errors.New("the check file it names isn't here yet")
+		}
+		c, err := check.Parse(file)
+		if err != nil {
+			return what, "a check file this release can't read: " + err.Error(), nil
+		}
+		what = "Check " + c.Name()
+		if err := approve.VerifyCheck(m.Tx, chain, m.Seq, owner, c); err != nil {
+			return what, "its memo isn't what this agent writes for that check: " + err.Error(), nil
+		}
+		info, err := a.Sys.Info()
+		if err != nil {
+			return "", "", err
+		}
+		if !c.ForSystem(info.OS, info.Release) {
+			return what + " (not for " + info.OS + " " + info.Release + ")", "", nil
+		}
+		if err := a.keepHit(a.runCheck(ctx, c)); err != nil {
+			return "", "", err // a disk that won't write: try again next tick
+		}
+		res.Hits = append(res.Hits, c.Name())
 		return what, "", nil
 	case "Reboot":
 		// A Reboot lets one host reboot into one kernel, once, before its

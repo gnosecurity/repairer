@@ -170,6 +170,13 @@ type machineRow struct {
 	Guards  []string
 	Failing []string
 	Wants   int
+	Hits    []hitRow // the newest result of each was-I-hit check run there
+}
+
+// hitRow is one was-I-hit result, in words.
+type hitRow struct {
+	Flag bool
+	Text string
 }
 
 type waitRow struct {
@@ -211,6 +218,9 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 				row.Guards = append(row.Guards, guardLine(g))
 			}
 			row.Wants = len(rep.Wants)
+			for _, h := range rep.Hits {
+				row.Hits = append(row.Hits, hitRow{Flag: h.Flag || h.Error != "" || h.Capped != "", Text: hitLine(h)})
+			}
 			for _, o := range rep.OnTheWay {
 				v.Waiting = append(v.Waiting, waitRow{Host: st.Host, Hash: o.Hash, Name: o.Name, Why: wayLine(o), Ask: o.Ask})
 			}
@@ -286,6 +296,32 @@ func guardLine(g agent.GuardState) string {
 		line += "; failed to come off: " + g.Failed
 	}
 	return line
+}
+
+// hitLine says what a was-I-hit check found, and when it ran.
+func hitLine(h agent.HitResult) string {
+	when := h.Ran.UTC().Format("2006-01-02 15:04 UTC")
+	switch {
+	case h.Error != "":
+		return fmt.Sprintf("%s (%s): couldn't run: %s", h.Name, when, h.Error)
+	case h.Count == 0 && h.Capped == "":
+		s := fmt.Sprintf("%s (%s): nothing found", h.Name, when)
+		if h.Gone > 0 {
+			s += fmt.Sprintf(" (%d listed files gone)", h.Gone)
+		}
+		return s
+	}
+	s := fmt.Sprintf("%s (%s): FLAGGED, %d found", h.Name, when, h.Count)
+	if h.Capped != "" {
+		s = fmt.Sprintf("%s (%s): stopped at its %s cap with %d found, so not a clean answer", h.Name, when, h.Capped, h.Count)
+	}
+	if len(h.Paths) > 0 {
+		s += ": " + strings.Join(h.Paths, ", ")
+		if h.Count > len(h.Paths) {
+			s += fmt.Sprintf(" and %d more", h.Count-len(h.Paths))
+		}
+	}
+	return s
 }
 
 func wayLine(o agent.OnTheWay) string {

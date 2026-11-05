@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jaekwon/autopatch/check"
 	"github.com/jaekwon/autopatch/guard"
 	"github.com/jaekwon/autopatch/policy"
 )
@@ -297,6 +298,45 @@ func VerifyReboot(txJSON []byte, chainID string, seq uint64, ownerPub []byte) (R
 		return Reboot{}, err
 	}
 	return r, nil
+}
+
+// ParseCheck reads a Check from a statement's call, strictly: one check's
+// hash.
+func ParseCheck(c Call) (string, error) {
+	if c.Func != "Check" || len(c.Args) != 1 || !isHash(c.Args[0]) {
+		return "", errors.New("approve: not a Check of one check's hash")
+	}
+	return c.Args[0], nil
+}
+
+// MemoCheck writes the memo for running a was-I-hit check: its name, its
+// hash, and what it reads, in words, so the Ledger shows it.
+func MemoCheck(c *check.Check) (string, error) {
+	return checkMemo(fmt.Sprintf("%s Check %s %s: %s", MemoVersion, c.Name(), c.Hash()[:16], c.Says()))
+}
+
+// VerifyCheck checks an owner's Check of check c in gnokey's signed
+// transaction file: the hash it names is c's, and the memo, rebuilt from c,
+// is the one signed.
+func VerifyCheck(txJSON []byte, chainID string, seq uint64, ownerPub []byte, c *check.Check) error {
+	var tx GnokeyTx
+	if err := json.Unmarshal(txJSON, &tx); err != nil || len(tx.Msg) != 1 {
+		return errors.New("approve: not one message")
+	}
+	m := tx.Msg[0]
+	h, err := ParseCheck(Call{Caller: m.Caller, Func: m.Func, Args: m.Args})
+	if err != nil {
+		return err
+	}
+	if h != c.Hash() {
+		return errors.New("approve: the Check names another check")
+	}
+	memo, err := MemoCheck(c)
+	if err != nil {
+		return err
+	}
+	_, err = VerifyGnokey(txJSON, chainID, seq, ownerPub, memo)
+	return err
 }
 
 // MemoCancel writes the memo for cancelling a pending policy change.

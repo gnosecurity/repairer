@@ -35,6 +35,7 @@
 {{if .Held}}<span class="bad">your statements: {{.Held}}</span><br>{{end}}
 {{range .Skipped}}<span class="small">skipped statement {{.}}</span><br>{{end}}
 {{range .Failing}}<span class="bad">failing: {{.}}</span><br>{{end}}
+{{range .Hits}}<span class="{{if .Flag}}bad{{else}}small{{end}}">was I hit: {{.Text}}</span><br>{{end}}
 {{if .Wants}}<span class="small">waits for a canary on {{.Wants}}</span>{{end}}</td></tr>{{end}}
 </table>
 

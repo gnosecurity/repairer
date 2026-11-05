@@ -3,16 +3,25 @@
 //
 //	go run ./scripts/e2e gen DIR                a policy, two guards, and a bundle with the rig's Tested
 //	go run ./scripts/e2e verify REPORT KEYHEX   check a signed report and print a summary
+//	go run ./scripts/e2e genreboot DIR MODE WINDOW KERNEL NOTAFTER
+//	                                            B3's VM test: a policy whose tier reboots by MODE
+//	                                            (window or yes), and the owner's signed Reboot of
+//	                                            vm1 into KERNEL (Unix seconds NOTAFTER), sequence 1
 package main
 
 import (
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+
+	"github.com/decred/dcrd/dcrec/secp256k1/v4"
+	"github.com/decred/dcrd/dcrec/secp256k1/v4/ecdsa"
 
 	"github.com/jaekwon/autopatch/agent"
 	"github.com/jaekwon/autopatch/approve"
@@ -37,7 +46,10 @@ func run(args []string) error {
 	if len(args) == 2 && args[0] == "gen3" {
 		return gen3(args[1])
 	}
-	return fmt.Errorf("usage: gen DIR | gen3 DIR | verify REPORT KEYHEX")
+	if len(args) == 6 && args[0] == "genreboot" {
+		return genReboot(args[1], args[2], args[3], args[4], args[5])
+	}
+	return fmt.Errorf("usage: gen DIR | gen3 DIR | verify REPORT KEYHEX | genreboot DIR MODE WINDOW KERNEL NOTAFTER")
 }
 
 // gen3 makes C2's inputs: a policy for three machines (vm1 the canary,
@@ -179,8 +191,77 @@ func verify(path, key string) error {
 	if r.Facts != nil {
 		fmt.Printf("  facts: %s %s, kernel %s\n", r.Facts.OS.ID, r.Facts.OS.Version, r.Facts.Kernel.Running)
 	}
+	if r.Tick != nil && r.Tick.Reboot != "" {
+		fmt.Printf("  reboot: %s\n", r.Tick.Reboot)
+	}
+	for _, sk := range r.Skipped {
+		fmt.Printf("  skipped: %d %s: %s\n", sk.Seq, sk.What, sk.Why)
+	}
 	for _, e := range r.Errors {
 		fmt.Printf("  error: %s\n", e)
+	}
+	return nil
+}
+
+// genReboot makes B3's VM test inputs: the owner's key is a test key from a
+// fixed seed (public: this is test tooling), the policy's one tier holds
+// vm1 and reboots by mode, and reboot-1.json is a bundle carrying the
+// owner's signed Reboot of vm1 into kernel, as gnokey would sign it.
+func genReboot(dir, mode, window, kernel, notAfter string) error {
+	seed := sha256.Sum256([]byte("autopatch e2e owner"))
+	owner := secp256k1.PrivKeyFromBytes(seed[:])
+	pub := owner.PubKey().SerializeCompressed()
+	tier := `"reboot":"` + mode + `"`
+	if mode == "window" {
+		tier += `,"reboot_window":"` + window + `"`
+	}
+	p, err := policy.Decode([]byte(`{"fleet":"e2e","replaces":"","delay_seconds":86400,
+		"signers":{"me":{"name":"owner","key":"` + hex.EncodeToString(pub) + `"}},
+		"tiers":[{"name":"A","hosts":["vm1"],"admit":["me"],` + tier + `}],
+		"health":[{"hosts":["vm1"],"kind":"tcp","target":"127.0.0.1:22","want":""}]}`))
+	if err != nil {
+		return err
+	}
+	n, err := strconv.ParseInt(notAfter, 10, 64)
+	if err != nil {
+		return err
+	}
+	r := approve.Reboot{Host: "vm1", Kernel: kernel, NotAfter: n}
+	memo, err := approve.MemoReboot(r)
+	if err != nil {
+		return err
+	}
+	const caller = "g1ss6w8xfy7vnp595yely63jqa8553k03mjcglen"
+	chain := approve.ChainID(pub, p.Fleet)
+	msg, err := approve.SignBytes(chain, 1, approve.Call{Caller: caller, Func: "Reboot", Args: r.Args()}, memo, false)
+	if err != nil {
+		return err
+	}
+	h := sha256.Sum256(msg)
+	tx, err := json.Marshal(map[string]any{
+		"msg": []any{map[string]any{"@type": "/vm.m_call", "caller": caller, "send": "", "max_deposit": "",
+			"pkg_path": approve.Realm, "func": "Reboot", "args": r.Args()}},
+		"fee":        map[string]any{"gas_wanted": "0", "gas_fee": "0ugnot"},
+		"signatures": []any{map[string]any{"pub_key": map[string]any{"@type": "/tm.PubKeySecp256k1", "value": pub}, "signature": ecdsa.SignCompact(owner, h[:], true)[1:]}},
+		"memo":       memo,
+	})
+	if err != nil {
+		return err
+	}
+	if _, err := approve.VerifyReboot(tx, chain, 1, pub); err != nil {
+		return fmt.Errorf("the Reboot doesn't verify: %w", err)
+	}
+	bun, err := json.Marshal(agent.Bundle{Messages: []agent.Message{{Seq: 1, Tx: tx}}})
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	for name, data := range map[string][]byte{"policy.json": p.Canonical(), "reboot-1.json": bun} {
+		if err := os.WriteFile(filepath.Join(dir, name), data, 0o644); err != nil {
+			return err
+		}
 	}
 	return nil
 }

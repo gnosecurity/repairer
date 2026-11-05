@@ -29,11 +29,14 @@ import (
 // back on the old default; the agent marks that kernel failed and never
 // tries it again by itself. The owner's signed Reboot(host, kernel, not
 // after) lets one reboot into that kernel happen at the next tick the gates
-// pass, whatever the tier says, once. A reboot is also owed when the system
-// asks for one (/run/reboot-required, left by packages such as libc6) with
-// no newer kernel: the same rules, a plain reboot into the running kernel,
-// and the health window after it. Whether the machine went down is told by
-// the kernel's boot id, which changes on every boot.
+// pass, whatever the tier says, once. With no newer kernel, a plain reboot
+// into the running kernel is owed when the system asks for one
+// (/run/reboot-required, left by packages such as libc6), or when this
+// machine is a canary of its tier holding an admitted guard that takes
+// effect only after a boot, which the rest of the tier waits for (rule 4;
+// once for each such guard): the same rules, and the health window after
+// it. Whether the machine went down is told by the kernel's boot id, which
+// changes on every boot.
 
 const rebootFile = "reboot.json"
 
@@ -65,7 +68,10 @@ type rebootState struct {
 	// before the machine reboots, so no Reboot is used twice.
 	Spent uint64 `json:"spent,omitempty"`
 	Boot  string `json:"boot,omitempty"` // the boot id when the reboot began
-	Same  bool   `json:"same,omitempty"` // a reboot into the running kernel, which the system asked for
+	Same  bool   `json:"same,omitempty"` // a reboot into the running kernel
+	For   string `json:"for,omitempty"`  // why that one: the system asked, or a canary's boot
+	// CanaryBoots are the later guards this canary has rebooted for once.
+	CanaryBoots []string `json:"canary_boots,omitempty"`
 }
 
 // maxFailed is how many failed kernels reboot.json remembers.
@@ -304,7 +310,7 @@ func (a *Agent) rebootStep(ctx context.Context, f *Fleet, p *policy.Policy, samp
 			st.Phase, st.Since = Booted, now
 			msg := "booted into " + running + "; its health window runs"
 			if st.Same {
-				msg = "rebooted; its health window runs"
+				msg = "rebooted (" + st.For + "); its health window runs"
 			}
 			return msg, false, errors.Join(a.oneShotGone(ctx), a.saveReboot(st))
 		case booted:
@@ -312,7 +318,7 @@ func (a *Agent) rebootStep(ctx context.Context, f *Fleet, p *policy.Policy, samp
 			return st.Why, false, errors.Join(a.oneShotGone(ctx), a.saveReboot(st))
 		case now.Sub(st.Since) < RebootDeadline:
 			if st.Same {
-				return "rebooting (the system asked)", false, nil
+				return "rebooting (" + st.For + ")", false, nil
 			}
 			return "rebooting into " + st.Kernel, false, nil
 		}
@@ -328,7 +334,7 @@ func (a *Agent) rebootStep(ctx context.Context, f *Fleet, p *policy.Policy, samp
 		}
 		if now.Sub(st.Since) < TrialWindow {
 			if st.Same {
-				return "rebooted; its health window runs", false, nil
+				return "rebooted (" + st.For + "); its health window runs", false, nil
 			}
 			return "booted into " + running + "; its health window runs", false, nil
 		}
@@ -348,7 +354,7 @@ func (a *Agent) rebootStep(ctx context.Context, f *Fleet, p *policy.Policy, samp
 		}
 		if st.Same {
 			st.Phase, st.Since, st.Why = Settled, now, ""
-			return "rebooted; health held", false, a.saveReboot(st)
+			return "rebooted (" + st.For + "); health held", false, a.saveReboot(st)
 		}
 		if _, err := a.Sys.Run(ctx, nil, "grub-set-default", st.Entry); err != nil {
 			return "", false, fmt.Errorf("making %s the default: %w", st.Kernel, err)
@@ -362,12 +368,32 @@ func (a *Agent) rebootStep(ctx context.Context, f *Fleet, p *policy.Policy, samp
 		return "", false, nil
 	}
 	// What is owed: a reboot into the newest kernel, or, with none newer, a
-	// plain reboot the system asks for.
+	// plain reboot the system asks for, or a canary's boot for its later
+	// guards.
 	target, asked := newest, ""
+	var entries []*Entry
+	var later, laterNames []string // later guards this canary must boot with
 	if newest == running {
 		asked = a.rebootAsked()
+		if tier, ok := p.TierOf(f.Host); ok && contains(tier.Canaries, f.Host) {
+			if entries, _, err = a.Status(ctx); err != nil {
+				return "", false, err
+			}
+			for _, e := range entries {
+				if e.Later && !e.Booted && e.By != "" && e.Status == Confirmed && !contains(st.CanaryBoots, e.Hash) {
+					later, laterNames = append(later, e.Hash), append(laterNames, e.Guard.Name())
+				}
+			}
+		}
 	}
-	same := asked != ""
+	same := asked != "" || len(later) > 0
+	var why []string // a plain reboot's reasons
+	if asked != "" {
+		why = append(why, "the system asked")
+	}
+	if len(later) > 0 {
+		why = append(why, "a canary's boot for "+strings.Join(laterNames, ", "))
+	}
 	use, notes := st.order(f, now, target, running, same)
 	say := func(s string) string {
 		if s == "" {
@@ -380,7 +406,14 @@ func (a *Agent) rebootStep(ctx context.Context, f *Fleet, p *policy.Policy, samp
 	}
 	owed := "a reboot into " + target + " is owed"
 	if same {
-		owed = "a reboot is owed: the system asks for one" + asked
+		var whys []string
+		if asked != "" {
+			whys = append(whys, "the system asks for one"+asked)
+		}
+		if len(later) > 0 {
+			whys = append(whys, "this canary boots with "+strings.Join(laterNames, ", ")+" before the rest of its tier takes it")
+		}
+		owed = "a reboot is owed: " + strings.Join(whys, ", and ")
 	}
 	if use != nil {
 		owed += fmt.Sprintf("; your Reboot #%d allows it", use.Seq)
@@ -413,9 +446,10 @@ func (a *Agent) rebootStep(ctx context.Context, f *Fleet, p *policy.Policy, samp
 			return say(owed + "; ordered reboots (after " + tier.RebootAfter + ") wait for your signed Reboot"), false, nil
 		}
 	}
-	entries, _, err := a.Status(ctx)
-	if err != nil {
-		return "", false, err
+	if entries == nil {
+		if entries, _, err = a.Status(ctx); err != nil {
+			return "", false, err
+		}
 	}
 	for _, e := range entries {
 		if e.Status == Pending {
@@ -451,13 +485,18 @@ func (a *Agent) rebootStep(ctx context.Context, f *Fleet, p *policy.Policy, samp
 	if use != nil {
 		spent = max(spent, use.Seq) // order drops it from the fleet file at the next tick
 	}
+	canaryBoots := append(st.CanaryBoots, later...)
+	if n := len(canaryBoots); n > 32 {
+		canaryBoots = canaryBoots[n-32:]
+	}
 	*st = rebootState{Kernel: target, Entry: newEntry, Phase: Rebooting, Since: now, Day: now.Format("2006-01-02"),
-		Failing: sortedKeys(sample), Failed: st.Failed, Spent: spent, Boot: a.bootID(), Same: same}
+		Failing: sortedKeys(sample), Failed: st.Failed, Spent: spent, Boot: a.bootID(), Same: same,
+		For: strings.Join(why, "; "), CanaryBoots: canaryBoots}
 	if err := a.saveReboot(st); err != nil {
 		return "", false, err
 	}
 	if same {
-		return "rebooting (the system asked)", true, nil
+		return "rebooting (" + st.For + ")", true, nil
 	}
 	// The running kernel is the default, so a boot that panics comes back
 	// to it; the new one boots once.

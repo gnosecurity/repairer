@@ -10,7 +10,10 @@
 # linux-image and linux-modules .debs, from apt-get download), then the agent.
 # The minute timer's ticks must reboot into the new kernel once, wait out the
 # health window on it, and make it GRUB's default; every report must verify
-# against the agent's key.
+# against the agent's key. In signed mode a second phase follows: the
+# system asks for a reboot (/run/reboot-required) with no newer kernel; the
+# tier waits; the owner's second Reboot, naming the running kernel, comes in;
+# a plain reboot (a new boot id, the same kernel) and the health window.
 #
 # Needs: RIG (images/, seed.iso, rig_ed25519), KDEBS, KREL (the new kernel's
 # release), SRC (the autopatch source). Touches nothing outside $RIG/runs.
@@ -67,7 +70,7 @@ cp_in "$KDEBS"/linux-image-"$KREL"_*.deb "$KDEBS"/linux-modules-"$KREL"_*.deb
 "${S[@]}" "sudo dpkg -i linux-modules-${KREL}_*.deb linux-image-${KREL}_*.deb" >> "$w/log.txt" 2>&1
 log "installed: $("${S[@]}" "ls /boot/vmlinuz-$KREL /boot/initrd.img-$KREL; sudo grub-editenv list" | tr '\n' ' ')"
 # The agent, as in B1's test.
-cp_in "$w/autopatch-agent" "$w/in/policy.json" "$w/in/reboot-1.json"
+cp_in "$w/autopatch-agent" "$w/in/policy.json" "$w/in/reboot-1.json" "$w/in/reboot-2.json"
 "${S[@]}" 'sudo install -o root -g root -m 0755 autopatch-agent /usr/local/sbin/autopatch-agent && sudo useradd --system --home-dir /nonexistent --shell /usr/sbin/nologin autopatch'
 "${S[@]}" 'sudo /usr/local/sbin/autopatch-agent install' >> "$w/log.txt" 2>&1
 key=$("${S[@]}" 'sudo /usr/local/sbin/autopatch-agent init -host vm1 -seq 0 -intake-user autopatch /home/rig/policy.json' | tail -1)
@@ -90,6 +93,28 @@ for i in $(seq 1 70); do
   fi
   if [[ $line == "rebooted into $KREL; it is the default now" ]]; then settled=yes; break; fi
 done
+phase2=skipped
+if [ "$mode" = signed ] && [ "$settled" = yes ]; then
+  "${S[@]}" 'sudo sh -c "echo \"*** System restart required ***\" > /run/reboot-required; printf \"libc6\nsystemd\n\" > /run/reboot-required.pkgs"'
+  boot0=$("${S[@]}" cat /proc/sys/kernel/random/boot_id)
+  log "the system asks for a reboot (libc6, systemd); boot id $boot0"
+  asked2=no; held=no
+  for i in $(seq 1 50); do
+    sleep 30; n=$((n+1))
+    if ! report $n; then log "$n: no report (rebooting?)"; continue; fi
+    line=$(said $n)
+    log "$n: running $("${S[@]}" uname -r 2>/dev/null || echo "?"); reboot: ${line:-(nothing owed)}"
+    if [ "$asked2" = no ] && [[ $line == "a reboot is owed: the system asks for one (libc6, systemd); this tier waits for your signed Reboot"* ]]; then
+      log "the second signed Reboot goes in through intake: $("${S[@]}" 'sudo -u autopatch /usr/local/sbin/autopatch-agent intake < /home/rig/reboot-2.json' 2>&1)"
+      asked2=yes
+    fi
+    if [[ $line == "rebooted; health held" ]]; then held=yes; break; fi
+  done
+  boot1=$("${S[@]}" cat /proc/sys/kernel/random/boot_id)
+  phase2=no
+  [ "$asked2" = yes ] && [ "$held" = yes ] && [ "$boot0" != "$boot1" ] && [ "$("${S[@]}" uname -r)" = "$KREL" ] && phase2=yes
+  log "the system's reboot: asked=$asked2 held=$held, a new boot: $([ "$boot0" != "$boot1" ] && echo yes || echo no); phase 2 ok=$phase2"
+fi
 grubenv=$("${S[@]}" 'sudo grub-editenv list' 2>&1 | tr '\n' ' ')
 state=$("${S[@]}" 'sudo cat /var/lib/autopatch/reboot.json' 2>&1)
 final=$("${S[@]}" uname -r 2>&1)
@@ -98,6 +123,6 @@ log "reboot.json: $state"
 log "booted kernels on the console: $(grep -oE 'Linux version [0-9][^ ]*' "$w/console.log" | awk '{print $3}' | tr '\n' ' ')"
 ok=no
 [ "$settled" = yes ] && [ "$final" = "$KREL" ] && [[ $grubenv == *"saved_entry="*"$KREL"* ]] && [[ $grubenv != *"next_entry=g"* ]] && ok=yes
-[ "$mode" = signed ] && [ "$asked" = no ] && ok=no
+[ "$mode" = signed ] && { [ "$asked" = no ] || [ "$phase2" != yes ]; } && ok=no
 log "reboot e2e run $run ($mode) took ${SECONDS}s; from $old to $final; settled=$settled ok=$ok"
 [ "$ok" = yes ]

@@ -8,7 +8,10 @@
 # drawn checkers commit and open their transcripts; the agreement waits out
 # its objection window and is finalized; the level param says "tested". Then
 # a ticket nobody drew is unstaked and withdrawn, which takes a new version
-# of the stake tree. Prints the gas each call used. Touches only a temporary
+# of the stake tree. Then a dispute: a second filing where one drawn checker
+# lies goes, with no reruns in this build, to a panel of 7 seats drawn by
+# stake from a later real round; its word, after the appeal window, slashes
+# the liar. Prints the gas each call used. Touches only a temporary
 # directory, 127.0.0.1, and api.drand.sh (to read public beacon rounds).
 set -euo pipefail
 B=${1:?the directory with gnodev and gnokey}
@@ -30,15 +33,20 @@ cp "$repo"/gno/r/guards/*.gno "$repo"/gno/r/guards/gnomod.toml "$ws/r/guards/"
 find "$ws" -name '*_test.gno' -delete
 # The test build: windows of a few blocks (gnodev makes a block per
 # transaction), a floor of 1 ugnot, a draw three beacon rounds out.
-python3 -I - "$ws/r/guards/guards.gno" <<'PY'
+python3 -I - "$ws/r/guards" <<'PY'
 import re, sys
-p = sys.argv[1]
-s = open(p).read()
-for name, v in [("MinTicketAge", "3"), ("RevealWindow", "50"), ("CheckWindow", "50"), ("DrawDeadline", "40"),
-                ("UnbondBlocks", "60"), ("DrawDelay", "3"), ("ObjectionWindow", "2"), ("LevelFloor", "1")]:
-    s, n = re.subn(r"(\n\t" + name + r"\s+int64 = )[0-9_]+", r"\g<1>" + v, s)
-    assert n == 1, name
-open(p, "w").write(s)
+for f, sets in [("guards.gno", [("MinTicketAge", "3"), ("RevealWindow", "50"), ("CheckWindow", "50"), ("DrawDeadline", "40"),
+                                ("UnbondBlocks", "60"), ("DrawDelay", "3"), ("ObjectionWindow", "2"), ("LevelFloor", "1")]),
+                ("dispute.gno", [("AppealWindow", "2")])]:
+    p = sys.argv[1] + "/" + f
+    s = open(p).read()
+    for name, v in sets:
+        s, n = re.subn(r"(\n\t" + name + r"\s+int64 = )[0-9_]+", r"\g<1>" + v, s)
+        assert n == 1, name
+    if f == "dispute.gno":
+        s, n = re.subn(r"(\n\tReruns\s+= )2", r"\g<1>0", s)
+        assert n == 1, "Reruns"
+    open(p, "w").write(s)
 PY
 "$B/gnodev" local -no-watch -node-rpc-listener 127.0.0.1:36657 -web-listener 127.0.0.1:38888 \
   -extra-root "$ws" > "$D/gnodev.log" 2>&1 &
@@ -48,7 +56,7 @@ printf '%s\n\n\n' "source bonus chronic canvas draft south burst lottery vacant 
   | "$B/gnokey" add -home "$D/kb" -recover -insecure-password-stdin test1 >/dev/null
 addr_of() { "$B/gnokey" list -home "$D/kb" | awk -v k="$1" '$2 == k {print $3}' | tr -d '(),' | sed 's/^addr://'; }
 # Five checkers' keys, each funded from test1.
-for k in c1 c2 c3 c4 c5; do
+for k in c1 c2 c3 c4 c5 c6 c7; do
   m=$("$B/gnokey" generate)
   printf '%s\n\n\n' "$m" | "$B/gnokey" add -home "$D/kb" -recover -insecure-password-stdin "$k" >/dev/null
 done
@@ -69,8 +77,8 @@ send() { # key to amount
 }
 qeval() { "$B/gnokey" query vm/qeval -remote 127.0.0.1:36657 -data "gno.land/r/autopatch/guards.$1" 2>&1; }
 worker=$(addr test1)
-for k in c1 c2 c3 c4 c5; do send test1 "$(addr $k)" 100000000ugnot; done
-for k in c1 c2 c3 c4 c5; do call "$k" StakeTicket -send 10000000ugnot; done
+for k in c1 c2 c3 c4 c5 c6 c7; do send test1 "$(addr $k)" 100000000ugnot; done
+for k in c1 c2 c3 c4 c5 c6 c7; do call "$k" StakeTicket -send 10000000ugnot; done
 call test1 Fund -send 1000000ugnot # blocks pass; the tickets age
 call test1 Fund -send 1000000ugnot
 call test1 Fund -send 1000000ugnot
@@ -97,7 +105,7 @@ call test1 Draw -args 0
 drawn=$(qeval 'State(0)' | grep -oE 'g1[a-z0-9]{38}')
 echo "drawn: $(echo $drawn)"
 [ "$(echo "$drawn" | wc -l)" = 3 ] || { echo "not three checkers: $drawn"; exit 1; }
-keyof() { for k in c1 c2 c3 c4 c5; do [ "$(addr $k)" = "$1" ] && echo "$k"; done; }
+keyof() { for k in c1 c2 c3 c4 c5 c6 c7; do [ "$(addr $k)" = "$1" ] && { echo "$k"; return 0; }; done; return 1; }
 for a in $drawn; do call "$(keyof "$a")" CommitCheck -args 0 -args "$(C "$a" check "$tr" "c-$a")"; done
 call test1 RevealCheck -args 0 -args "$tr" -args t
 for a in $drawn; do call "$(keyof "$a")" RevealCheck -args 0 -args "$tr" -args "c-$a"; done
@@ -110,7 +118,7 @@ call test1 Finalize -args 0
 lvl=$(qeval "Level(\"$gh\", \"ubuntu 24.04\")")
 echo "$lvl" | grep -q '"tested"' || { echo "level: $lvl"; exit 1; }
 # A ticket nobody drew leaves: unstaked, and withdrawn after unbonding.
-for k in c1 c2 c3 c4 c5; do echo "$drawn" | grep -q "$(addr $k)" || { free=$k; break; }; done
+for k in c1 c2 c3 c4 c5 c6 c7; do echo "$drawn" | grep -q "$(addr $k)" || { free=$k; break; }; done
 tid=$(( ${free#c} - 1 ))
 call "$free" Unstake -args "$tid"
 for i in $(seq 1 61); do call test1 Fund -send 1ugnot; done
@@ -118,5 +126,51 @@ before=$("$B/gnokey" query bank/balances/"$(addr $free)" -remote 127.0.0.1:36657
 call "$free" Withdraw -args "$tid"
 after=$("$B/gnokey" query bank/balances/"$(addr $free)" -remote 127.0.0.1:36657 | grep -oE '[0-9]+ugnot' | grep -oE '[0-9]+')
 echo "withdrew $(( after - before + 10000000 )) ugnot with the fee added back"
+# A dispute: guard one's MPTCP block, where the first checker drawn lies.
+waitround() { # round: its signature, once drand has it
+  local sig=""
+  for i in $(seq 1 60); do
+    sig=$(curl -sf -m 5 "$DRAND/public/$1" | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["signature"])' 2>/dev/null || true)
+    [ -n "$sig" ] && { echo "$sig"; return; }
+    sleep 2
+  done
+  echo "drand round $1 never came" >&2; exit 1
+}
+guard2=$(cat "$repo/guard/testdata/cve-2026-98432-mptcp.json")
+gh2=$(python3 -I -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read().rstrip(b"\n")).hexdigest())' "$repo/guard/testdata/cve-2026-98432-mptcp.json")
+commit2=$(python3 -I -c 'import hashlib,sys; a,gh,sysn,tc=sys.argv[1:5]; print(hashlib.sha256((a+"\0guard\0"+gh+"\0"+sysn+"\0"+tc+"\0s").encode()).hexdigest())' "$worker" "$gh2" "ubuntu 24.04" "$tc")
+call test1 Fund -send 2000000ugnot # the dispute fund pays the panel: 7 seats
+call test1 Commit -send 1000000ugnot -args "$commit2"
+call test1 Reveal -args 1 -args "$guard2" -args "ubuntu 24.04" -args "$tc" -args s
+round2=$(qeval 'State(1)' | grep -oE '\([0-9]+ uint64\)' | grep -oE '[0-9]+' | head -1)
+call test1 SubmitBeacon -args "$round2" -args "$(waitround "$round2")"
+call test1 Draw -args 1
+drawn2=$(qeval 'State(1)' | grep -oE 'g1[a-z0-9]{38}')
+liar=$(echo "$drawn2" | head -1)
+lie="$(printf 'b%.0s' $(seq 64)) pass"
+said() { [ "$1" = "$liar" ] && echo "$lie" || echo "$tr"; }
+for a in $drawn2; do call "$(keyof "$a")" CommitCheck -args 1 -args "$(C "$a" check "$(said "$a")" "c-$a")"; done
+call test1 RevealCheck -args 1 -args "$tr" -args t
+for a in $drawn2; do call "$(keyof "$a")" RevealCheck -args 1 -args "$(said "$a")" -args "c-$a"; done
+call test1 Settle -args 1
+qeval 'State(1)' | grep -q '"panel"' || { echo "not waiting for a panel: $(qeval 'State(1)')"; exit 1; }
+round3=$(qeval 'State(1)' | grep -oE '\([0-9]+ uint64\)' | grep -oE '[0-9]+' | head -1)
+call test1 SubmitBeacon -args "$round3" -args "$(waitround "$round3")"
+call test1 DrawPanel -args 1
+members=$(qeval 'PanelOf(1)' | grep -oE 'g1[a-z0-9]{38}')
+echo "the panel: $(for m in $members; do printf '%s:%s ' "$(keyof "$m")" "$(qeval "SeatsOf(1, \"$m\")" | grep -oE '\([0-9]+ int\)' | grep -oE '[0-9]+')"; done)"
+for m in $members; do call "$(keyof "$m")" CommitCheck -args 1 -args "$(C "$m" check "$tr" "p-$m")"; done
+for m in $members; do call "$(keyof "$m")" RevealCheck -args 1 -args "$tr" -args "p-$m"; done
+call test1 Settle -args 1
+qeval 'State(1)' | grep -q '"appealable"' || { echo "no word: $(qeval 'State(1)')"; exit 1; }
+call test1 Fund -send 1ugnot # the appeal window passes
+call test1 Fund -send 1ugnot
+call test1 Fund -send 1ugnot
+call test1 Settle -args 1
+qeval 'State(1)' | grep -q '"tested"' || { echo "the last word: $(qeval 'State(1)')"; exit 1; }
+ltid=$(( $(keyof "$liar" | tr -d c) - 1 ))
+lstake=$(qeval "TicketOf($ltid)" | grep -oE '\([0-9]+ int64\)' | head -1 | grep -oE '[0-9]+' | head -1)
+[ "$lstake" = 9000000 ] || { echo "the liar's stake is $lstake"; exit 1; }
+echo "the liar lost Slash: its ticket holds $lstake ugnot"
 grep -v '^Fund' "$gaslog" | sort | awk '{n[$1]++; s[$1]+=$2; if ($2>m[$1]) m[$1]=$2} END {for (f in n) printf "%-14s %3d calls, most %11d gas, mean %11d\n", f, n[f], m[f], s[f]/n[f]}' | sort
-echo "realm-e2e: ok, level tested on chain at round $round"
+echo "realm-e2e: ok, level tested on chain at round $round; a dispute settled by a panel at round $round3"

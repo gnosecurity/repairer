@@ -104,7 +104,8 @@ func run(ctx context.Context, cmd string, args []string, stdout io.Writer) error
 			return report.Run(ctx, target, nil)
 		}}
 	store := &lookout.Store{Dir: filepath.Join(c.State, "store")}
-	feeds := &lookout.Feeds{Dir: filepath.Join(c.State, "feeds"), Fetcher: &lookout.Fetcher{Dir: filepath.Join(c.State, "feeds", "copies")}}
+	feeds := &lookout.Feeds{Dir: filepath.Join(c.State, "feeds"), Fetcher: &lookout.Fetcher{Dir: filepath.Join(c.State, "feeds", "copies")},
+		Tracker: &lookout.UbuntuTracker{Dir: filepath.Join(c.State, "feeds", "ubuntu-cve-tracker.git")}}
 	var lastFeeds time.Time
 	// feedProblems says, once an hour, what is wrong with the feeds: the
 	// feeds command fetches them, apart from the delivery loop (round 8,

@@ -136,9 +136,9 @@ if [ "$POOL" -gt 0 ]; then
   done
   "$B/gnokey" list -home "$D/kb" > "$D/keys"
   { printf 'package main\n\nimport (\n\t"chain"\n\t"chain/banker"\n)\n\nfunc main(cur realm) {\n\tb := banker.NewBanker(banker.BankerTypeRealmSend, cur)\n'
-    for i in $(seq 1 "$POOL"); do printf '\tb.SendCoins(cur.Address(), address("%s"), chain.Coins{chain.NewCoin("ugnot", 25000000)})\n' "$(addr "p$i")"; done
+    for i in $(seq 1 "$POOL"); do printf '\tb.SendCoins(cur.Address(), address("%s"), chain.Coins{chain.NewCoin("ugnot", 60000000)})\n' "$(addr "p$i")"; done
     printf '}\n'; } > "$D/fund.gno"
-  echo "" | "$B/gnokey" maketx run -gas-fee 100000000ugnot -gas-wanted 2900000000 -send "$(( POOL * 25000000 ))ugnot" -broadcast -chainid dev \
+  echo "" | "$B/gnokey" maketx run -gas-fee 100000000ugnot -gas-wanted 2900000000 -send "$(( POOL * 60000000 ))ugnot" -broadcast -chainid dev \
     -remote "$RPC" -home "$D/kb" -insecure-password-stdin test1 "$D/fund.gno" > "$D/fund.out" 2>&1 || { echo "funding: $(tail -5 "$D/fund.out")"; exit 1; }
   for i in $(seq 1 "$POOL"); do call "p$i" StakeTicket -send 10000000ugnot; done
   echo "a pool of $(( POOL + 7 )) owners"

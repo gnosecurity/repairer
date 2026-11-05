@@ -1,0 +1,194 @@
+package guard
+
+import (
+	"fmt"
+	"strings"
+)
+
+// Effect says when a block starts to bite. A block that bites later than
+// now keeps its undo armed until that event has passed, and needs a canary
+// boot before it goes on anywhere automatically.
+type Effect string
+
+const (
+	Now          Effect = "now"
+	NewSockets   Effect = "new sockets"
+	NewProcesses Effect = "new processes"
+	NextLoad     Effect = "next load or boot"
+	NextRun      Effect = "next run"
+)
+
+// Later reports whether the effect is anything but immediate.
+func (e Effect) Later() bool { return e != Now }
+
+// settingRule is an allow-list entry: the one value a guard may set and
+// what to check before setting it.
+type settingRule struct {
+	Value  string
+	Effect Effect
+	// InUse names the check that refuses the setting while something uses
+	// the feature: "userns" or "io_uring".
+	InUse string
+}
+
+// settings is the allow-list of kernel settings a guard may change. Every
+// entry can be undone without a reboot, and none turns a kernel bug into a
+// reboot (no panic_on_* settings).
+var settings = map[string]settingRule{
+	// CVE-2026-98432: the published exploit goes through MPTCP listeners.
+	"net.mptcp.enabled": {Value: "0", Effect: NewSockets},
+	// CVE-2019-11477 (SACK Panic): the stopgap was SACK off.
+	"net.ipv4.tcp_sack": {Value: "0", Effect: Now},
+	// User namespaces: the door for many local root exploits.
+	"kernel.unprivileged_userns_clone": {Value: "0", Effect: NewProcesses, InUse: "userns"},
+	"user.max_user_namespaces":         {Value: "0", Effect: NewProcesses, InUse: "userns"},
+	// io_uring: the door for many others.
+	"kernel.io_uring_disabled": {Value: "2", Effect: NewProcesses, InUse: "io_uring"},
+	// 2, not 1: 1 can't be undone without a reboot.
+	"kernel.unprivileged_bpf_disabled": {Value: "2", Effect: Now},
+	"vm.unprivileged_userfaultfd":      {Value: "0", Effect: Now},
+	"dev.tty.ldisc_autoload":           {Value: "0", Effect: Now},
+}
+
+// SettingInUseCheck returns the name of the in-use check for an allowed
+// setting, or "".
+func SettingInUseCheck(name string) string { return settings[name].InUse }
+
+// moduleAuto lists modules rarely needed on servers, with histories of
+// flaws, spelled with '_'. Blocking one of these can go on automatically; blocking another
+// module that isn't on the never list needs the owner's yes.
+var moduleAuto = map[string]bool{
+	"ksmbd": true, "nlmon": true, "act_pedit": true, "dccp": true, "sctp": true,
+	"rds": true, "tipc": true, "n_hdlc": true, "cramfs": true, "freevxfs": true,
+	"jffs2": true, "hfs": true, "hfsplus": true, "udf": true, "firewire_core": true,
+	"ax25": true, "netrom": true, "rose": true, "x25": true, "appletalk": true,
+	"atm": true, "can": true, "can_raw": true, "can_bcm": true, "can_gw": true,
+}
+
+// neverBlockPrefixes are module families a guard never blocks: the
+// firewall, storage, networking, virtualization and graphics a server needs
+// to boot, be reached and do its job.
+var neverBlockPrefixes = []string{
+	"nf_", "nft_", "nfnetlink", "x_tables", "ip_tables", "ip6_tables", "iptable_", "ip6table_",
+	"xt_", "ebt", "br_netfilter", "bridge", "overlay", "ext4", "xfs", "btrfs", "zfs", "vfat",
+	"fat", "squashfs", "loop", "dm_", "dm-", "md_", "raid", "nvme", "virtio", "sd_mod", "ahci",
+	"libata", "scsi", "e1000", "igb", "ixgbe", "i40e", "ice", "mlx", "ena", "vmxnet",
+	"hv_", "xen", "tun", "tap", "veth", "wireguard", "bonding", "8021q", "kvm", "vfio",
+	"amdgpu", "nvidia", "i915", "drm", "ttm", "ib_", "rdma", "nbd", "ceph", "rbd", "fuse",
+	"af_packet", "unix", "ipv6", "tls", "crypto", "sha", "aes", "efivarfs", "autofs",
+}
+
+func neverBlock(name string) bool {
+	n := strings.ReplaceAll(name, "-", "_")
+	for _, p := range neverBlockPrefixes {
+		if strings.HasPrefix(n, strings.ReplaceAll(p, "-", "_")) {
+			return true
+		}
+	}
+	return false
+}
+
+// serviceAuto lists optional network services with histories of flaws.
+// Stopping one of these can go on automatically; stopping another unit that
+// isn't on the never list needs the owner's yes.
+var serviceAuto = map[string]bool{
+	"cups-browsed.service": true, "cups.service": true, "cups.socket": true,
+	"avahi-daemon.service": true, "avahi-daemon.socket": true, "rpcbind.service": true,
+	"rpcbind.socket": true, "ModemManager.service": true, "bluetooth.service": true,
+	"ksmbd.service": true, "smbd.service": true, "nmbd.service": true,
+	"telnet.socket": true, "xinetd.service": true, "vsftpd.service": true,
+	"tftpd-hpa.service": true, "snmpd.service": true,
+}
+
+// neverStopPrefixes are units a guard never stops: the firewall, ssh,
+// logging, time, the update path (updaters, certificate renewal), the
+// machine's own plumbing, and the agent itself.
+var neverStopPrefixes = []string{
+	"ssh", "sshd", "systemd-", "dbus", "polkit", "cron", "anacron", "rsyslog", "syslog",
+	"auditd", "journald", "ufw", "nftables", "firewalld", "iptables", "ip6tables",
+	"netfilter-persistent", "fail2ban", "apparmor", "selinux", "chrony", "ntp", "ntpsec",
+	"openntpd", "unattended-upgrades", "apt-daily", "apt-", "dnf-", "yum-", "packagekit",
+	"snapd", "certbot", "letsencrypt", "acme", "networking", "NetworkManager", "network",
+	"wpa_supplicant", "resolvconf", "cloud-", "droplet-agent", "do-agent", "qemu-guest-agent",
+	"google-", "amazon-", "waagent", "walinuxagent", "getty", "serial-getty", "console-",
+	"multipathd", "lvm2", "mdmonitor", "udisks2", "autopatch", "tmkms",
+}
+
+func neverStop(unit string) bool {
+	for _, p := range neverStopPrefixes {
+		if strings.HasPrefix(unit, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// neverStripPaths are programs a guard never strips: how owners become root.
+var neverStripPaths = map[string]bool{
+	"/usr/bin/sudo": true, "/usr/bin/sudoedit": true, "/usr/bin/su": true, "/bin/su": true,
+	"/usr/bin/doas": true, "/usr/bin/passwd": true, "/bin/sudo": true,
+	"/usr/lib/openssh/ssh-keysign": true, "/usr/libexec/openssh/ssh-keysign": true,
+}
+
+func neverStrip(p string) bool { return neverStripPaths[p] }
+
+// Effect says when the block starts to bite.
+func (b Block) Effect() Effect {
+	switch {
+	case b.Setting != nil:
+		return settings[b.Setting.Name].Effect
+	case b.Module != nil:
+		return NextLoad
+	case b.Strip != nil:
+		return NextRun
+	}
+	return Now // drop, service
+}
+
+// Auto reports whether the block may go on without the owner's yes, under
+// the agent's own lists. A block that bites later never goes on
+// automatically before a canary boot, whatever this says.
+func (b Block) Auto() bool {
+	switch {
+	case b.Module != nil:
+		// modprobe treats '-' and '_' in module names alike.
+		return moduleAuto[strings.ReplaceAll(b.Module.Name, "-", "_")]
+	case b.Service != nil:
+		return serviceAuto[b.Service.Unit]
+	}
+	return true // drop, setting (allow-listed), strip
+}
+
+// Describe says what the block does, in plain words.
+func (b Block) Describe() string {
+	switch {
+	case b.Drop != nil:
+		d := b.Drop
+		var w []string
+		w = append(w, "drop inbound", d.Family)
+		if d.Protocol != "" {
+			w = append(w, d.Protocol)
+		} else {
+			w = append(w, "packets")
+		}
+		if d.SYN {
+			w = append(w, "connection requests")
+		}
+		if d.IPOptions {
+			w = append(w, "carrying IP options")
+		}
+		if len(d.Ports) > 0 {
+			w = append(w, "to port "+strings.Join(d.Ports, ", "))
+		}
+		return strings.Join(w, " ")
+	case b.Setting != nil:
+		return fmt.Sprintf("set %s = %s", b.Setting.Name, b.Setting.Value)
+	case b.Module != nil:
+		return "block kernel module " + b.Module.Name
+	case b.Service != nil:
+		return "stop and mask " + b.Service.Unit
+	case b.Strip != nil:
+		return "remove the setuid and setgid bits from " + b.Strip.Path
+	}
+	return "?"
+}

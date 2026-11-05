@@ -2,10 +2,12 @@ package agent
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jaekwon/autopatch/guard"
 	"github.com/jaekwon/autopatch/policy"
 )
 
@@ -216,7 +218,7 @@ func TestRebootTheSystemAsks(t *testing.T) {
 	bootInto(sys, oldRel)
 	delete(sys.files, "/run/reboot-required") // /run is new at every boot
 	delete(sys.files, "/run/reboot-required.pkgs")
-	if m := rstep(t, a, f, p, nil); m != "rebooted; its health window runs" {
+	if m := rstep(t, a, f, p, nil); m != "rebooted (the system asked); its health window runs" {
 		t.Fatalf("after the boot: %q", m)
 	}
 	after(TrialWindow)
@@ -343,5 +345,92 @@ func TestGrubEntry(t *testing.T) {
 	}
 	if got, err := grubEntry([]byte(recFirst), newRel); err != nil || got != newEntry {
 		t.Errorf("recovery first: %q %v", got, err)
+	}
+}
+
+// A canary holding an admitted guard that takes effect only after a boot
+// reboots once for it in its window, a plain reboot, so the rest of its tier
+// can take the guard (rule 4); once for each such guard. A machine that
+// isn't a canary doesn't.
+func TestRebootTheCanaryBoots(t *testing.T) {
+	gb, err := os.ReadFile("../guard/testdata/cve-2026-98432-mptcp.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := guard.Parse(gb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	holdLater := func(a *Agent) {
+		s, st, err := a.open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer s.close()
+		st.Guards = append(st.Guards, &Entry{Hash: g.Hash(), Guard: g, Status: Confirmed, Later: true, By: "rig"})
+		if err := s.save(st); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, canary := range []bool{true, false} {
+		tier := `,"reboot":"window","reboot_window":"03:00-04:00"`
+		if canary {
+			tier += `,"canaries":["web"]`
+		}
+		a, sys, f, p, after := rebootAgent(t, tier)
+		sys.runOut[dpkgQuery] = "linux-image-" + oldRel + " 6.8.0-142.142 ii \n"
+		holdLater(a)
+		m := rstep(t, a, f, p, nil)
+		if !canary {
+			if m != "" || len(ran(sys, "systemctl reboot")) != 0 {
+				t.Fatalf("not a canary: %q", m)
+			}
+			continue
+		}
+		want := "a canary's boot for " + g.Name()
+		if m != "rebooting ("+want+")" || strings.Join(ran(sys, "grub-", "systemctl reboot"), "|") != "systemctl reboot" {
+			t.Fatalf("the canary: %q, ran %q", m, ran(sys, "grub-", "systemctl reboot"))
+		}
+		bootInto(sys, oldRel)
+		if m := rstep(t, a, f, p, nil); m != "rebooted ("+want+"); its health window runs" {
+			t.Fatalf("after the boot: %q", m)
+		}
+		after(TrialWindow)
+		if m := rstep(t, a, f, p, nil); m != "rebooted ("+want+"); health held" {
+			t.Fatalf("health held: %q", m)
+		}
+		after(24 * time.Hour) // the guard still hasn't booted here, but the canary rebooted for it once
+		if m := rstep(t, a, f, p, nil); m != "" || len(ran(sys, "systemctl reboot")) != 1 {
+			t.Fatalf("a second reboot for the same guard: %q", m)
+		}
+	}
+	// Only an admitted guard, on and not yet booted, counts: not one put on
+	// by hand, one already booted, or one still on trial.
+	for name, e := range map[string]*Entry{
+		"by hand":        {Hash: g.Hash(), Guard: g, Status: Confirmed, Later: true},
+		"booted already": {Hash: g.Hash(), Guard: g, Status: Confirmed, Later: true, By: "rig", Booted: true},
+		"on trial":       {Hash: g.Hash(), Guard: g, Status: Pending, Later: true, By: "rig"},
+	} {
+		a, sys, f, p, _ := rebootAgent(t, `,"reboot":"window","reboot_window":"03:00-04:00","canaries":["web"]`)
+		sys.runOut[dpkgQuery] = "linux-image-" + oldRel + " 6.8.0-142.142 ii \n"
+		s, st, err := a.open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		st.Guards = append(st.Guards, e)
+		if err := s.save(st); err != nil {
+			t.Fatal(err)
+		}
+		s.close()
+		if m := rstep(t, a, f, p, nil); strings.HasPrefix(m, "rebooting") || len(ran(sys, "systemctl reboot")) != 0 {
+			t.Errorf("%s: %q", name, m)
+		}
+	}
+	// A canary whose tier waits for the owner says so.
+	a, sys, f, p, _ := rebootAgent(t, `,"canaries":["web"]`)
+	sys.runOut[dpkgQuery] = "linux-image-" + oldRel + " 6.8.0-142.142 ii \n"
+	holdLater(a)
+	if m := rstep(t, a, f, p, nil); m != "a reboot is owed: this canary boots with "+g.Name()+" before the rest of its tier takes it; this tier waits for your signed Reboot" {
+		t.Fatalf("a yes tier: %q", m)
 	}
 }

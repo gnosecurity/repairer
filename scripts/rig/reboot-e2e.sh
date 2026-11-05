@@ -108,7 +108,7 @@ if [ "$mode" = signed ] && [ "$settled" = yes ]; then
       log "the second signed Reboot goes in through intake: $("${S[@]}" 'sudo -u autopatch /usr/local/sbin/autopatch-agent intake < /home/rig/reboot-2.json' 2>&1)"
       asked2=yes
     fi
-    if [[ $line == "rebooted; health held" ]]; then held=yes; break; fi
+    if [[ $line == "rebooted (the system asked); health held" ]]; then held=yes; break; fi
   done
   boot1=$("${S[@]}" cat /proc/sys/kernel/random/boot_id)
   phase2=no

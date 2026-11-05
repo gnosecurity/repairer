@@ -4,6 +4,8 @@ package main
 
 import "errors"
 
-func enterJail(root, socket string) (string, error) {
-	return "", errors.New("the jail needs Linux namespaces; use -sandbox none only for tests")
-}
+var errNoJail = errors.New("the jail needs Linux namespaces; use -sandbox none only for tests")
+
+func enterJail(root, socket, self string) error { return errNoJail }
+
+func execJudge(args, env []string) error { return errNoJail }

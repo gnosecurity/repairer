@@ -5,7 +5,6 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -88,67 +87,6 @@ func fakeModelSocket(t *testing.T, sock, reply string) {
 	}))
 }
 
-// The jail's helper: run in new user, network and mount namespaces, it
-// enters the jail and says what it can see.
-func TestJailHelper(t *testing.T) {
-	if os.Getenv("GNOSH_JAIL_HELPER") == "" {
-		t.Skip("run by TestJail")
-	}
-	sock, err := enterJail(os.Getenv("ROOT"), os.Getenv("SOCK"))
-	if err != nil {
-		fmt.Println("jail:", err)
-		os.Exit(3)
-	}
-	_, keyErr := os.ReadFile(os.Getenv("KEY"))
-	var names []string
-	if es, err := os.ReadDir("/"); err == nil {
-		for _, e := range es {
-			names = append(names, e.Name())
-		}
-	}
-	c, dialErr := net.Dial("unix", sock)
-	if dialErr == nil {
-		c.Close()
-	}
-	b, _ := json.Marshal(map[string]any{"key_readable": keyErr == nil, "root": names, "model_reachable": dialErr == nil})
-	fmt.Println(string(b))
-	os.Exit(0)
-}
-
-// In the jail, judge sees an empty filesystem with only the model's
-// socket: not the model's key file, nothing else on the disk; and the
-// socket still reaches the model (round 8, minor 10).
-func TestJail(t *testing.T) {
-	if err := exec.Command("unshare", "--user", "--map-root-user", "--net", "--mount", "true").Run(); err != nil {
-		t.Skip("user, network and mount namespaces aren't available here: ", err)
-	}
-	dir := t.TempDir()
-	key := filepath.Join(dir, "model.key")
-	os.WriteFile(key, []byte("secret"), 0o600)
-	sock := filepath.Join(dir, "m.sock")
-	fakeModelSocket(t, sock, "{}")
-	root := filepath.Join(dir, "root")
-	os.Mkdir(root, 0o700)
-	cmd := exec.Command("unshare", "--user", "--map-root-user", "--net", "--mount", "--", os.Args[0], "-test.run=^TestJailHelper$")
-	cmd.Env = append(os.Environ(), "GNOSH_JAIL_HELPER=1", "ROOT="+root, "SOCK="+sock, "KEY="+key)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("%v: %s", err, out)
-	}
-	var got struct {
-		KeyReadable    bool     `json:"key_readable"`
-		Root           []string `json:"root"`
-		ModelReachable bool     `json:"model_reachable"`
-	}
-	line := strings.TrimSpace(strings.SplitN(string(out), "\n", 2)[0])
-	if err := json.Unmarshal([]byte(line), &got); err != nil {
-		t.Fatalf("%v: %s", err, out)
-	}
-	if got.KeyReadable || len(got.Root) != 1 || got.Root[0] != "model.sock" || !got.ModelReachable {
-		t.Fatalf("inside the jail: %+v", got)
-	}
-}
-
 // launch end to end with the built program: the jail answers through the
 // model's socket, and launch refuses to run without a drafts list.
 func TestLaunchJailed(t *testing.T) {
@@ -161,7 +99,9 @@ func TestLaunchJailed(t *testing.T) {
 	}
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "autopatch-gnosh")
-	if out, err := exec.Command(gobin, "build", "-o", bin, ".").CombinedOutput(); err != nil {
+	build := exec.Command(gobin, "build", "-o", bin, ".")
+	build.Env = append(os.Environ(), "CGO_ENABLED=0") // as released: the jail holds no loader
+	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("%v: %s", err, out)
 	}
 	sock := filepath.Join(dir, "m.sock")

@@ -11,7 +11,11 @@
 //	autopatch-agent gates                whether this machine can reboot into its newest kernel
 //	autopatch-agent check                compare live state with what was set
 //	autopatch-agent boot                 at boot: drop the unconfirmed, restore the rest
-//	autopatch-agent install              write and turn on the boot unit, firewall unit and check timer
+//	autopatch-agent install              write and turn on the boot unit, firewall unit and minute timer
+//	autopatch-agent init    POLICY.json  install the first policy by hand (-host, -seq, -intake-user)
+//	autopatch-agent intake               take one bundle from the lookout on stdin (the unprivileged half)
+//	autopatch-agent tick                 what the minute timer runs
+//	autopatch-agent report               the last signed report (-facts: this machine's facts now)
 package main
 
 import (
@@ -37,11 +41,15 @@ const usage = `usage: autopatch-agent <command> [flags] [args]
   confirm HASH|ID      keep a pending guard on, across reboots
   undo    HASH|ID      take a guard off (-if-unconfirmed: only if not confirmed)
   status               the guards on this machine, and the packets they stopped
-  report               this machine's facts for the lookout, as JSON (reads only)
+  report               the last signed report, for the lookout (-facts: this machine's facts now)
   gates                whether this machine can reboot into its newest kernel and come back (reads only)
   check                compare live state with what the guards set (-repair: put it back)
   boot                 at boot: take off what was never confirmed, put back what was
-  install              write and turn on the boot unit, the firewall unit and the check timer
+  install              write and turn on the boot unit, the firewall unit and the minute timer
+  init    POLICY.json  install the first policy by hand: -host NAME, -seq (the owner's sequence
+                       floor), -intake-user (the unprivileged user that runs intake and report)
+  intake               take one bundle from the lookout on stdin; acts on nothing (unprivileged)
+  tick                 what the minute timer runs: repair, take in bundles, move guards on, report
 
 Every command takes -state-dir (default /var/lib/autopatch).
 `
@@ -65,6 +73,10 @@ func run(ctx context.Context, cmd string, args []string) error {
 	force := fs.Bool("force", false, "apply: put blocks on even when something uses what they take away")
 	ifUnconfirmed := fs.Bool("if-unconfirmed", false, "undo: leave a confirmed guard on")
 	repair := fs.Bool("repair", false, "check: put drifted steps back")
+	host := fs.String("host", "", "init: this machine's name in the policy")
+	seq := fs.Uint64("seq", 0, "init: the owner's sequence floor (the last sequence already used)")
+	intakeUser := fs.String("intake-user", "", "init: the unprivileged user that runs intake and report")
+	facts := fs.Bool("facts", false, "report: this machine's facts now, not the last signed report")
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -92,7 +104,8 @@ func run(ctx context.Context, cmd string, args []string) error {
 		Timer:    agent.SystemdTimer{Sys: sys, Self: self, StateDir: *stateDir, Root: *root},
 		StateDir: *stateDir,
 	}
-	changes := cmd != "fmt" && cmd != "plan" && cmd != "status" && cmd != "report" && cmd != "gates" && !(cmd == "check" && !*repair)
+	// intake and report are the unprivileged half's; intake only writes the spool.
+	changes := cmd != "fmt" && cmd != "plan" && cmd != "status" && cmd != "report" && cmd != "gates" && cmd != "intake" && !(cmd == "check" && !*repair)
 	if changes && os.Geteuid() != 0 && *root == "" {
 		return errors.New(cmd + " changes the machine; run it as root")
 	}
@@ -225,12 +238,59 @@ func run(ctx context.Context, cmd string, args []string) error {
 		}
 		return nil
 	case "report":
+		if !*facts {
+			b, err := agent.ReadReport(*stateDir)
+			if err != nil {
+				return err
+			}
+			_, err = os.Stdout.Write(b)
+			return err
+		}
 		b, err := json.MarshalIndent(a.Report(ctx), "", "  ")
 		if err != nil {
 			return err
 		}
 		fmt.Printf("%s\n", b)
 		return nil
+	case "init":
+		path, err := arg()
+		if err != nil {
+			return err
+		}
+		if *host == "" {
+			return errors.New("init needs -host, this machine's name in the policy")
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		pub, err := a.Init(*host, b, *seq)
+		if err != nil {
+			return err
+		}
+		if *intakeUser != "" {
+			if err := agent.SetupHalves(*stateDir, *intakeUser); err != nil {
+				return err
+			}
+		}
+		fmt.Printf("policy installed for %s; this agent's key (add it to the next policy as %s's agent key):\n%x\n", *host, *host, pub)
+		return nil
+	case "intake":
+		name, err := agent.Intake(filepath.Join(*stateDir, agent.SpoolDir), os.Stdin)
+		if err != nil {
+			return err
+		}
+		fmt.Println(filepath.Base(name))
+		return nil
+	case "tick":
+		res, err := a.Tick(ctx)
+		if res != nil {
+			b, jerr := json.Marshal(res)
+			if jerr == nil {
+				fmt.Printf("%s\n", b)
+			}
+		}
+		return err
 	case "gates":
 		failed := 0
 		for _, g := range a.Gates(ctx) {

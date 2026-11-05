@@ -29,6 +29,8 @@ type Bundle struct {
 	Guards   map[string][]byte `json:"guards,omitempty"`   // guard hash to canonical file
 	Policies map[string][]byte `json:"policies,omitempty"` // policy hash to canonical file
 	Signed   []approve.Signed  `json:"signed,omitempty"`
+	// Wants are other machines' requests for this canary's Healthy.
+	Wants []Want `json:"wants,omitempty"`
 }
 
 // Message is one owner statement: gnokey's signed transaction file and the
@@ -115,12 +117,30 @@ type TickResult struct {
 	Confirmed []string // windows that held
 	Undone    []string // windows that failed, and why
 	Waiting   []string // admitted but for a canary's Healthy
+	Drift     []string // live state put back, or guards taken off as unsafe now
 }
 
 // Tick is what the minute timer runs: take in the spool, take off what the
-// owner turned off, then move the one change in flight a step.
+// owner turned off, move the one change in flight a step, answer canary
+// wants, and sign the report. Two ticks never run at once.
 func (a *Agent) Tick(ctx context.Context) (*TickResult, error) {
+	lock, err := lockFile(filepath.Join(a.StateDir, "tick.lock"))
+	if err != nil {
+		return nil, err
+	}
+	defer lock.Close()
+	// First what the minute check always did: put back what drifted.
+	drift, cerr := a.Check(ctx, true)
+	if _, err := a.loadFleet(); errors.Is(err, errNoFleet) {
+		res := &TickResult{}
+		addDrift(res, drift)
+		return res, cerr // no policy: the agent only keeps what root put on
+	}
 	res, err := a.ProcessSpool(ctx)
+	addDrift(res, drift)
+	if cerr != nil {
+		res.Refused = append(res.Refused, "check: "+cerr.Error())
+	}
 	if err != nil {
 		return res, err
 	}
@@ -137,7 +157,29 @@ func (a *Agent) Tick(ctx context.Context) (*TickResult, error) {
 	if err != nil {
 		return res, err
 	}
-	return res, a.advance(ctx, f, p, res)
+	err = a.advance(ctx, f, p, res)
+	if werr := a.answerWants(ctx, f, p); werr != nil {
+		res.Refused = append(res.Refused, "answering canaries' wants: "+werr.Error())
+	}
+	return res, errors.Join(err, a.writeReport(ctx, f, p, res))
+}
+
+func addDrift(res *TickResult, drift []Drift) {
+	if res == nil {
+		return
+	}
+	for _, d := range drift {
+		line := d.Guard + ": " + d.What
+		switch {
+		case d.Err != nil:
+			line += " (" + d.Err.Error() + ")"
+		case d.TakenOff:
+			line += " (taken off)"
+		case d.Repaired:
+			line += " (put back)"
+		}
+		res.Drift = append(res.Drift, line)
+	}
 }
 
 // advance moves this machine's one change in flight a step: it watches the
@@ -542,21 +584,26 @@ func (a *Agent) ProcessSpool(ctx context.Context) (*TickResult, error) {
 	names, _ := filepath.Glob(filepath.Join(dir, "*.json"))
 	sort.Strings(names) // intake names files by time
 	for _, name := range names {
-		b, err := os.ReadFile(name)
-		if err != nil {
-			return res, err
-		}
+		// The spool is the unprivileged half's: read each entry as an
+		// untrusted file, never through a link, at most MaxBundle bytes.
+		b, err := readSpoolFile(name)
 		var bun Bundle
-		if err := json.Unmarshal(b, &bun); err != nil {
+		switch {
+		case err != nil:
+			res.Refused = append(res.Refused, filepath.Base(name)+": "+err.Error())
+		case json.Unmarshal(b, &bun) != nil:
 			res.Refused = append(res.Refused, filepath.Base(name)+": not a bundle")
-		} else {
+		default:
 			a.applyBundle(f, &bun, res)
+			if err := a.keepWants(bun.Wants); err != nil {
+				res.Refused = append(res.Refused, "wants: "+err.Error())
+			}
 		}
 		if err := a.saveFleet(f); err != nil {
 			return res, err
 		}
-		if err := os.Remove(name); err != nil {
-			return res, err
+		if err := os.Remove(name); err != nil && !errors.Is(err, os.ErrNotExist) {
+			res.Refused = append(res.Refused, filepath.Base(name)+": can't remove it: "+err.Error())
 		}
 	}
 	// A pending policy takes effect once its delay has passed.

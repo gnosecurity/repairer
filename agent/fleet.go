@@ -25,6 +25,9 @@ const (
 	keyFile   = "agent.key" // the agent's Ed25519 private key, 0600
 	spoolDir  = "spool"     // bundles from the lookout, waiting for tick
 
+	// SpoolDir is where intake leaves bundles, under the state directory.
+	SpoolDir = spoolDir
+
 	// MaxBundle caps one bundle from the lookout.
 	MaxBundle = 1 << 20
 )
@@ -42,7 +45,9 @@ type Fleet struct {
 	Policy  []byte         `json:"policy"`
 	Pending *PendingPolicy `json:"pending,omitempty"`
 	LastSeq uint64         `json:"last_seq"`
-	Off     []string       `json:"off,omitempty"` // guard hashes the owner took off for good
+	Off     []string       `json:"off,omitempty"` // guard hashes the owner took off this host
+	// ReportSeq numbers this agent's signed reports.
+	ReportSeq uint64 `json:"report_seq"`
 }
 
 // PendingPolicy is a signed policy change counting down its delay from when

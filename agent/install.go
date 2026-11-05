@@ -59,13 +59,13 @@ ExecReload=` + fmt.Sprintf(run, "check") + ` -repair
 WantedBy=multi-user.target
 `,
 		checkUnit: `[Unit]
-Description=autopatch: compare guards with live state, put back what drifted
+Description=autopatch: put back what drifted, take in signed messages, move guards on, report
 Documentation=https://github.com/jaekwon/autopatch
 After=autopatch-boot.service
 
 [Service]
 Type=oneshot
-ExecStart=` + fmt.Sprintf(run, "check") + ` -repair
+ExecStart=` + fmt.Sprintf(run, "tick") + `
 `,
 		checkTimer: `[Unit]
 Description=autopatch: check guards every minute

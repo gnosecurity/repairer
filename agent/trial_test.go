@@ -60,6 +60,11 @@ func newTrial(t *testing.T, host, extra string) *trial {
 		t.Fatal(err)
 	}
 	tr.p = p
+	// The agent's own key is the one the policy lists for this host, as it
+	// is once the owner has added the key init printed.
+	if err := writeAtomic(filepath.Join(a.StateDir, keyFile), []byte(hex.EncodeToString(tr.keys[host].Seed())+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := a.Init(host, p.Canonical(), 0); err != nil {
 		t.Fatal(err)
 	}

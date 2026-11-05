@@ -87,4 +87,21 @@ func TestSignYes(t *testing.T) {
 	if err := run(context.Background(), "off", offArgs, &out); err != nil || !strings.Contains(out.String(), "as sequence 43") {
 		t.Fatalf("%v\n%s", err, out.String())
 	}
+
+	// Mail reports the guard off. A keep Yes for this guard, which bites
+	// later, comes with nocanary, and the tool says the Yes won't put the
+	// guard back on mail.
+	body, _ = json.Marshal(map[string]any{"kind": "report", "chain": chain, "host": "mail", "time": time.Now().UTC(), "policy": p.Hash(), "owner_seq": 43, "off": []string{g.Hash()}})
+	sr, _ = json.Marshal(approve.SignReport(mailKey, body))
+	os.WriteFile(filepath.Join(reports, "mail.json"), sr, 0o644)
+	out.Reset()
+	keepArgs := append(append([]string{}, common...), "-tiers", "A", "-until", until, "-mode", "keep", "-out", filepath.Join(dir, "keep.json"), gfile)
+	if err := run(context.Background(), "yes", keepArgs, &out); err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	for _, want := range []string{"as sequence 44", "mode keep+nocanary", "nocanary too", "doesn't put the guard back on mail"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("output lacks %q:\n%s", want, out.String())
+		}
+	}
 }

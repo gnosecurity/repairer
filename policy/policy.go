@@ -78,9 +78,28 @@ type Flow struct {
 	Port  int      `json:"port"`
 }
 
+// DefaultGrace is a check's grace after a boot when the policy sets none,
+// and MaxGraceSeconds the most it may set.
+const (
+	DefaultGrace    = 600
+	MaxGraceSeconds = 3600
+)
+
+// Grace is how long the check may fail after a boot before it counts.
+func (h Health) Grace() int {
+	if h.GraceSeconds > 0 {
+		return h.GraceSeconds
+	}
+	return DefaultGrace
+}
+
 // Health is a check that must hold through a guard's trial on these hosts.
 type Health struct {
-	Hosts []string `json:"hosts"`
+	// GraceSeconds is how long the check may fail after a boot before it
+	// counts against a guard, unless it has passed since the boot; 0 means
+	// DefaultGrace. A model server or signed_last20 needs some.
+	GraceSeconds int      `json:"grace_seconds,omitempty"`
+	Hosts        []string `json:"hosts"`
 	// Kind is "tcp" (Target is host:port and must connect), "http" (Target
 	// is a URL and Want its status), "unit" (Target is a systemd unit that
 	// must be active) or "json" (Target is a URL, Want is "field=value").
@@ -271,6 +290,9 @@ func (p *Policy) Validate() error {
 		}
 		if h.Target == "" || len(h.Target) > 256 {
 			return errors.New("policy: a check needs a target")
+		}
+		if h.GraceSeconds < 0 || h.GraceSeconds > MaxGraceSeconds {
+			return fmt.Errorf("policy: a check's grace after a boot is 0 to %d seconds", MaxGraceSeconds)
 		}
 	}
 	for _, k := range s.Agents {

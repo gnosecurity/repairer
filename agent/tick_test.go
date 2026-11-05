@@ -1,7 +1,9 @@
 package agent
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -88,7 +90,7 @@ func TestProcessSpool(t *testing.T) {
 		t.Fatalf("fleet %+v %v", f, err)
 	}
 	ev, err := a.loadEvidence(g.Hash())
-	if err != nil || ev.Yes == nil || ev.Yes.Tiers[0] != "A" {
+	if err != nil || ev.yesFor("A") == nil || ev.yesFor("A").Tiers[0] != "A" {
 		t.Fatalf("evidence %+v %v", ev, err)
 	}
 	if names, _ := filepath.Glob(filepath.Join(spool, "*.json")); len(names) != 0 {
@@ -125,68 +127,205 @@ func TestProcessSpool(t *testing.T) {
 	if _, err := Intake(spool, strings.NewReader(string(jump))); err != nil {
 		t.Fatal(err)
 	}
-	if res, _ = a.Tick(ctx); len(res.Refused) != 1 || !strings.Contains(res.Refused[0], "jumps") {
+	if res, _ = a.Tick(ctx); len(res.Accepted) != 0 || !strings.Contains(res.Held, "waiting for statement 9") {
 		t.Fatalf("a jump: %+v", res)
 	}
 }
 
-// Off names its hosts (gnokey-signed fixtures, sequences 10, 11 and 13):
-// mail takes guard one off and keeps it off; backup, which the Off doesn't
-// name, keeps it; the owner's later Yes lifts the Off on mail.
-func TestOffByHost(t *testing.T) {
-	old, _ := tickPolicies(t)
-	g := guardOne(t)
-	run := func(host string) (*Agent, func(...Message) *TickResult) {
-		a, _, _ := newAgent(t)
-		clock := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
-		a.Now = func() time.Time { clock = clock.Add(time.Minute); return clock }
-		if _, err := a.Init(host, old.Canonical(), 9); err != nil {
+// The "tiers" chain (gnokey-signed, approve/testdata/tiers): 1 Yes(A,
+// keep+nocanary), 2 Yes(B), 3 Yes(C), 4 Off(mail), 5 Yes(A, undo+nocanary),
+// 6 On(mail), 7 Policy T1 over T0, 8 Policy T2 over the pending T1.
+func tiersChain(t *testing.T) (*policy.Policy, []Message, *guard.Guard, map[string][]byte) {
+	t.Helper()
+	read := func(name string) []byte {
+		b, err := os.ReadFile("../approve/testdata/tiers/" + name)
+		if err != nil {
 			t.Fatal(err)
 		}
-		return a, func(msgs ...Message) *TickResult {
-			if len(msgs) > 0 {
-				if _, err := Intake(filepath.Join(a.StateDir, spoolDir), strings.NewReader(string(bundleOf(t, msgs, g, nil)))); err != nil {
-					t.Fatal(err)
-				}
-			}
-			res, err := a.Tick(ctx)
-			if err != nil {
+		return b
+	}
+	t0, err := policy.Parse(read("policy-0.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var msgs []Message
+	for i := 1; i <= 8; i++ {
+		msgs = append(msgs, Message{Seq: uint64(i), Tx: read(fmt.Sprintf("%d.json", i))})
+	}
+	gb, err := os.ReadFile("../guard/testdata/cve-2026-98432-ipopt.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := guard.Parse(gb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pols := map[string][]byte{}
+	for i := 0; i < 3; i++ {
+		p, _ := policy.Parse(read(fmt.Sprintf("policy-%d.json", i)))
+		pols[p.Hash()] = p.Canonical()
+	}
+	return t0, msgs, g, pols
+}
+
+// tiersAgent is a machine of the tiers fleet, with a clock that moves a
+// minute a tick, and a way to deliver statements.
+func tiersAgent(t *testing.T, host string) (*Agent, func(...Message) *TickResult) {
+	a, tick, _ := tiersAgentClock(t, host)
+	return a, tick
+}
+
+// tiersAgentClock is tiersAgent with a way to set the clock.
+func tiersAgentClock(t *testing.T, host string) (*Agent, func(...Message) *TickResult, func(time.Time)) {
+	t0, _, g, pols := tiersChain(t)
+	a, _, _ := newAgent(t)
+	clock := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+	a.Now = func() time.Time { return clock }
+	if _, err := a.Init(host, t0.Canonical(), 0); err != nil {
+		t.Fatal(err)
+	}
+	return a, func(msgs ...Message) *TickResult {
+		t.Helper()
+		clock = clock.Add(time.Minute)
+		if len(msgs) > 0 {
+			b := Bundle{Messages: msgs, Guards: map[string][]byte{g.Hash(): g.Canonical()}, Policies: pols}
+			js, _ := json.Marshal(b)
+			if _, err := Intake(filepath.Join(a.StateDir, spoolDir), bytes.NewReader(js)); err != nil {
 				t.Fatal(err)
 			}
-			return res
 		}
-	}
-	on := func(a *Agent) bool {
-		for _, e := range load(t, a).Guards {
-			if e.Hash == g.Hash() {
-				return true
-			}
+		res, err := a.Tick(ctx)
+		if err != nil {
+			t.Fatal(err)
 		}
-		return false
-	}
-	yes := Message{Seq: 10, Tx: fixtureTx(t, "yes-keep-nocanary.json")}
-	off := Message{Seq: 11, Tx: fixtureTx(t, "off-mail.json")}
-	again := Message{Seq: 13, Tx: fixtureTx(t, "yes-after-off.json")}
+		return res
+	}, func(at time.Time) { clock = at }
+}
 
-	mail, tick := run("mail")
-	if res := tick(yes); len(res.Applied) != 1 || !on(mail) {
-		t.Fatalf("the keep didn't go on: %+v", res)
+func isOn(t *testing.T, a *Agent, g *guard.Guard) bool {
+	for _, e := range load(t, a).Guards {
+		if e.Hash == g.Hash() {
+			return true
+		}
 	}
-	if res := tick(off); len(res.Off) != 1 || on(mail) {
-		t.Fatalf("the Off for mail: %+v", res)
+	return false
+}
+
+// A Yes changes only the tiers it names: the Yes for tier C doesn't undo
+// the one for tier B (round 5, new major 3).
+func TestYesPerTier(t *testing.T) {
+	_, msgs, g, _ := tiersChain(t)
+	sentry, tick := tiersAgent(t, "sentry")
+	res := tick(msgs[:3]...)
+	if len(res.Accepted) != 3 || len(res.Applied) != 1 || !isOn(t, sentry, g) {
+		t.Fatalf("the sentry, after Yes A, B and C: %+v", res)
+	}
+	ev, _ := sentry.loadEvidence(g.Hash())
+	if ev.yesFor("B") == nil || ev.yesFor("C") == nil || ev.yesFor("A").Mode != "keep" {
+		t.Fatalf("yeses %+v", ev.Yeses)
+	}
+	validator, vtick := tiersAgent(t, "validator")
+	if res := vtick(msgs[:3]...); len(res.Applied) != 1 || !isOn(t, validator, g) {
+		t.Fatalf("the validator: %+v", res)
+	}
+}
+
+// Off takes the guard off the hosts it names; a later Yes for the tier
+// doesn't put it back there (round 5, minor 1); On does. A machine the Off
+// doesn't name keeps the guard.
+func TestOffAndOn(t *testing.T) {
+	_, msgs, g, _ := tiersChain(t)
+	mail, tick := tiersAgent(t, "mail")
+	if res := tick(msgs[:3]...); len(res.Applied) != 1 {
+		t.Fatalf("the keep: %+v", res)
+	}
+	if res := tick(msgs[3]); len(res.Off) != 1 || isOn(t, mail, g) {
+		t.Fatalf("Off: %+v", res)
+	}
+	if res := tick(msgs[4]); len(res.Accepted) != 1 || isOn(t, mail, g) {
+		t.Fatalf("a Yes put the guard back where the owner took it off: %+v", res)
 	}
 	for i := 0; i < 3; i++ {
-		if res := tick(); len(res.Applied)+len(res.Baseline) != 0 || on(mail) {
-			t.Fatalf("back on after an Off: %+v", res)
+		if res := tick(); len(res.Applied)+len(res.Baseline) != 0 {
+			t.Fatalf("back on with no On: %+v", res)
 		}
 	}
-	if res := tick(again); len(res.Accepted) != 1 || len(res.Applied) != 1 || !on(mail) {
-		t.Fatalf("the later Yes didn't lift the Off: %+v", res)
+	if res := tick(msgs[5]); len(res.Accepted) != 1 || len(res.Applied) != 1 || !isOn(t, mail, g) {
+		t.Fatalf("On didn't put it back: %+v", res)
 	}
 
-	backup, btick := run("backup")
-	btick(yes)
-	if res := btick(off); len(res.Off) != 0 || !on(backup) || !strings.Contains(strings.Join(res.Accepted, " "), "for other hosts") {
+	backup, btick := tiersAgent(t, "backup")
+	btick(msgs[:3]...)
+	if res := btick(msgs[3]); len(res.Off) != 0 || !isOn(t, backup, g) || !strings.Contains(strings.Join(res.Accepted, " "), "for other hosts") {
 		t.Fatalf("an Off for mail took it off backup: %+v", res)
+	}
+}
+
+// Statements act in the order signed: a later one waits for every one
+// before it, so none can be skipped (round 5, minor 3).
+func TestStatementsInOrder(t *testing.T) {
+	_, msgs, g, _ := tiersChain(t)
+	mail, tick := tiersAgent(t, "mail")
+	tick(msgs[:3]...)
+	// The lookout withholds the Off (4) and delivers the Yes (5) and On (6).
+	res := tick(msgs[4], msgs[5])
+	if len(res.Accepted) != 0 || !strings.Contains(res.Held, "waiting for statement 4") {
+		t.Fatalf("a later statement acted before 4: %+v", res)
+	}
+	f, _ := mail.loadFleet()
+	if f.LastSeq != 3 {
+		t.Fatalf("last %d", f.LastSeq)
+	}
+	// A second lookout delivers 4 to 6: they act in order, the Off then On.
+	if res := tick(msgs[3], msgs[4], msgs[5]); len(res.Accepted) != 3 || !isOn(t, mail, g) {
+		t.Fatalf("%+v", res)
+	}
+	if f, _ = mail.loadFleet(); f.LastSeq != 6 || containsHash(f.Off, g.Hash()) {
+		t.Fatalf("fleet %+v", f)
+	}
+}
+
+// A policy step may chain onto the one pending; the chain takes effect the
+// delay after its last step was first seen (round 5, minor 4).
+func TestPolicyChain(t *testing.T) {
+	_, msgs, _, pols := tiersChain(t)
+	backup, tick, setClock := tiersAgentClock(t, "backup")
+	if res := tick(msgs...); len(res.Accepted) != 8 || res.Held != "" {
+		t.Fatalf("%+v", res)
+	}
+	f, _ := backup.loadFleet()
+	pend, _ := policy.Parse(f.Pending.Policy)
+	if pend.Tiers[0].SpacingSeconds != 900 {
+		t.Fatalf("pending %+v", pend.Tiers[0])
+	}
+	var t2 string
+	for h, b := range pols {
+		if p, _ := policy.Parse(b); p.Tiers[0].SpacingSeconds == 900 {
+			t2 = h
+		}
+	}
+	// The delay in force is a day (T0's), from the last step's first sight;
+	// each tick moves the clock a minute.
+	setClock(f.Pending.FirstSeen.Add(24*time.Hour - 2*time.Minute))
+	if res := tick(); res.Policy != "" {
+		t.Fatal("in force a minute before the day was out")
+	}
+	if res := tick(); res.Policy != t2 {
+		t.Fatalf("T2 not in force a day after its first sight: %q", res.Policy)
+	}
+}
+
+// A statement whose bundle lacks the guard's file uses the file the agent
+// already holds, so it isn't held for nothing (round 5, minor 3).
+func TestStatementUsesHeldGuardFile(t *testing.T) {
+	_, msgs, g, _ := tiersChain(t)
+	mail, tick := tiersAgent(t, "mail")
+	tick(msgs[:3]...)
+	js, _ := json.Marshal(Bundle{Messages: []Message{msgs[3]}}) // the Off, no guard file
+	if _, err := Intake(filepath.Join(mail.StateDir, spoolDir), bytes.NewReader(js)); err != nil {
+		t.Fatal(err)
+	}
+	if res := tick(); len(res.Off) != 1 || res.Held != "" || isOn(t, mail, g) {
+		t.Fatalf("%+v", res)
 	}
 }

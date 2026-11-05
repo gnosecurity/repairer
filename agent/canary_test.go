@@ -179,7 +179,7 @@ func TestOnlyCanariesAnswer(t *testing.T) {
 	backup := newTrial(t, "backup", "")
 	mail := join(t, backup, "mail")
 	g := ipoptGuard(t)
-	ev := &Evidence{Guard: g.Canonical(), Yes: &approve.Yes{Hash: g.Hash(), Tiers: []string{"A"}, Until: mail.clock.Add(time.Hour), Mode: "keep", NoCanary: true}}
+	ev := &Evidence{Guard: g.Canonical(), Yeses: map[string]*approve.Yes{"A": {Hash: g.Hash(), Tiers: []string{"A"}, Until: mail.clock.Add(time.Hour), Mode: "keep", NoCanary: true}}}
 	if err := mail.a.saveEvidence(g.Hash(), ev); err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +237,7 @@ func TestSpoolIsUntrusted(t *testing.T) {
 func TestWantsWellFormed(t *testing.T) {
 	backup := newTrial(t, "backup", "")
 	g := ipoptGuard(t)
-	ev := &Evidence{Guard: g.Canonical(), Yes: &approve.Yes{Hash: g.Hash(), Tiers: []string{"A"}, Until: backup.clock.Add(time.Hour), Mode: "keep"}}
+	ev := &Evidence{Guard: g.Canonical(), Yeses: map[string]*approve.Yes{"A": {Hash: g.Hash(), Tiers: []string{"A"}, Until: backup.clock.Add(time.Hour), Mode: "keep"}}}
 	if err := backup.a.saveEvidence(g.Hash(), ev); err != nil {
 		t.Fatal(err)
 	}

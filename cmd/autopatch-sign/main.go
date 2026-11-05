@@ -7,6 +7,7 @@
 //
 //	autopatch-sign yes    -policy P.json -tiers A,B -until 2026-11-12T00:00:00Z GUARD.json
 //	autopatch-sign off    -policy P.json -hosts mail,web GUARD.json
+//	autopatch-sign on     -policy P.json -hosts mail GUARD.json
 //	autopatch-sign policy -policy OLD.json NEW.json
 package main
 
@@ -34,6 +35,7 @@ const usage = `usage: autopatch-sign <yes|off|policy> [flags] FILE
 
   yes    GUARD.json   the owner's yes to a guard: -tiers A,B -until RFC3339 [-mode undo|keep] [-nocanary] [-kev KEV.json]
   off    GUARD.json   take a guard off some hosts and keep it off there: -hosts mail,web
+  on     GUARD.json   lift an Off on some hosts: -hosts mail (a Yes never does)
   policy NEW.json     a policy change, against the policy in force (-policy); its keys are checked
                       against your address book (-confirm-keys to accept the differences shown)
 
@@ -135,7 +137,7 @@ func run(ctx context.Context, cmd string, args []string, stdout io.Writer) error
 	var newPolicy *policy.Policy
 	var bookAdd signer.Book
 	switch cmd {
-	case "yes", "off":
+	case "yes", "off", "on":
 		b, err := os.ReadFile(fs.Arg(0))
 		if err != nil {
 			return err
@@ -144,10 +146,17 @@ func run(ctx context.Context, cmd string, args []string, stdout io.Writer) error
 		if err != nil {
 			return fmt.Errorf("%s: %w (autopatch-agent fmt writes the canonical form)", fs.Arg(0), err)
 		}
-		if cmd == "off" {
+		switch cmd {
+		case "off":
 			if stmt, err = signer.PrepareOff(cur, g, split(*hosts), *seq); err != nil {
 				return err
 			}
+		case "on":
+			if stmt, err = signer.PrepareOn(cur, g, split(*hosts), *seq); err != nil {
+				return err
+			}
+		}
+		if cmd != "yes" {
 			break
 		}
 		end, err := time.Parse(time.RFC3339, *until)
@@ -162,6 +171,21 @@ func run(ctx context.Context, cmd string, args []string, stdout io.Writer) error
 			}
 			*mode = signer.DefaultMode(cur, ts, g.Flaws, kev)
 			notes = append(notes, "mode "+*mode+" (the default; -mode to choose)")
+		}
+		// keep on a guard that bites later: no window can show it booted on a
+		// canary, so the rest of the tier would wait; nocanary is offered.
+		nocanarySet := false
+		fs.Visit(func(f *flag.Flag) { nocanarySet = nocanarySet || f.Name == "nocanary" })
+		if *mode == "keep" && g.Later() && !nocanarySet {
+			*nocanary = true
+			notes = append(notes, "nocanary too, since the guard bites later and is kept (-nocanary=false to wait for a canary's boot)")
+		}
+		for host, offs := range checked.Off {
+			for _, h := range offs {
+				if h == g.Hash() {
+					notes = append(notes, "this Yes doesn't put the guard back on "+host+", where you took it off; sign `on` for that")
+				}
+			}
 		}
 		if stmt, err = signer.PrepareYes(cur, g, approve.Yes{Tiers: ts, Until: end.UTC(), Mode: *mode, NoCanary: *nocanary}, *seq); err != nil {
 			return err

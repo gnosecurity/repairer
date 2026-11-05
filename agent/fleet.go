@@ -79,11 +79,11 @@ func (a *Agent) Init(host string, policyFile []byte, seqFloor uint64) (ed25519.P
 	if err != nil {
 		return nil, err
 	}
-	s, _, err := a.open()
+	lock, err := lockFile(filepath.Join(a.StateDir, "tick.lock")) // no tick in between
 	if err != nil {
 		return nil, err
 	}
-	defer s.close()
+	defer lock.Close()
 	f := &Fleet{Host: host, Policy: p.Canonical(), LastSeq: seqFloor}
 	if err := a.saveFleet(f); err != nil {
 		return nil, err

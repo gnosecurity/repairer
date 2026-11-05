@@ -5,8 +5,10 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -296,20 +298,100 @@ func TestGnokeyGolden(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for name, st := range map[string]*Statement{"yes-keep-nocanary.json": yes, "off-mail.json": off, "policy-change-12.json": pol, "yes-after-off.json": again} {
+	for name, st := range map[string]*Statement{"yes": yes, "off": off, "policy": pol, "yes again": again} {
 		signed, err := gk.Sign(context.Background(), st, owner(t))
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
-		}
-		if out := os.Getenv("GOLDEN_OUT"); out != "" {
-			if err := os.WriteFile(filepath.Join(out, name), signed, 0o644); err != nil {
-				t.Fatal(err)
-			}
 		}
 		// Tampered after signing: the agent's check fails.
 		bad := []byte(strings.Replace(string(signed), `"memo":"autopatch/1`, `"memo":"autopatch/2`, 1))
 		if st.verify(bad, owner(t)) == nil {
 			t.Fatalf("%s: a changed memo passed", name)
+		}
+	}
+}
+
+// TiersPolicies are the policies of the "tiers" fixture chain: T0, then T1
+// (a longer delay) replacing it, then T2 (tier A spaced 15 minutes)
+// replacing T1 while T1 is still pending.
+func TiersPolicies(t *testing.T) []*policy.Policy {
+	t.Helper()
+	tiers := `"tiers":[{"name":"A","hosts":["backup","mail","web"],"admit":["me"],"canaries":["backup"]%s},
+		{"name":"B","hosts":["sentry"],"admit":["me"],"critical":true},
+		{"name":"C","hosts":["validator"],"admit":["me"],"critical":true}]`
+	mk := func(replaces string, delay int, spacing string) *policy.Policy {
+		p, err := policy.Decode([]byte(`{"fleet":"tiers","replaces":"` + replaces + `","delay_seconds":` + strconv.Itoa(delay) + `,
+			"signers":{"me":{"name":"owner","key":"` + ownerHex + `"}},` + fmt.Sprintf(tiers, spacing) + `}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	t0 := mk("", 86400, "")
+	t1 := mk(t0.Hash(), 172800, "")
+	t2 := mk(t1.Hash(), 172800, `,"spacing_seconds":900`)
+	return []*policy.Policy{t0, t1, t2}
+}
+
+// The "tiers" chain, signed with the test keybase into GOLDEN_OUT/tiers:
+// 1 Yes(A, keep+nocanary), 2 Yes(B), 3 Yes(C), 4 Off(mail), 5 Yes(A,
+// undo+nocanary), 6 On(mail), 7 Policy T1 over T0, 8 Policy T2 over the
+// pending T1. The guard is guard one's drop half.
+func TestGnokeyTiersChain(t *testing.T) {
+	bin, home, out := os.Getenv("GNOKEY_BIN"), os.Getenv("GNOKEY_HOME"), os.Getenv("GOLDEN_OUT")
+	if bin == "" || home == "" || out == "" {
+		t.Skip("set GNOKEY_BIN, GNOKEY_HOME, GNOKEY_KEY, GNOKEY_PASSWORD and GOLDEN_OUT")
+	}
+	gk := Gnokey{Bin: bin, Home: home, Key: os.Getenv("GNOKEY_KEY"), Password: os.Getenv("GNOKEY_PASSWORD")}
+	ps := TiersPolicies(t)
+	b, err := os.ReadFile("../guard/testdata/cve-2026-98432-ipopt.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := guard.Parse(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	until := time.Date(2026, 11, 6, 0, 0, 0, 0, time.UTC)
+	yes := func(tier, mode string, nocanary bool, seq uint64) *Statement {
+		st, err := PrepareYes(ps[0], g, approve.Yes{Tiers: []string{tier}, Until: until, Mode: mode, NoCanary: nocanary}, seq)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return st
+	}
+	must := func(st *Statement, err error) *Statement {
+		if err != nil {
+			t.Fatal(err)
+		}
+		return st
+	}
+	chain := []*Statement{
+		yes("A", "keep", true, 1),
+		yes("B", "undo", false, 2),
+		yes("C", "undo", false, 3),
+		must(PrepareOff(ps[0], g, []string{"mail"}, 4)),
+		yes("A", "undo", true, 5),
+		must(PrepareOn(ps[0], g, []string{"mail"}, 6)),
+		must(PreparePolicy(ps[0], ps[1], 7)),
+		must(PreparePolicy(ps[1], ps[2], 8)),
+	}
+	dir := filepath.Join(out, "tiers")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for i, st := range chain {
+		signed, err := gk.Sign(context.Background(), st, owner(t))
+		if err != nil {
+			t.Fatalf("statement %d: %v", i+1, err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("%d.json", i+1)), signed, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i, p := range ps {
+		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("policy-%d.json", i)), p.Canonical(), 0o644); err != nil {
+			t.Fatal(err)
 		}
 	}
 }

@@ -875,11 +875,17 @@ func (a *Agent) Boot(ctx context.Context) error {
 					}
 				}
 				// A guard that bites later gets one more window after its
-				// first boot, with its undo armed: the boot is when it bites.
-				if e.Later && !e.Keep && !e.Booted && e.By != "" {
-					now := a.now()
-					e.Status, e.BootWindow, e.AppliedAt, e.ConfirmBy = Pending, true, now, now.Add(trialArm)
-					windows = append(windows, e.Hash)
+				// first boot, with its undo armed: the boot is when it
+				// bites. A keep guard has no window: back on after a boot is
+				// what it can show, and it counts as booted.
+				if e.Later && !e.Booted && e.By != "" {
+					if e.Keep {
+						e.Booted = true
+					} else {
+						now := a.now()
+						e.Status, e.BootWindow, e.AppliedAt, e.ConfirmBy = Pending, true, now, now.Add(a.bootArm())
+						windows = append(windows, e.Hash)
+					}
 				}
 				continue
 			}
@@ -891,11 +897,48 @@ func (a *Agent) Boot(ctx context.Context) error {
 	}
 	errs = append(errs, a.writeSysctlFile(st), s.save(st))
 	for _, h := range windows { // armed after the save, as Apply does
-		if err := a.Timer.Arm(ctx, h, trialArm); err != nil {
+		if err := a.Timer.Arm(ctx, h, a.bootArm()); err != nil {
 			errs = append(errs, fmt.Errorf("arming the undo for %s's window after boot: %w", h[:12], err))
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// bootArm is how long a window after a boot keeps its undo armed: the
+// longest grace among this machine's checks, the window, and five minutes.
+func (a *Agent) bootArm() time.Duration {
+	grace := policy.DefaultGrace
+	if f, err := a.loadFleet(); err == nil {
+		if p, err := f.InstalledPolicy(); err == nil {
+			for _, h := range checksFor(p, f.Host) {
+				grace = max(grace, h.Grace())
+			}
+		}
+	}
+	return time.Duration(grace)*time.Second + trialArm
+}
+
+// SetKeep marks a guard on this machine as the owner's keep: a guard in its
+// window is confirmed now, and it gets no window after a boot. It reports
+// whether the guard is on here.
+func (a *Agent) SetKeep(ctx context.Context, hash string) (bool, error) {
+	s, st, err := a.open()
+	if err != nil {
+		return false, err
+	}
+	defer s.close()
+	e := st.find(hash)
+	if e == nil {
+		return false, nil
+	}
+	if e.Status == Applying {
+		return true, nil // half on: undo or boot deals with it first
+	}
+	e.Keep = true
+	if e.Status == Pending {
+		return true, a.confirm(ctx, s, st, e)
+	}
+	return true, s.save(st)
 }
 
 // Drift is a difference between what a guard set and what is live, or a

@@ -108,8 +108,9 @@ func MemoYes(g *guard.Guard, y Yes) (string, error) {
 	return checkMemo(b.String())
 }
 
-// Off takes a guard off the hosts it names and keeps it off there, until a
-// later Yes from the owner for the same guard.
+// Off takes a guard off the hosts it names and keeps it off there; On lifts
+// that on the hosts it names. A Yes never lifts an Off. Both statements
+// have this shape: a guard's hash and some hosts.
 type Off struct {
 	Hash  string
 	Hosts []string
@@ -130,9 +131,14 @@ func (o Off) Names(host string) bool {
 }
 
 // ParseOff reads an Off from a statement's call, strictly.
-func ParseOff(c Call) (Off, error) {
-	if c.Func != "Off" || len(c.Args) != 2 {
-		return Off{}, errors.New("approve: not an Off with two arguments")
+func ParseOff(c Call) (Off, error) { return parseHosts("Off", c) }
+
+// ParseOn reads an On from a statement's call, strictly.
+func ParseOn(c Call) (Off, error) { return parseHosts("On", c) }
+
+func parseHosts(fn string, c Call) (Off, error) {
+	if c.Func != fn || len(c.Args) != 2 {
+		return Off{}, fmt.Errorf("approve: not an %s with two arguments", fn)
 	}
 	o := Off{Hash: c.Args[0], Hosts: strings.Split(c.Args[1], ",")}
 	if !isHash(o.Hash) {
@@ -149,26 +155,40 @@ func ParseOff(c Call) (Off, error) {
 }
 
 // MemoOff writes the memo for taking a guard off some hosts.
-func MemoOff(g *guard.Guard, o Off) (string, error) {
+func MemoOff(g *guard.Guard, o Off) (string, error) { return memoHosts("Off", g, o) }
+
+// MemoOn writes the memo for lifting an Off on some hosts.
+func MemoOn(g *guard.Guard, o Off) (string, error) { return memoHosts("On", g, o) }
+
+func memoHosts(fn string, g *guard.Guard, o Off) (string, error) {
 	if g.Hash() != o.Hash {
-		return "", errors.New("approve: the Off names another guard")
+		return "", fmt.Errorf("approve: the %s names another guard", fn)
 	}
-	return checkMemo(fmt.Sprintf("%s Off %s %s: hosts %s", MemoVersion, g.Name(), o.Hash[:16], strings.Join(o.Hosts, ",")))
+	return checkMemo(fmt.Sprintf("%s %s %s %s: hosts %s", MemoVersion, fn, g.Name(), o.Hash[:16], strings.Join(o.Hosts, ",")))
 }
 
 // VerifyOff checks an owner's Off for guard g in gnokey's signed transaction
 // file, as VerifyYes does for a Yes.
 func VerifyOff(txJSON []byte, chainID string, seq uint64, ownerPub []byte, g *guard.Guard) (Off, error) {
+	return verifyHosts("Off", txJSON, chainID, seq, ownerPub, g)
+}
+
+// VerifyOn checks an owner's On for guard g, as VerifyOff does.
+func VerifyOn(txJSON []byte, chainID string, seq uint64, ownerPub []byte, g *guard.Guard) (Off, error) {
+	return verifyHosts("On", txJSON, chainID, seq, ownerPub, g)
+}
+
+func verifyHosts(fn string, txJSON []byte, chainID string, seq uint64, ownerPub []byte, g *guard.Guard) (Off, error) {
 	var tx GnokeyTx
 	if err := json.Unmarshal(txJSON, &tx); err != nil || len(tx.Msg) != 1 {
 		return Off{}, errors.New("approve: not one message")
 	}
 	m := tx.Msg[0]
-	o, err := ParseOff(Call{Caller: m.Caller, Func: m.Func, Args: m.Args})
+	o, err := parseHosts(fn, Call{Caller: m.Caller, Func: m.Func, Args: m.Args})
 	if err != nil {
 		return Off{}, err
 	}
-	memo, err := MemoOff(g, o)
+	memo, err := memoHosts(fn, g, o)
 	if err != nil {
 		return Off{}, err
 	}
@@ -220,7 +240,8 @@ const MemoVersion = "autopatch/1"
 // MemoPolicy writes a policy change's memo: the full diff, field by field,
 // against the policy it replaces. A key the change adds shows its owner's
 // name for it and all of its hex; the signing tool also checks every key
-// against its own address book and warns when a name or key is unknown.
+// against its own address book and refuses a name or key that doesn't
+// match it unless the owner confirms the change.
 // A diff too big for a Ledger is refused, so a big change goes in steps.
 func MemoPolicy(old, new *policy.Policy) (string, error) {
 	if new.Replaces != old.Hash() {
@@ -339,6 +360,9 @@ func healthLines(p *policy.Policy) []string {
 		line := fmt.Sprintf("%s %s %s", strings.Join(h.Hosts, ","), h.Kind, h.Target)
 		if h.Want != "" {
 			line += " " + h.Want
+		}
+		if h.GraceSeconds > 0 {
+			line += fmt.Sprintf(" grace %ds", h.GraceSeconds)
 		}
 		out = append(out, line)
 	}

@@ -164,7 +164,7 @@ func (a *Agent) answerWants(ctx context.Context, f *Fleet, p *policy.Policy) err
 						return err
 					}
 				}
-				d := admit.Admit(p, f.Host, g, admit.Evidence{Yes: ev.Yes, Signed: admitSigned(ev.Signed)},
+				d := admit.Admit(p, f.Host, g, admit.Evidence{Yes: ev.yesFor(tier.Name), Signed: admitSigned(ev.Signed)},
 					admit.Machine{Listening: listening, ModelGuards: modelGuards}, ev.Nonce, a.now())
 				if d.OK {
 					state, why = approve.StateRefused, ev.RefusedCode

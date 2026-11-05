@@ -327,7 +327,7 @@ func TestTrialWithoutVerdict(t *testing.T) {
 func TestTrialKeep(t *testing.T) {
 	tr := newTrial(t, "backup", "")
 	g := ipoptGuard(t)
-	ev := &Evidence{Guard: g.Canonical(), Yes: &approve.Yes{Hash: g.Hash(), Tiers: []string{"A"}, Until: tr.clock.Add(time.Hour), Mode: "keep"}}
+	ev := &Evidence{Guard: g.Canonical(), Yeses: map[string]*approve.Yes{"A": {Hash: g.Hash(), Tiers: []string{"A"}, Until: tr.clock.Add(time.Hour), Mode: "keep"}}}
 	if err := tr.a.saveEvidence(g.Hash(), ev); err != nil {
 		t.Fatal(err)
 	}
@@ -426,10 +426,12 @@ func TestTrialBootWindow(t *testing.T) {
 			t.Fatal(err)
 		}
 		e := tr.entry(g)
-		if e.Status != Pending || !e.BootWindow || !e.AppliedAt.Equal(tr.clock) || tr.timer.armed[g.Hash()] != trialArm || tr.sys.settings["net.mptcp.enabled"] != "0" {
+		if e.Status != Pending || !e.BootWindow || !e.AppliedAt.Equal(tr.clock) || tr.timer.armed[g.Hash()] != tr.a.bootArm() || tr.sys.settings["net.mptcp.enabled"] != "0" {
 			t.Fatalf("after boot: %+v, armed %v, mptcp %s", e, tr.timer.armed, tr.sys.settings["net.mptcp.enabled"])
 		}
 		if failing {
+			// It came back after the boot, then failed three times in a row.
+			tr.step(time.Minute)
 			tr.fail[site] = "the boot broke it"
 			tr.step(time.Minute)
 			tr.step(time.Minute)
@@ -441,8 +443,12 @@ func TestTrialBootWindow(t *testing.T) {
 			}
 			continue
 		}
-		for i := 0; i < 9; i++ {
-			tr.step(time.Minute)
+		// The window runs from its first sample with every check back: the
+		// first tick after the boot, here.
+		for i := 0; i < 10; i++ {
+			if res := tr.step(time.Minute); len(res.Confirmed) != 0 {
+				t.Fatalf("confirmed %d minutes after the boot", i+1)
+			}
 		}
 		if res := tr.step(time.Minute); len(res.Confirmed) != 1 {
 			t.Fatalf("the boot window didn't confirm: %+v", res)
@@ -521,4 +527,214 @@ func TestTrialWaitsForCanary(t *testing.T) {
 	if res := tr.step(time.Minute); len(res.Baseline) != 1 {
 		t.Fatalf("the canary's Healthy didn't release it: %+v", res)
 	}
+}
+
+// After a boot, a check that is slow to come back (a model loading,
+// signed_last20 refilling) doesn't count against a guard until it has passed
+// once, or its grace has run out (round 5, new major 1).
+func TestBootWindowGrace(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		backAfter int // minutes after the boot the check passes; -1: never
+		undone    bool
+	}{
+		{"back after 6 minutes", 6, false},
+		{"never back", -1, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tr := newTrial(t, "backup", "")
+			g := mptcpGuard(t)
+			tr.tested(g)
+			tr.tick()
+			tr.clock = tr.clock.Add(-time.Minute)
+			tr.putOn(g)
+			for i := 0; i < 10; i++ {
+				tr.step(time.Minute)
+			}
+			tr.clock = tr.clock.Add(time.Hour)
+			tr.fail[site] = "still starting"
+			if err := tr.a.Boot(ctx); err != nil {
+				t.Fatal(err)
+			}
+			undoneAt := 0
+			for m := 1; m <= 25 && undoneAt == 0; m++ {
+				if m == c.backAfter {
+					delete(tr.fail, site)
+				}
+				res := tr.step(time.Minute)
+				if len(res.Undone) > 0 {
+					undoneAt = m
+				}
+				if len(res.Confirmed) > 0 {
+					if c.undone {
+						t.Fatalf("confirmed at minute %d with the check never back", m)
+					}
+					if m != c.backAfter+10 {
+						t.Fatalf("confirmed at minute %d, want %d (ten after it came back)", m, c.backAfter+10)
+					}
+					return
+				}
+			}
+			switch {
+			case !c.undone:
+				t.Fatalf("a slow check took it off at minute %d", undoneAt)
+			case undoneAt != 12: // grace 10 minutes, then three failures
+				t.Fatalf("taken off at minute %d, want 12", undoneAt)
+			}
+		})
+	}
+}
+
+// The later guards that came back at one boot are all watched, and share
+// the boot as their suspect: one failure takes them all off (round 5).
+func TestBootWindowGroup(t *testing.T) {
+	tr := newTrial(t, "backup", "")
+	g1 := mptcpGuard(t)
+	g2 := parse(t, `{"id": "test/ksmbd", "version": 1, "flaws": ["CVE-2099-30"],
+		"for": [{"os": "ubuntu", "releases": ["24.04"]}],
+		"blocks": [{"module": {"name": "ksmbd"}}], "breaks": "the in-kernel SMB server"}`)
+	for _, g := range []*guard.Guard{g1, g2} {
+		tr.tested(g)
+	}
+	tr.tick()
+	tr.clock = tr.clock.Add(-time.Minute)
+	first, second := g1, g2
+	if g2.Hash() < g1.Hash() {
+		first, second = g2, g1
+	}
+	tr.putOn(first)
+	for i := 0; i < 10; i++ {
+		tr.step(time.Minute)
+	}
+	// The check fails through the second guard's baseline, so it doesn't
+	// count for that guard: only the boot it shares with the first can take
+	// it off.
+	tr.fail[site] = "flaky before the second guard"
+	tr.clock = tr.clock.Add(-time.Minute)
+	tr.putOn(second)
+	delete(tr.fail, site)
+	for i := 0; i < 10; i++ {
+		tr.step(time.Minute)
+	}
+	if tr.entry(first).Status != Confirmed || tr.entry(second).Status != Confirmed {
+		t.Fatal("not both confirmed")
+	}
+	tr.clock = tr.clock.Add(time.Hour)
+	if err := tr.a.Boot(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !tr.entry(first).BootWindow || !tr.entry(second).BootWindow {
+		t.Fatal("not both in a window after the boot")
+	}
+	tr.step(time.Minute) // both back
+	tr.fail[site] = "broken after the boot"
+	tr.step(time.Minute)
+	tr.step(time.Minute)
+	res := tr.step(time.Minute)
+	if len(res.Undone) != 2 || tr.entry(first) != nil || tr.entry(second) != nil {
+		t.Fatalf("one failure after the boot should take both off: %+v", res)
+	}
+}
+
+// A window that passes starts the count of tries again (round 5).
+func TestTriesReset(t *testing.T) {
+	tr := newTrial(t, "backup", "")
+	g := ipoptGuard(t)
+	tr.tested(g)
+	tr.tick()
+	tr.clock = tr.clock.Add(-time.Minute)
+	tr.putOn(g)
+	tr.fail[site] = "x"
+	for i := 0; i < 3; i++ {
+		tr.step(time.Minute)
+	}
+	delete(tr.fail, site)
+	if tr.evidence(g).Tries != 1 {
+		t.Fatal("no try counted")
+	}
+	tr.clock = tr.clock.Add(retries[0] - time.Minute)
+	tr.putOn(g)
+	for i := 0; i < 10; i++ {
+		tr.step(time.Minute)
+	}
+	if ev := tr.evidence(g); tr.entry(g).Status != Confirmed || ev.Tries != 0 {
+		t.Fatalf("tries %d after a window passed", ev.Tries)
+	}
+}
+
+// A keep guard that bites later counts as booted once it is back on after
+// a boot (round 5, new major 2); the owner's keep for a guard in its window
+// confirms it at once (minor 5).
+func TestKeepLater(t *testing.T) {
+	tr := newTrial(t, "backup", "")
+	g := mptcpGuard(t)
+	ev := &Evidence{Guard: g.Canonical(), Yeses: map[string]*approve.Yes{"A": {Hash: g.Hash(), Tiers: []string{"A"}, Until: tr.clock.Add(24 * time.Hour), Mode: "keep"}}}
+	if err := tr.a.saveEvidence(g.Hash(), ev); err != nil {
+		t.Fatal(err)
+	}
+	tr.tick()
+	if e := tr.entry(g); e.Status != Confirmed || !e.Keep || e.Booted {
+		t.Fatalf("%+v", e)
+	}
+	if err := tr.a.Boot(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if e := tr.entry(g); e.Status != Confirmed || !e.Booted || e.BootWindow {
+		t.Fatalf("a keep guard after a boot: %+v", e)
+	}
+
+	tr2 := newTrial(t, "backup", "")
+	g2 := ipoptGuard(t)
+	tr2.tested(g2)
+	tr2.tick()
+	tr2.clock = tr2.clock.Add(-time.Minute)
+	tr2.putOn(g2)
+	if on, err := tr2.a.SetKeep(ctx, g2.Hash()); err != nil || !on {
+		t.Fatal(on, err)
+	}
+	if e := tr2.entry(g2); e.Status != Confirmed || !e.Keep {
+		t.Fatalf("keep didn't confirm a guard in its window: %+v", e)
+	}
+	if _, armed := tr2.timer.armed[g2.Hash()]; armed {
+		t.Fatal("its undo is still armed")
+	}
+}
+
+// The tier's spacing: after the canary's Healthy, each machine that isn't
+// a canary waits the spacing times its place (round 5, minor 2).
+func TestSpacing(t *testing.T) {
+	tier := &policy.Tier{Name: "A", Hosts: []string{"backup", "mail", "web", "db"}, Canaries: []string{"backup"}, SpacingSeconds: 900}
+	for host, want := range map[string]time.Duration{"backup": 0, "mail": 0, "web": 15 * time.Minute, "db": 30 * time.Minute} {
+		if got := spacing(tier, host); got != want {
+			t.Errorf("%s: %v, want %v", host, got, want)
+		}
+	}
+}
+
+// Every report lists the checks failing now, so a failure after a confirm
+// pages the owner.
+func TestReportHealth(t *testing.T) {
+	tr := newTrial(t, "backup", "")
+	tr.fail[site] = "connection refused"
+	tr.tick()
+	if h := tr.reportOf().Tick.Health; h["tcp "+site+" "] != "connection refused" {
+		t.Fatalf("health %v", h)
+	}
+}
+
+func (tr *trial) reportOf() *FleetReport {
+	tr.t.Helper()
+	b, err := ReadReport(tr.a.StateDir)
+	if err != nil {
+		tr.t.Fatal(err)
+	}
+	body, err := approve.VerifyReport(b, hex.EncodeToString(tr.keys["backup"].Public().(ed25519.PublicKey)))
+	if err != nil {
+		tr.t.Fatal(err)
+	}
+	var r FleetReport
+	if err := json.Unmarshal(body, &r); err != nil {
+		tr.t.Fatal(err)
+	}
+	return &r
 }

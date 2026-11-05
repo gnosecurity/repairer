@@ -107,6 +107,36 @@ func PrepareOff(p *policy.Policy, g *guard.Guard, hosts []string, seq uint64) (*
 		}}, nil
 }
 
+// PrepareOn readies the owner's On: it lifts an Off for a guard on some
+// hosts of a policy.
+func PrepareOn(p *policy.Policy, g *guard.Guard, hosts []string, seq uint64) (*Statement, error) {
+	for _, h := range hosts {
+		if _, ok := p.TierOf(h); !ok {
+			return nil, fmt.Errorf("signer: the policy has no host %q", h)
+		}
+	}
+	o := approve.Off{Hash: g.Hash(), Hosts: hosts}
+	if _, err := approve.ParseOn(approve.Call{Func: "On", Args: o.Args()}); err != nil {
+		return nil, err
+	}
+	memo, err := approve.MemoOn(g, o)
+	if err != nil {
+		return nil, err
+	}
+	chain, _, err := chainOf(p)
+	if err != nil {
+		return nil, err
+	}
+	return &Statement{Func: "On", Args: o.Args(), Memo: memo, Chain: chain, Seq: seq,
+		verify: func(tx, owner []byte) error {
+			got, err := approve.VerifyOn(tx, chain, seq, owner, g)
+			if err == nil && strings.Join(got.Hosts, ",") != strings.Join(hosts, ",") {
+				err = errors.New("signer: the signed On names other hosts")
+			}
+			return err
+		}}, nil
+}
+
 // PreparePolicy readies a policy change: the memo is the full diff against
 // the policy it replaces.
 func PreparePolicy(old, new *policy.Policy, seq uint64) (*Statement, error) {
@@ -295,7 +325,8 @@ type reportBody struct {
 		Hash      string    `json:"hash"`
 		FirstSeen time.Time `json:"first_seen"`
 	} `json:"pending"`
-	OwnerSeq uint64 `json:"owner_seq"`
+	OwnerSeq uint64   `json:"owner_seq"`
+	Off      []string `json:"off"`
 }
 
 // Checked is what the reports say, for the owner to read before signing.
@@ -303,6 +334,8 @@ type Checked struct {
 	Lines    []string // one per machine
 	Pending  bool     // some machine has a policy change pending
 	OwnerSeq uint64   // the highest owner sequence any agent has accepted
+	// Off holds, for each machine, the guards the owner took off there.
+	Off map[string][]string
 }
 
 // CheckReports reads each machine's signed report from dir (<host>.json),
@@ -340,6 +373,12 @@ func CheckReports(dir string, keysFrom *policy.Policy, unchecked []string, now t
 		c.Lines = append(c.Lines, line)
 		if r.Pending != nil {
 			c.Pending = true
+		}
+		if len(r.Off) > 0 {
+			if c.Off == nil {
+				c.Off = map[string][]string{}
+			}
+			c.Off[k.Host] = r.Off
 		}
 		c.OwnerSeq = max(c.OwnerSeq, r.OwnerSeq)
 	}

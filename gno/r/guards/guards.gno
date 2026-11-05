@@ -1,30 +1,33 @@
 // Package guards is the Guards realm (AUTOPATCH.md, "A swarm that holds when
 // agents lie"), version 1 with the public draw:
 //
-//   - Checkers stake tickets. A ticket can be drawn only into filings
-//     committed MinTicketAge blocks or more after it was staked, so names made
-//     for one attack can't check it.
+//   - Checkers stake tickets (tickets.gno). A ticket can be drawn only into
+//     filings committed MinTicketAge blocks or more after it was staked, so
+//     names made for one attack can't check it.
 //   - A worker commits a filing with a bond: sha256 of its address, the
 //     guard's hash, its rig transcript's own commitment and a salt, so nobody
 //     can copy the filing from the mempool and claim it.
-//   - The reveal puts the guard on chain (at most 4,000 bytes, in an event)
-//     and fixes the drand evmnet round that will draw its checkers: DrawDelay
-//     rounds after the reveal's time. Nobody can see the draw before
-//     revealing, or pick a round that suits them.
-//   - Three checkers are drawn in proportion to stake, distinct owners, never
-//     the filer. They commit their transcripts, and once all are in, every
-//     transcript is opened, the worker's too.
-//   - A transcript is opened as its hash and its verdict, "<hash> pass" or
-//     "<hash> fail". Every transcript matches, passing: the guard is
-//     "tested", written to the param lvl_<hash> that light clients prove.
-//     Matching but failing: "failed", with no level. Either way each checker
-//     is paid CheckFee from the bond, FundFee goes to the dispute fund, and
-//     the rest goes back. One differs: a dispute (dispute.gno), with the
-//     bond and the drawn tickets held until it is decided.
-//   - A drawn checker who stays silent is fined NoShowFine and replaced from a
-//     later round. A worker who stays silent loses its bond: the checkers who
-//     answered are paid from it and the rest is locked here for good (a realm
-//     can't destroy GNOT).
+//   - The reveal puts the guard on chain (at most 4,000 bytes) and fixes the
+//     drand evmnet round that will draw its checkers, DrawDelay rounds after
+//     the reveal's time, and the pool that round draws from: nobody can see
+//     the draw before revealing, pick a round, or change the pool after.
+//   - Three checkers are drawn by weight, one per owner, never the filer.
+//     They commit their transcripts, and once all are in, every transcript
+//     is opened, the worker's too, as "<hash> pass" or "<hash> fail".
+//   - Every transcript matches: agreed. For ObjectionWindow anyone may
+//     object with a bond and another transcript, which opens a dispute;
+//     otherwise Finalize ends it: passing, the guard is "tested" (the param
+//     lvl_<hash> light clients prove, written only while the live stake
+//     passes LevelFloor); failing, failed, and a level written before is
+//     pulled. Each checker is paid CheckFee from the bond, FundFee goes to
+//     the dispute fund, and the rest goes back.
+//   - One differs: a dispute (dispute.gno), then the pool's vote (pool.gno),
+//     with every bond and drawn ticket held until the last word.
+//   - A drawn checker who stays silent is fined NoShowFine: before the
+//     transcripts open it is replaced from a later round; after, the filing
+//     settles with those who answered. A worker who stays silent loses its
+//     bond: the checkers who answered are paid from it and the rest is
+//     locked here for good (a realm can't destroy GNOT).
 package guards
 
 import (
@@ -41,22 +44,27 @@ import (
 
 	"gno.land/p/autopatch/drandbn254"
 	"gno.land/p/nt/avl/v0"
+	u256 "gno.land/p/onbloc/uint256/v0"
 )
 
 // The numbers to start with (AUTOPATCH.md, "Numbers to start with"). They
-// are vars so tests can scale the windows down.
+// are vars so tests can scale them down.
 var (
-	MinTicketAge int64 = 49000      // blocks between staking a ticket and a filing it may check (~2 days)
-	RevealWindow int64 = 100        // blocks to open a commitment
-	CheckWindow  int64 = 1000       // blocks for drawn checkers to commit
-	UnbondBlocks int64 = 49000      // blocks between Unstake and Withdraw
-	Checkers           = 3          // drawn per filing
-	MinTicket    int64 = 10_000_000 // ugnot; a checker's stake is at least 10 times what checking pays
-	CheckFee     int64 = 100_000    // ugnot, paid to each checker from the filing's bond
-	FilingBond   int64 = 1_000_000  // ugnot, at least Checkers × CheckFee
-	NoShowFine   int64 = 1_000_000  // ugnot, taken from a drawn ticket that stays silent
-	DrawDelay    int64 = 20         // beacon rounds between a reveal's time and its draw (60 seconds)
-	MaxGuard           = 4000       // bytes of a guard on chain (events cap at 4,096)
+	MinTicketAge    int64 = 49000          // blocks between staking a ticket and a filing it may check (~2 days)
+	RevealWindow    int64 = 2000           // blocks to open a commitment (~2 hours)
+	CheckWindow     int64 = 2000           // blocks for drawn checkers to commit
+	DrawDeadline    int64 = 2000           // blocks after a round is fixed for its draw; under UnbondBlocks
+	UnbondBlocks    int64 = 49000          // blocks between Unstake and Withdraw
+	Checkers              = 3              // drawn per filing
+	MinTicket       int64 = 10_000_000     // ugnot; a checker's stake is at least 10 times what checking pays
+	CheckFee        int64 = 100_000        // ugnot, paid to each checker from the filing's bond
+	FilingBond      int64 = 1_000_000      // ugnot, at least Checkers × CheckFee + FundFee
+	NoShowFine      int64 = 1_000_000      // ugnot, taken from a drawn ticket that stays silent
+	DrawDelay       int64 = 20             // beacon rounds between a reveal's time and its draw (60 seconds)
+	MaxGuard              = 4000           // bytes of a guard on chain (events cap at 4,096)
+	ObjectionWindow int64 = 2000           // blocks after agreement in which anyone may object
+	ObjectionBond   int64 = 1_000_000      // ugnot an objector puts up
+	LevelFloor      int64 = 10_000_000_000 // ugnot of live stake below which no level is written
 )
 
 // drand evmnet (api.drand.sh/04f1e9062b8a81f848fded9c12306733282b2727ecced50032187751166ec8c3/info).
@@ -68,35 +76,37 @@ var (
 
 // States of a filing.
 const (
-	Committed = "committed" // waiting for the worker's reveal
-	Revealed  = "revealed"  // waiting for its beacon round and the draw
-	Drawn     = "drawn"     // the checkers' commitments and reveals
-	Rerun     = "rerun"     // transcripts differed: the same parties run it again
-	Panel     = "panel"     // waiting for a panel's beacon round and the dispute fund
-	Panelled  = "panelled"  // a panel's commitments and reveals
-	Pool      = "pool"      // no panel reached two thirds: the whole pool votes (F3)
-	Tested    = "tested"
-	Failed    = "failed"    // every transcript, or the deciding side, says the guard fails the rig
-	Forfeited = "forfeited" // the worker went silent
-	Abandoned = "abandoned" // too few staked checkers to draw; the bond went back
+	Committed  = "committed"  // waiting for the worker's reveal
+	Revealed   = "revealed"   // waiting for its beacon round and the draw
+	Drawn      = "drawn"      // the checkers' commitments and reveals
+	Agreed     = "agreed"     // every transcript matched: the objection window
+	Rerun      = "rerun"      // transcripts differed: the same parties run it again
+	Panel      = "panel"      // waiting for a panel's beacon round and the dispute fund
+	Panelled   = "panelled"   // a panel's commitments and reveals
+	Appealable = "appealable" // a panel decided: the appeal window
+	Pool       = "pool"       // to the pool's vote (pool.gno)
+	Voting     = "voting"     // the pool's vote
+	Tested     = "tested"
+	Failed     = "failed"    // the guard fails the rig, by agreement or the last word
+	Undecided  = "undecided" // the pool's vote never reached two thirds
+	Forfeited  = "forfeited" // the worker went silent
+	Abandoned  = "abandoned" // never drawn, or never answered; the bond went back
+	Pulled     = "pulled"    // a level written and then decided against
 )
 
-type ticket struct {
-	id      int
-	owner   address
-	stake   int64
-	height  int64 // staked at
-	leaving int64 // Unstake's height; 0 while staked
-	open    int   // unsettled filings it is drawn into
-}
-
 type check struct {
-	ticket     int // -1 for the worker's own transcript
+	ticket     int // -1 for the worker's own transcript, -2 for an objector
 	owner      address
 	commitment string
 	transcript string
 	revealed   bool
 	prev       string // the transcript revealed in the run before this one
+}
+
+type appeal struct {
+	who     address
+	bond    int64
+	against string // the verdict appealed
 }
 
 type filing struct {
@@ -106,29 +116,37 @@ type filing struct {
 	bond       int64
 	state      string
 	guardHash  string
-	round      uint64 // the beacon round that draws it
+	oldBelow   int    // tickets staked by committed - MinTicketAge: its draws' pool
+	round      uint64 // the beacon round that draws it now
+	fixedAt    int64  // the height that round was fixed: the pool as it was then
 	draws      int
 	drawnAt    int64
-	allIn      int64            // height the last drawn checker committed; 0 before
+	allIn      int64            // height the last commitment of the run came in; 0 before
 	checks     []*check         // [0] is the worker's transcript
 	silent     map[address]bool // owners fined for silence on it, never drawn into it again
+	verdict    string           // the agreed transcript, or a panel's word, awaiting its window
+	until      int64            // when the objection or appeal window closes
+	objector   *check           // whoever objected to an agreement, with its transcript
+	objBond    int64
 	// A dispute (dispute.gno): reruns by the same parties, then panels.
 	reruns     int
-	panelLevel int              // which of PanelSizes the next or current panel is
-	panel      []*check         // the current panel
-	served     map[address]bool // every panel's members, never drawn into it again
-	reserve    int64            // the current panel's fees, taken from the dispute fund
-	panelCost  int64            // what every panel of this dispute was paid
+	panelLevel int        // which of PanelSizes the next or current panel is
+	panels     [][]*check // every panel of the dispute, the current last
+	reserve    int64      // every panel's fees, set aside from the dispute fund
+	panelCost  int64      // what the fund set aside for this dispute (panels and the vote)
+	appeals    []appeal
+	taken      int64 // what the pool's vote took from voters who said otherwise
+	floor      bool  // decided passing while the live stake was under LevelFloor: no level written
 }
 
 // Record is an address's public record (rule 7).
 type Record struct {
 	Passed    int // its filings tested
-	Failed    int // its filings every transcript failed
+	Failed    int // its filings every account failed
 	Forfeited int // its filings lost for silence
 	Checked   int // checks it answered that settled
-	Silent    int // draws it never answered
-	Faults    int // times a dispute decided against what it said
+	Silent    int // draws or votes it never answered
+	Faults    int // times a decision went against what it said
 }
 
 var (
@@ -140,11 +158,11 @@ var (
 	records  = avl.NewTree() // address → *Record
 	beacon   = avl.NewTree() // key(round) → signature
 	burned   int64           // forfeits, fines and slashes, locked here for good
-	fund     int64           // the dispute fund: pays panels; disputes wait when it is short
+	fund     int64           // the dispute fund: pays panels and votes; disputes wait when it is short
 )
 
-// Commitment is what a filing or a check commits: sha256 of who, what kind,
-// the payload and a salt, so nobody can copy it and claim the work.
+// Commitment is what a filing, a check or a vote commits: sha256 of who,
+// what kind, the payload and a salt, so nobody can copy it and claim it.
 func Commitment(who address, kind, payload, salt string) string {
 	sum := sha256.Sum256([]byte(string(who) + "\x00" + kind + "\x00" + payload + "\x00" + salt))
 	return hex.EncodeToString(sum[:])
@@ -155,44 +173,6 @@ func Commitment(who address, kind, payload, salt string) string {
 func GuardHash(guard string) string {
 	sum := sha256.Sum256([]byte(strings.TrimSuffix(guard, "\n")))
 	return hex.EncodeToString(sum[:])
-}
-
-// StakeTicket stakes the coins sent as one checker's ticket and returns its
-// number.
-func StakeTicket(cur realm) int {
-	t := &ticket{id: nTickets, owner: caller(cur), stake: received(MinTicket), height: now()}
-	nTickets++
-	tickets.Set(key(uint64(t.id)), t)
-	chain.Emit("TicketStaked", "ticket", strconv.Itoa(t.id), "owner", string(t.owner), "stake", strconv.FormatInt(t.stake, 10))
-	return t.id
-}
-
-// Unstake stops a ticket being drawn. Withdraw returns its stake UnbondBlocks
-// later, once every check it was drawn into has settled.
-func Unstake(cur realm, id int) {
-	t := ownTicket(cur, id)
-	if t.leaving != 0 {
-		panic("guards: already unstaking")
-	}
-	t.leaving = now()
-}
-
-// Withdraw returns an unstaked ticket's stake.
-func Withdraw(cur realm, id int) {
-	t := ownTicket(cur, id)
-	switch {
-	case t.leaving == 0:
-		panic("guards: unstake first")
-	case now() < t.leaving+UnbondBlocks:
-		panic("guards: still unbonding")
-	case t.open > 0:
-		panic("guards: drawn into a check that hasn't settled")
-	case t.stake == 0:
-		panic("guards: nothing left to withdraw")
-	}
-	n := t.stake
-	t.stake = 0
-	pay(cur, t.owner, n)
 }
 
 // Commit files a guard's commitment, with the coins sent as its bond:
@@ -207,7 +187,8 @@ func Commit(cur realm, commitment string) int {
 		panic("guards: the bond can't pay its checkers and the dispute fund")
 	}
 	f := &filing{filer: caller(cur), commitment: commitment, committed: now(), bond: received(FilingBond), state: Committed,
-		silent: map[address]bool{}, served: map[address]bool{}}
+		silent: map[address]bool{}}
+	f.oldBelow = oldBelow(f.committed - MinTicketAge)
 	id := nFilings
 	nFilings++
 	filings.Set(key(uint64(id)), f)
@@ -217,7 +198,7 @@ func Commit(cur realm, commitment string) int {
 
 // Reveal opens a filing within RevealWindow: the guard itself, and its
 // transcript's commitment (the transcript is opened with the checkers').
-// It fixes the beacon round that will draw the checkers.
+// It fixes the beacon round that will draw the checkers, and the pool.
 func Reveal(cur realm, id int, guard, transcriptCommitment, salt string) {
 	f := get(id)
 	who := caller(cur)
@@ -239,8 +220,19 @@ func Reveal(cur realm, id int, guard, transcriptCommitment, salt string) {
 	f.guardHash = h
 	keepGuard(id, h, strings.TrimSuffix(guard, "\n"))
 	f.checks = []*check{{ticket: -1, owner: who, commitment: transcriptCommitment}}
-	f.state, f.round = Revealed, drawRound()
+	fixRound(f)
+	f.state = Revealed
 	chain.Emit("GuardRevealed", "filing", strconv.Itoa(id), "hash", h, "round", strconv.FormatUint(f.round, 10), "guard", strings.TrimSuffix(guard, "\n"))
+}
+
+// fixRound fixes the beacon round of a filing's next draw, DrawDelay rounds
+// after the round in progress, and the pool it draws from: as of now.
+func fixRound(f *filing) {
+	r := int64(1)
+	if t := time.Now().Unix(); t > drandGenesis {
+		r = (t-drandGenesis)/drandPeriod + 1
+	}
+	f.round, f.fixedAt = uint64(r+DrawDelay), now()
 }
 
 // Forfeit locks the bond of a filing not revealed in time.
@@ -267,22 +259,28 @@ func SubmitBeacon(cur realm, round uint64, sigHex string) {
 	beacon.Set(key(round), sig)
 }
 
-// Draw draws a revealed filing's checkers from its beacon round, in
-// proportion to stake: tickets staked MinTicketAge blocks before the filing,
-// not leaving, one per owner, never the filer's or one already on it, and
-// none whose owner went silent on it. Anyone may call it once the round is
-// submitted.
-func Draw(cur realm, id int) {
-	caller(cur)
-	f := get(id)
-	if f.state != Revealed {
-		panic("guards: not waiting for a draw")
-	}
+// roundSig is the signature of a filing's round, once submitted.
+func roundSig(f *filing) []byte {
 	v := beacon.Get(key(f.round))
 	if v == nil {
 		panic("guards: submit beacon round " + strconv.FormatUint(f.round, 10) + " first")
 	}
-	picks := pick(v.([]byte), "draw", id, f.draws, Checkers-(len(f.checks)-1), f)
+	return v.([]byte)
+}
+
+// Draw draws a revealed filing's checkers from its beacon round, by weight,
+// from the pool as it was when the round was fixed (tickets.gno), within
+// DrawDeadline of then. Anyone may call it.
+func Draw(cur realm, id int) {
+	caller(cur)
+	f := get(id)
+	switch {
+	case f.state != Revealed:
+		panic("guards: not waiting for a draw")
+	case now() > f.fixedAt+DrawDeadline:
+		panic("guards: the draw's deadline has passed; abandon it")
+	}
+	picks := pick(roundSig(f), "draw", id, f.draws, Checkers-(len(f.checks)-1), f, f.fixedAt)
 	if picks == nil {
 		panic("guards: too few staked checkers for this filing")
 	}
@@ -292,7 +290,7 @@ func Draw(cur realm, id int) {
 	}
 	f.draws++
 	f.drawnAt, f.allIn, f.state = now(), 0, Drawn
-	chain.Emit("GuardDrawn", "filing", strconv.Itoa(id), "round", strconv.FormatUint(f.round, 10), "checkers", strings.Join(owners(f), ","))
+	chain.Emit("GuardDrawn", "filing", strconv.Itoa(id), "round", strconv.FormatUint(f.round, 10), "checkers", strings.Join(owners(f.checks[1:]), ","))
 }
 
 // CommitCheck commits a transcript in the run under way:
@@ -354,14 +352,14 @@ func committers(f *filing) []*check {
 	case Drawn:
 		return f.checks[1:] // the worker's commitment came with its reveal
 	case Panelled:
-		return f.panel
+		return f.panels[len(f.panels)-1]
 	}
 	return f.checks
 }
 
 func revealers(f *filing) []*check {
 	if f.state == Panelled {
-		return f.panel
+		return f.panels[len(f.panels)-1]
 	}
 	return f.checks
 }
@@ -376,21 +374,23 @@ func findIn(cs []*check, who address) *check {
 }
 
 func kindOf(c *check) string {
-	if c.ticket < 0 {
+	if c.ticket == -1 {
 		return "transcript"
 	}
 	return "check"
 }
 
-// Settle moves a filing's run on once it can (a rerun's and a panel's in
-// dispute.gno). After the draw:
+// Settle moves a filing on once it can (a rerun's, a panel's and an
+// appeal's in dispute.gno); a panel not drawn by its deadline gets a new
+// beacon round. After the draw:
 //   - drawn checkers who never committed, once CheckWindow passed, are
-//     fined and replaced from a later round;
-//   - once every transcript is open: all match, the guard is tested (or
-//     failed) and everyone is paid; one differs, a dispute begins;
+//     fined and replaced from a later round (no transcript is open yet);
+//   - once every transcript is open: all match, agreed (the objection
+//     window); one differs, a dispute begins;
 //   - once RevealWindow passed with transcripts still shut: a silent worker
-//     forfeits its bond; silent checkers are fined, and replaced unless the
-//     open transcripts already differ.
+//     forfeits its bond; silent checkers are fined, and the filing goes on
+//     with those who answered, never with a new checker who could copy the
+//     open transcripts (round 9, minor 9).
 func Settle(cur realm, id int) string {
 	caller(cur)
 	f := get(id)
@@ -399,6 +399,16 @@ func Settle(cur realm, id int) string {
 		return settleRerun(cur, f, id)
 	case Panelled:
 		return settlePanel(cur, f, id)
+	case Appealable:
+		if now() <= f.until {
+			panic("guards: the appeal window is open")
+		}
+		return final(cur, f, id, f.verdict)
+	case Panel:
+		if now() <= f.fixedAt+DrawDeadline {
+			panic("guards: the panel can still be drawn")
+		}
+		return panelRequest(f, id) // a new round, the pool as it is now
 	case Drawn:
 	default:
 		panic("guards: nothing to settle")
@@ -408,7 +418,10 @@ func Settle(cur realm, id int) string {
 			panic("guards: still waiting for commitments")
 		}
 		dropSilent(f, func(c *check) bool { return c.commitment == "" })
-		return redraw(f, id)
+		fixRound(f)
+		f.state, f.allIn = Revealed, 0
+		chain.Emit("GuardRedraw", "filing", strconv.Itoa(id), "round", strconv.FormatUint(f.round, 10))
+		return f.state
 	}
 	all, match := agreement(f.checks)
 	if !all {
@@ -419,14 +432,17 @@ func Settle(cur realm, id int) string {
 			return workerSilent(cur, f, id)
 		}
 		dropSilent(f, func(c *check) bool { return !c.revealed })
-		if match {
-			return redraw(f, id)
+		if len(f.checks) == 1 {
+			return abandon(cur, f, id) // nobody checked it
 		}
+		_, match = agreement(f.checks)
 	}
 	if !match {
 		return dispute(f, id) // the bond and the drawn tickets stay held
 	}
-	return settleAgreed(cur, f, id)
+	f.state, f.verdict, f.until = Agreed, f.checks[0].transcript, now()+ObjectionWindow
+	chain.Emit("GuardAgreed", "filing", strconv.Itoa(id), "hash", f.guardHash, "until", strconv.FormatInt(f.until, 10))
+	return f.state
 }
 
 // agreement says whether every transcript is open, and whether the open
@@ -467,58 +483,54 @@ func workerSilent(cur realm, f *filing, id int) string {
 	return f.state
 }
 
-// settleAgreed: every party's transcript is the same. Passing, the guard is
-// tested; failing, failed with no level. Each checker is paid, the fund
-// takes FundFee, and the rest of the bond goes back.
-func settleAgreed(cur realm, f *filing, id int) string {
-	f.state = Tested
-	if verdict(f.checks[0].transcript) == "fail" {
-		f.state = Failed // the rig fails it, by every account: no level
-	} else {
-		levels.Set(f.guardHash, Tested)
-		params.SetString("lvl_"+f.guardHash, Tested)
-	}
-	bond := f.bond - FundFee
-	fund += FundFee
-	for _, c := range f.checks[1:] {
-		pay(cur, c.owner, CheckFee)
-		bond -= CheckFee
-		release(c)
-		rec(c.owner).Checked++
-	}
-	pay(cur, f.filer, bond)
-	f.bond = 0
-	if f.state == Failed {
-		rec(f.filer).Failed++
-		chain.Emit("GuardFailed", "filing", strconv.Itoa(id), "hash", f.guardHash)
-		return f.state
-	}
-	rec(f.filer).Passed++
-	chain.Emit("GuardTested", "filing", strconv.Itoa(id), "hash", f.guardHash)
-	return f.state
-}
-
-// Abandon returns the bond of a revealed filing that can never be drawn:
-// fewer distinct owners are eligible than it still needs, and eligibility
-// only shrinks. Checkers kept from an earlier draw are paid.
-func Abandon(cur realm, id int) {
+// Object disputes an agreement within its window: the objector puts up
+// ObjectionBond and says which transcript a correct run gives. The filing
+// goes to a panel; the objector is a party to its decision (round 9, new
+// major 7).
+func Object(cur realm, id int, transcript string) {
 	who := caller(cur)
 	f := get(id)
 	switch {
-	case who != f.filer:
-		panic("guards: only the filer abandons")
-	case f.state != Revealed:
-		panic("guards: not waiting for a draw")
+	case f.state != Agreed || now() > f.until:
+		panic("guards: no agreement to object to")
+	case verdict(transcript) == "" || transcript == f.verdict:
+		panic("guards: an objection is another transcript, its 64-hex hash and pass or fail")
+	case onFiling(f, who):
+		panic("guards: a party can't object to its own filing")
 	}
-	pool, _ := eligible(f)
-	distinct := map[address]bool{}
-	for _, e := range pool {
-		distinct[e.t.owner] = true
+	f.objBond = received(ObjectionBond)
+	f.objector = &check{ticket: -2, owner: who, transcript: transcript, revealed: true}
+	f.verdict, f.until = "", 0
+	chain.Emit("GuardObjected", "filing", strconv.Itoa(id), "by", string(who))
+	panelRequest(f, id)
+}
+
+// Finalize ends an agreement nobody objected to.
+func Finalize(cur realm, id int) string {
+	caller(cur)
+	f := get(id)
+	if f.state != Agreed || now() <= f.until {
+		panic("guards: no agreement to finalize")
 	}
-	if len(distinct) >= Checkers-(len(f.checks)-1) {
+	return final(cur, f, id, f.verdict)
+}
+
+// Abandon lets a filing go whose draw didn't come by its deadline (too few
+// staked owners, or nobody called it): the filer's bond goes back, less
+// FundFee, and checkers kept from an earlier draw are paid. Anyone may call
+// it (round 9, minor 10).
+func Abandon(cur realm, id int) {
+	caller(cur)
+	f := get(id)
+	if f.state != Revealed || now() <= f.fixedAt+DrawDeadline {
 		panic("guards: it can still be drawn")
 	}
-	bond := f.bond
+	abandon(cur, f, id)
+}
+
+func abandon(cur realm, f *filing, id int) string {
+	bond := f.bond - FundFee
+	fund += FundFee
 	for _, c := range f.checks[1:] {
 		pay(cur, c.owner, CheckFee)
 		bond -= CheckFee
@@ -527,33 +539,142 @@ func Abandon(cur realm, id int) {
 	pay(cur, f.filer, bond)
 	f.bond, f.state = 0, Abandoned
 	chain.Emit("GuardAbandoned", "filing", strconv.Itoa(id))
+	return f.state
+}
+
+// final is a filing's last word, t: everyone who said t is paid, and
+// everyone who said otherwise loses its bond or Slash of its stake (the
+// worker, the checkers, an objector, every panelist of every panel, an
+// appellant who appealed t). Of what is taken, ShowShare percent goes to the
+// parties who said t (who showed it), as much as the fund set aside for
+// this dispute goes back to it (the losing side pays every panel and the
+// vote), and the rest is locked for good. Passing, the guard is tested and
+// its level written, if the live stake passes LevelFloor; failing, failed,
+// and a level written before is pulled.
+func final(cur realm, f *filing, id int, t string) string {
+	taken := f.taken
+	var showers []address
+	w := f.checks[0]
+	if said(w) == t {
+		showers = append(showers, w.owner)
+		bond := f.bond - FundFee
+		fund += FundFee
+		for _, c := range f.checks[1:] {
+			if said(c) == t {
+				pay(cur, c.owner, CheckFee)
+				bond -= CheckFee
+			}
+		}
+		pay(cur, w.owner, bond)
+	} else {
+		taken += f.bond // the worker said otherwise: its whole bond
+		rec(w.owner).Faults++
+	}
+	f.bond = 0
+	for _, c := range f.checks[1:] {
+		if said(c) == t {
+			showers = append(showers, c.owner)
+			rec(c.owner).Checked++
+		} else {
+			taken += slash(c, Slash)
+			rec(c.owner).Faults++
+		}
+		release(c)
+	}
+	if o := f.objector; o != nil {
+		if o.transcript == t {
+			showers = append(showers, o.owner)
+			pay(cur, o.owner, f.objBond)
+		} else {
+			taken += f.objBond
+			rec(o.owner).Faults++
+		}
+		f.objBond = 0
+	}
+	var right []address
+	for _, p := range f.panels {
+		for _, c := range p {
+			if c.revealed && c.transcript == t {
+				pay(cur, c.owner, PanelFee)
+				f.reserve -= PanelFee
+				right = append(right, c.owner)
+			} else {
+				taken += slash(c, Slash)
+				rec(c.owner).Faults++
+			}
+			release(c)
+		}
+	}
+	for i, a := range f.appeals { // kept, settled, for the filing's page
+		if a.against == t {
+			taken += a.bond // the appeal didn't change the word
+		} else {
+			pay(cur, a.who, a.bond)
+		}
+		f.appeals[i].bond = 0
+	}
+	fund += f.reserve
+	f.reserve = 0
+	if len(showers) == 0 {
+		showers = right // only a panel said it
+	}
+	if share := taken * ShowShare / 100; len(showers) > 0 && share > 0 {
+		each := share / int64(len(showers))
+		for _, a := range showers {
+			pay(cur, a, each)
+		}
+		taken -= each * int64(len(showers))
+	}
+	refill := least(taken, f.panelCost)
+	fund += refill
+	burned += taken - refill
+	f.taken = 0
+	if verdict(t) == "pass" {
+		f.state = Tested
+		if LiveStake() >= LevelFloor {
+			setLevel(f.guardHash, Tested)
+		} else {
+			f.floor = true
+		}
+		if said(w) == t {
+			rec(w.owner).Passed++
+		}
+	} else {
+		f.state = Failed
+		if Level(f.guardHash) == Tested {
+			setLevel(f.guardHash, Pulled) // decided against: light clients see it pulled
+		}
+		if said(w) == t {
+			rec(w.owner).Failed++
+		}
+	}
+	chain.Emit("GuardDecided", "filing", strconv.Itoa(id), "hash", f.guardHash, "state", f.state)
+	return f.state
+}
+
+func setLevel(hash, level string) {
+	levels.Set(hash, level)
+	params.SetString("lvl_"+hash, level)
 }
 
 // Level is a guard's level, as the param lvl_<hash> that light clients
-// prove holds it: "tested", or "".
+// prove holds it: "tested", "pulled", or "".
 func Level(guardHash string) string {
 	v, _ := params.GetString("lvl_" + guardHash)
 	return v
 }
 
-// State says where a filing stands, the beacon round that draws it, and who
-// was drawn.
+// State says where a filing stands, the beacon round that draws it now,
+// and who its checkers are.
 func State(id int) (string, uint64, []address) {
 	f := get(id)
 	var drawn []address
-	for _, c := range f.checks {
-		if c.ticket >= 0 {
+	if len(f.checks) > 1 {
+		for _, c := range f.checks[1:] {
 			drawn = append(drawn, c.owner)
 		}
 	}
 	return f.state, f.round, drawn
-}
-
-// TicketOf says a ticket's owner, stake, the unsettled checks it is drawn
-// into, and the height it began unstaking (0 while staked).
-func TicketOf(id int) (address, int64, int, int64) {
-	t := ticketAt(id)
-	return t.owner, t.stake, t.open, t.leaving
 }
 
 // RecordOf is an address's public record.
@@ -564,7 +685,7 @@ func RecordOf(a address) Record {
 	return Record{}
 }
 
-// Burned is what forfeits and fines have locked here for good.
+// Burned is what forfeits, fines and slashes have locked here for good.
 func Burned() int64 { return burned }
 
 func caller(cur realm) address {
@@ -592,21 +713,6 @@ func pay(cur realm, to address, n int64) {
 
 func now() int64 { return runtime.ChainHeight() }
 
-// drawRound is the round DrawDelay rounds after the one in progress now.
-func drawRound() uint64 {
-	r := int64(1)
-	if t := time.Now().Unix(); t > drandGenesis {
-		r = (t-drandGenesis)/drandPeriod + 1
-	}
-	return uint64(r + DrawDelay)
-}
-
-func redraw(f *filing, id int) string {
-	f.state, f.round, f.allIn = Revealed, drawRound(), 0
-	chain.Emit("GuardRedraw", "filing", strconv.Itoa(id), "round", strconv.FormatUint(f.round, 10))
-	return f.state
-}
-
 func dropSilent(f *filing, silent func(*check) bool) {
 	keep := f.checks[:1]
 	for _, c := range f.checks[1:] {
@@ -621,87 +727,29 @@ func dropSilent(f *filing, silent func(*check) bool) {
 
 func fine(f *filing, c *check) {
 	t := ticketAt(c.ticket)
-	n := NoShowFine
-	if n > t.stake {
-		n = t.stake
-	}
-	t.stake -= n
-	burned += n
+	burned += charge(t, NoShowFine)
 	t.open--
 	f.silent[c.owner] = true
 	rec(c.owner).Silent++
 }
 
-func release(c *check) { ticketAt(c.ticket).open-- }
-
-type entry struct {
-	t   *ticket
-	out bool
+func release(c *check) {
+	if c.ticket >= 0 {
+		ticketAt(c.ticket).open--
+	}
 }
 
-func eligible(f *filing) ([]*entry, int64) {
-	on := map[address]bool{}
-	for _, c := range f.checks {
-		on[c.owner] = true
+// slash takes up to n from a check's ticket and returns what it took.
+func slash(c *check, n int64) int64 {
+	if c.ticket < 0 {
+		return 0
 	}
-	for a := range f.served {
-		on[a] = true
-	}
-	var pool []*entry
-	var total int64
-	tickets.Iterate("", "", func(_ string, v any) bool {
-		t := v.(*ticket)
-		if t.leaving == 0 && t.stake > 0 && !on[t.owner] && !f.silent[t.owner] && t.height+MinTicketAge <= f.committed {
-			pool = append(pool, &entry{t: t})
-			total += t.stake
-		}
-		return false
-	})
-	return pool, total
+	return charge(ticketAt(c.ticket), n)
 }
 
-// pick draws n tickets from the filing's eligible ones, in proportion to
-// stake, one per owner, from a beacon signature and what the draw is for;
-// nil when fewer than n distinct owners are eligible. It changes nothing.
-func pick(sig []byte, what string, id, nth, n int, f *filing) []*ticket {
-	pool, total := eligible(f)
-	seed := sha256.Sum256([]byte(string(sig) + "\x00" + what + "\x00" + strconv.Itoa(id) + "\x00" + strconv.Itoa(nth)))
-	var picks []*ticket
-	for i := 0; len(picks) < n; i++ {
-		if total <= 0 {
-			return nil
-		}
-		h := sha256.Sum256(append(seed[:], byte(i), byte(i>>8)))
-		var x uint64
-		for j := 0; j < 8; j++ {
-			x = x<<8 | uint64(h[j])
-		}
-		x %= uint64(total)
-		var p *ticket
-		for _, e := range pool {
-			if e.out {
-				continue
-			}
-			if x < uint64(e.t.stake) {
-				p = e.t
-				break
-			}
-			x -= uint64(e.t.stake)
-		}
-		for _, e := range pool { // one ticket per owner
-			if !e.out && e.t.owner == p.owner {
-				e.out = true
-				total -= e.t.stake
-			}
-		}
-		picks = append(picks, p)
-	}
-	return picks
-}
-
-func owners(f *filing) []string {
+func owners(cs []*check) []string {
 	var out []string
-	for _, c := range f.checks[1:] {
+	for _, c := range cs {
 		out = append(out, string(c.owner))
 	}
 	return out
@@ -715,22 +763,6 @@ func get(id int) *filing {
 	return v.(*filing)
 }
 
-func ticketAt(id int) *ticket {
-	v := tickets.Get(key(uint64(id)))
-	if id < 0 || v == nil {
-		panic("guards: no ticket " + strconv.Itoa(id))
-	}
-	return v.(*ticket)
-}
-
-func ownTicket(cur realm, id int) *ticket {
-	t := ticketAt(id)
-	if caller(cur) != t.owner {
-		panic("guards: not your ticket")
-	}
-	return t
-}
-
 func rec(a address) *Record {
 	if v := records.Get(string(a)); v != nil {
 		return v.(*Record)
@@ -738,6 +770,10 @@ func rec(a address) *Record {
 	r := &Record{}
 	records.Set(string(a), r)
 	return r
+}
+
+func emitTicket(what string, t *ticket) {
+	chain.Emit(what, "ticket", strconv.Itoa(t.id), "owner", string(t.owner), "stake", strconv.FormatInt(t.weight, 10))
 }
 
 // key orders numbers as text.
@@ -770,4 +806,20 @@ func mustHex(s string) []byte {
 		panic("guards: not hex")
 	}
 	return b
+}
+
+func least(a, b int64) int64 {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// mulDiv is a*b/c without overflow (round 9, minor 11).
+func mulDiv(a, b, c int64) int64 {
+	if a <= 0 || b <= 0 || c <= 0 {
+		return 0
+	}
+	x := new(u256.Uint).Mul(u256.NewUint(uint64(a)), u256.NewUint(uint64(b)))
+	return int64(new(u256.Uint).Div(x, u256.NewUint(uint64(c))).Uint64())
 }

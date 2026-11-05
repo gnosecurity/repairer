@@ -48,8 +48,15 @@ func TestRender(cur realm, t *testing.T) {
 	testing.SetRealm(u(anyone))
 	Settle(cross(cur), id)
 	page = Render("filing/0")
-	if !strings.Contains(page, "- State: tested") || !strings.Contains(page, "proves: tested") || !strings.Contains(page, "`"+ok+"`") {
-		t.Errorf("after the settle:\n%s", page)
+	for _, want := range []string{"- State: agreed", "proves: none", "- Agreed: `" + ok + "`, final after height"} {
+		if !strings.Contains(page, want) {
+			t.Errorf("the agreement's page lacks %q:\n%s", want, page)
+		}
+	}
+	finalize(t, cur, id)
+	page = Render("filing/0")
+	if !strings.Contains(page, "- State: tested") || !strings.Contains(page, "proves: tested") || !strings.Contains(page, "`"+ok+"`") || strings.Contains(page, "- Agreed:") {
+		t.Errorf("after the last word:\n%s", page)
 	}
 	if rp := Render("address/" + string(worker)); !strings.Contains(rp, "- Filings tested: 1") {
 		t.Errorf("the worker's record:\n%s", rp)

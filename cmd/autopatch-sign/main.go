@@ -10,6 +10,7 @@
 //	autopatch-sign on     -policy P.json -hosts mail GUARD.json
 //	autopatch-sign policy -policy OLD.json NEW.json
 //	autopatch-sign reboot -policy P.json -kernel 6.8.0-149-generic -until 2026-11-06T09:00:00Z web
+//	autopatch-sign check  -policy P.json CHECK.json
 //	autopatch-sign standing -policy P.json
 package main
 
@@ -29,17 +30,20 @@ import (
 	"time"
 
 	"github.com/jaekwon/autopatch/approve"
+	"github.com/jaekwon/autopatch/check"
 	"github.com/jaekwon/autopatch/guard"
 	"github.com/jaekwon/autopatch/policy"
 	"github.com/jaekwon/autopatch/signer"
 )
 
-const usage = `usage: autopatch-sign <yes|off|on|policy|cancel|reboot|standing> [flags] FILE|HASH|HOST
+const usage = `usage: autopatch-sign <yes|off|on|policy|cancel|reboot|check|standing> [flags] FILE|HASH|HOST
 
   yes    GUARD.json   the owner's yes to a guard: -tiers A,B -until RFC3339 [-mode undo|keep] [-nocanary] [-kev KEV.json]
   off    GUARD.json   take a guard off some hosts and keep it off there: -hosts mail,web
   on     GUARD.json   lift an Off on some hosts: -hosts mail (a Yes never does)
   cancel HASH         cancel a pending policy change (allowed even after you signed a change of key)
+  check  CHECK.json   run a was-I-hit check once on every machine of a system it is for (upload the
+                      check file to the lookout's page with the message)
   reboot HOST         let one machine reboot into a newer kernel, once, whatever its tier says:
                       -kernel RELEASE (as uname -r gives it) -until RFC3339 (rounded down to the minute)
   policy NEW.json     a policy change, against the policy in force (-policy); its keys are checked
@@ -248,6 +252,19 @@ func run(ctx context.Context, cmd string, args []string, stdout io.Writer) error
 				notes = append(notes, fmt.Sprintf("on %s the change takes effect in %s; if this Cancel reaches it later, that machine stays on the new policy and holds your statements until root installs the policy in force again", host, max(left, 0).Round(time.Minute)))
 			}
 		}
+	case "check":
+		b, err := os.ReadFile(fs.Arg(0))
+		if err != nil {
+			return err
+		}
+		c, err := check.Parse(b)
+		if err != nil {
+			return fmt.Errorf("%s: %w", fs.Arg(0), err)
+		}
+		if stmt, err = signer.PrepareCheck(cur, c, *seq); err != nil {
+			return err
+		}
+		notes = append(notes, "upload "+fs.Arg(0)+" to the lookout's page too: the machines wait for the check's file")
 	case "reboot":
 		host := fs.Arg(0)
 		end, err := time.Parse(time.RFC3339, *until)

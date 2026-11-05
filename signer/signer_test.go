@@ -19,6 +19,7 @@ import (
 	"github.com/decred/dcrd/dcrec/secp256k1/v4/ecdsa"
 
 	"github.com/jaekwon/autopatch/approve"
+	"github.com/jaekwon/autopatch/check"
 	"github.com/jaekwon/autopatch/guard"
 	"github.com/jaekwon/autopatch/policy"
 )
@@ -519,5 +520,53 @@ func TestPrepareReboot(t *testing.T) {
 		if _, err := bad(); err == nil {
 			t.Errorf("%s: prepared", name)
 		}
+	}
+}
+
+// The owner's Check: its memo says what the check reads, and the tool's own
+// check refuses a signed file for another check.
+func TestPrepareCheck(t *testing.T) {
+	key := secp256k1.PrivKeyFromBytes(bytes.Repeat([]byte{9}, 32))
+	pub := key.PubKey().SerializeCompressed()
+	p, err := policy.Decode([]byte(`{"fleet":"test","replaces":"","delay_seconds":86400,
+		"signers":{"me":{"name":"owner","key":"` + hex.EncodeToString(pub) + `"}},
+		"tiers":[{"name":"A","hosts":["web"],"admit":["me"]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := check.Parse([]byte(`{"id":"cve-2026-98432/hit","version":1,"flaws":["CVE-2026-98432"],"for":[{"os":"ubuntu","releases":["24.04"]}],"kind":"new-since","args":{"what":"setuid","since":"1793923200"},"flag":"a new setuid file"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := PrepareCheck(p, c, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Memo != "autopatch/1 Check cve-2026-98432/hit v1 "+c.Hash()[:16]+": setuid changed since 1793923200" {
+		t.Fatalf("%q", st.Memo)
+	}
+	sign := func(args []string, memo string) []byte {
+		const caller = "g1ss6w8xfy7vnp595yely63jqa8553k03mjcglen"
+		msg, err := approve.SignBytes(st.Chain, st.Seq, approve.Call{Caller: caller, Func: "Check", Args: args}, memo, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h := sha256.Sum256(msg)
+		tx, _ := json.Marshal(map[string]any{
+			"msg": []any{map[string]any{"@type": "/vm.m_call", "caller": caller, "send": "", "max_deposit": "",
+				"pkg_path": approve.Realm, "func": "Check", "args": args}},
+			"signatures": []any{map[string]any{"pub_key": map[string]any{"@type": "/tm.PubKeySecp256k1", "value": pub},
+				"signature": ecdsa.SignCompact(key, h[:], true)[1:]}},
+			"memo": memo,
+		})
+		return tx
+	}
+	if err := st.verify(sign(st.Args, st.Memo), pub); err != nil {
+		t.Fatal(err)
+	}
+	other, _ := check.Parse([]byte(`{"id":"cve-2026-98432/hit","version":2,"flaws":["CVE-2026-98432"],"for":[{"os":"ubuntu","releases":["24.04"]}],"kind":"deleted-exe","args":{},"flag":"x"}`))
+	memo, _ := approve.MemoCheck(other)
+	if err := st.verify(sign([]string{other.Hash()}, memo), pub); err == nil {
+		t.Fatal("a signed file for another check passed")
 	}
 }

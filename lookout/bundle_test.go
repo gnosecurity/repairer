@@ -153,3 +153,29 @@ func TestBundleInOrderOfNeed(t *testing.T) {
 	}
 	_ = context.Background
 }
+
+// A Check's file goes with the statement to every machine that takes it;
+// the page's upload takes a check file by what it is.
+func TestBundleCarriesTheCheck(t *testing.T) {
+	fl := newFleet(t)
+	store := &Store{Dir: t.TempDir()}
+	cf := `{"id":"cve-2026-98432/hit","version":1,"flaws":["CVE-2026-98432"],"for":[{"os":"ubuntu","releases":["24.04"]}],"kind":"deleted-exe","args":{},"flag":"a deleted program runs"}`
+	what, err := store.AddFile([]byte(cf))
+	if err != nil || !strings.HasPrefix(what, "check ") {
+		t.Fatalf("%q %v", what, err)
+	}
+	h := strings.TrimPrefix(what, "check ")
+	tx := `{"msg":[{"@type":"/vm.m_call","caller":"g1ss6w8xfy7vnp595yely63jqa8553k03mjcglen","send":"","max_deposit":"","pkg_path":"gno.land/r/autopatch/approve","func":"Check","args":["` + h + `"]}],"signatures":[],"memo":"x"}`
+	m, _ := json.Marshal(agent.Message{Seq: 1, Tx: json.RawMessage(tx)})
+	if _, err := store.AddMessage(m); err != nil {
+		t.Fatal(err)
+	}
+	b, err := store.Bundle("mail", []HostStatus{{Host: "mail", Report: &agent.FleetReport{Host: "mail"}}}, fl.p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bun agent.Bundle
+	if err := json.Unmarshal(b, &bun); err != nil || len(bun.Messages) != 1 || string(bun.Checks[h]) != cf {
+		t.Fatalf("%v: %d messages, check %q", err, len(bun.Messages), bun.Checks[h])
+	}
+}

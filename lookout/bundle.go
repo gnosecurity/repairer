@@ -12,6 +12,7 @@ import (
 
 	"github.com/jaekwon/autopatch/agent"
 	"github.com/jaekwon/autopatch/approve"
+	"github.com/jaekwon/autopatch/check"
 	"github.com/jaekwon/autopatch/guard"
 	"github.com/jaekwon/autopatch/policy"
 )
@@ -59,6 +60,15 @@ func (s *Store) AddGuard(b []byte) (string, error) {
 		return "", err
 	}
 	return g.Hash(), s.put(s.path("guards", g.Hash()+".json"), g.Canonical())
+}
+
+// AddCheck keeps a was-I-hit check file, canonical, by its hash.
+func (s *Store) AddCheck(b []byte) (string, error) {
+	c, err := check.Parse(b)
+	if err != nil {
+		return "", err
+	}
+	return c.Hash(), s.put(s.path("checks", c.Hash()+".json"), c.Canonical())
 }
 
 // AddPolicy keeps a policy file, canonical, by its hash.
@@ -110,8 +120,11 @@ func (s *Store) AddFile(b []byte) (string, error) {
 	case probe["tiers"] != nil:
 		h, err := s.AddPolicy(b)
 		return "policy " + h, err
+	case probe["kind"] != nil && probe["args"] != nil:
+		h, err := s.AddCheck(b)
+		return "check " + h, err
 	}
-	return "", errors.New("lookout: not a message, a signed statement, a guard or a policy")
+	return "", errors.New("lookout: not a message, a signed statement, a guard, a policy or a check")
 }
 
 // Guard returns a kept guard file.
@@ -163,7 +176,7 @@ func (s *Store) Bundle(host string, sts []HostStatus, p *policy.Policy) ([]byte,
 	if me == nil {
 		return nil, fmt.Errorf("lookout: no report from %s, so no way to know what it has", host)
 	}
-	b := agent.Bundle{Guards: map[string][]byte{}, Policies: map[string][]byte{}}
+	b := agent.Bundle{Guards: map[string][]byte{}, Policies: map[string][]byte{}, Checks: map[string][]byte{}}
 	used := 512
 	fits := func(v any) bool {
 		j, err := json.Marshal(v)
@@ -231,6 +244,12 @@ func (s *Store) addMessages(b *agent.Bundle, me *agent.FleetReport, fits func(an
 			case "Policy":
 				if pb, err := os.ReadFile(s.path("policies", tx.Msg[0].Args[0]+".json")); err == nil && fits(pb) {
 					b.Policies[tx.Msg[0].Args[0]] = pb
+				}
+			case "Check":
+				if h := tx.Msg[0].Args[0]; isHash(h) {
+					if cb, err := os.ReadFile(s.path("checks", h+".json")); err == nil && fits(cb) {
+						b.Checks[h] = cb
+					}
 				}
 			}
 		}

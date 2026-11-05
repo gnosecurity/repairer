@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/jaekwon/autopatch/approve"
+	"github.com/jaekwon/autopatch/check"
 	"github.com/jaekwon/autopatch/guard"
 	"github.com/jaekwon/autopatch/policy"
 )
@@ -156,6 +157,26 @@ func PrepareCancel(cur *policy.Policy, pending string, seq uint64) (*Statement, 
 				err = errors.New("signer: the signed Cancel says something else")
 			}
 			return err
+		}}, nil
+}
+
+// PrepareCheck readies the owner's Check: every machine of a system the
+// check is for runs it once and reports what it found.
+func PrepareCheck(p *policy.Policy, c *check.Check, seq uint64) (*Statement, error) {
+	if err := c.Validate(); err != nil {
+		return nil, err
+	}
+	memo, err := approve.MemoCheck(c)
+	if err != nil {
+		return nil, err
+	}
+	chain, _, err := chainOf(p)
+	if err != nil {
+		return nil, err
+	}
+	return &Statement{Func: "Check", Args: []string{c.Hash()}, Memo: memo, Chain: chain, Seq: seq,
+		verify: func(tx, owner []byte) error {
+			return approve.VerifyCheck(tx, chain, seq, owner, c)
 		}}, nil
 }
 

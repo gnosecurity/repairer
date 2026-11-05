@@ -6,7 +6,7 @@
 # pass or fail and sorted evidence. Single-VM rig (D1a): the traffic checks
 # that need a client VM and a router are listed as not run.
 #
-# Needs: RIG (the rig directory: images/, seed.iso, rig_ed25519) and AGENT
+# Needs: RIG (the rig directory: images/, debs/, seed.iso, rig_ed25519) and AGENT
 # (the autopatch-agent binary). Touches nothing outside $RIG/runs. QEMU's
 # version is pinned (RIG_QEMU), so the rig hash names a rig anyone can rerun
 # on other hardware; the CPU and QEMU go beside the transcript in OUT.env.json.
@@ -21,6 +21,14 @@ read -r imgfile imgsum < <(awk -F'\t' -v s="$RIG_IMAGE" '$1 == s {print $2, $3}'
 [ -n "${imgfile:-}" ] || { echo "rig.sh: no image pinned for $RIG_IMAGE" >&2; exit 1; }
 img=$R/images/$imgfile
 [ "$(sha256sum "$img" | cut -d' ' -f1)" = "$imgsum" ] || { echo "rig.sh: $imgfile isn't the pinned image" >&2; exit 1; }
+# The packages this image needs added (debs.tsv: nftables where the image
+# lacks it), each checked against its pin; installed before the agent.
+debs=()
+while IFS=$'\t' read -r dsys dfile dsum _; do
+  [ "$dsys" = "$RIG_IMAGE" ] || continue
+  [ "$(sha256sum "$R/debs/$dfile" | cut -d' ' -f1)" = "$dsum" ] || { echo "rig.sh: $dfile isn't the pinned package" >&2; exit 1; }
+  debs+=("$R/debs/$dfile")
+done < <(grep -v '^#' "$here/debs.tsv")
 qv=$(qemu-system-x86_64 --version | head -1 | awk '{print $4}')
 if [ "$qv" != "${RIG_QEMU:-8.2.2}" ]; then echo "rig.sh: QEMU $qv, but the rig pins ${RIG_QEMU:-8.2.2}" >&2; exit 1; fi
 python3 -I -c 'import json,sys; print(json.dumps({"cpu": next((l.split(":",1)[1].strip() for l in open("/proc/cpuinfo") if l.startswith("model name")), ""), "qemu": sys.argv[1]}, sort_keys=True))' "$qv" > "$outfile.env.json"
@@ -98,6 +106,11 @@ if [ "$two" = 1 ]; then
     echo "$base" >&2
     exit 3
   fi
+fi
+if [ ${#debs[@]} -gt 0 ]; then
+  "${S[@]}" 'mkdir -p debs' < /dev/null
+  "${CP[@]}" "${debs[@]}" rig@127.0.0.1:debs/
+  "${S[@]}" 'sudo dpkg -i debs/*.deb >/dev/null && rm -rf debs' < /dev/null || { echo "rig.sh: the pinned packages didn't install" >&2; exit 1; }
 fi
 "${S[@]}" 'sudo install -o root -g root -m 0755 autopatch-agent /usr/local/sbin/autopatch-agent && sudo /usr/local/sbin/autopatch-agent install >/dev/null && for i in $(ls /sys/class/net); do [ "$i" = lo ] || sudo ip link set dev "$i" mtu 1280; done'
 A="sudo /usr/local/sbin/autopatch-agent"

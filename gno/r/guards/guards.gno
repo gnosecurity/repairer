@@ -23,8 +23,9 @@
 //     object with a bond and another transcript, which opens a dispute;
 //     otherwise Finalize ends it: passing, the guard is "tested" on that
 //     system (the param lvl_<hash>_<system> light clients prove, written
-//     only if the weight its draw could take passed LevelFloor when the
-//     round was fixed, and never over "pulled");
+//     only if the stake of its pool not leaving when the round was fixed,
+//     the worker's own included, passed LevelFloor, and never over
+//     "pulled");
 //     failing, failed, and a level written before is pulled. Each checker is
 //     paid CheckFee from the bond, FundFee goes to the dispute fund, and the
 //     rest goes back.
@@ -72,7 +73,7 @@ var (
 	MaxGuard              = 4000           // bytes of a guard on chain (events cap at 4,096)
 	ObjectionWindow int64 = 2000           // blocks after agreement in which anyone may object
 	ObjectionBond   int64 = 1_000_000      // ugnot an objector puts up
-	LevelFloor      int64 = 10_000_000_000 // ugnot of weight a filing's draw could take, below which no level is written
+	LevelFloor      int64 = 10_000_000_000 // ugnot of a filing's pool's stake not leaving at its fix, below which no level is written
 )
 
 // drand evmnet (api.drand.sh/04f1e9062b8a81f848fded9c12306733282b2727ecced50032187751166ec8c3/info).
@@ -130,9 +131,10 @@ type filing struct {
 	oldBelow   int    // tickets staked by committed - MinTicketAge: its draws' pool
 	round      uint64 // the beacon round that draws it now
 	fixedAt    int64  // the height that round was fixed
+	leaveMark  int    // leaves when it was fixed: a ticket that began leaving by then isn't drawn
 	total      int64  // the weight below oldBelow then, which its draw reads (tickets.gno)
 	waiting    bool   // its round waits for a draw: the tree holds still below oldBelow
-	floorAt    int64  // the weight its first draw could take, not leaving, when fixed: the level's floor (round 11, minor 7)
+	floorAt    int64  // its pool's weight not leaving when its first round was fixed, the worker's own included: the level's floor (round 11, minor 7)
 	draws      int
 	drawnAt    int64
 	allIn      int64            // height the last commitment of the run came in; 0 before
@@ -256,7 +258,7 @@ func fixRound(f *filing, id int) {
 	if t := time.Now().Unix(); t > drandGenesis {
 		r = (t-drandGenesis)/drandPeriod + 1
 	}
-	f.round, f.fixedAt = uint64(r+DrawDelay), now()
+	f.round, f.fixedAt, f.leaveMark = uint64(r+DrawDelay), now(), leaves
 	f.total, _, _, _ = below(f.oldBelow)
 	f.waiting = true
 	waits.Set(waitKey(f, id), true)
@@ -641,8 +643,9 @@ func abandon(cur realm, f *filing, id int, refund bool) string {
 
 // final is a filing's last word, t: settle pays and charges everyone by
 // it, and the guard is tested or failed on the filing's system. Passing,
-// its level is written if the weight its first draw could take passed
-// LevelFloor (round 11, minor 7), but never over "pulled": a guard decided
+// its level is written if its pool's weight not leaving when its first
+// round was fixed (the worker's own included) passed LevelFloor (round 11,
+// minor 7; round 13, minor 5), but never over "pulled": a guard decided
 // against comes back as a new version (round 10, minor 5). Failing, a
 // level written before is pulled.
 func final(cur realm, f *filing, id int, t string) string {

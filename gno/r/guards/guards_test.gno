@@ -967,7 +967,7 @@ func TestSettleVotesInSteps(cur realm, t *testing.T) {
 	Unstake(cross(cur), 0)
 	testing.SkipHeights(UnbondBlocks)
 	refuses(t, "more than 1 votes to settle; call SettleVotes first", func() { Withdraw(cross(cur), 0) })
-	if left := SettleVotes(cross(cur), 0); left != 1 {
+	if left := SettleVotes(cross(cur), 0, 0); left != 1 {
 		t.Fatalf("%d votes left to settle", left)
 	}
 	a := bal(alice)

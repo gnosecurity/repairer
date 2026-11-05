@@ -218,15 +218,19 @@ func leave(t *ticket) {
 // call walks every vote ever opened (round 10, minor 6).
 var MaxSettle = 64
 
-// SettleVotes settles up to MaxSettle of a ticket's pool votes, in order,
-// and says how many are left: a ticket with more to settle than Withdraw
-// settles calls it first. Anyone may call it for any ticket, so a ticket
-// that voted wrong or not at all is charged without its owner, and one left
-// under half its weight leaves (round 12, minor 2).
-func SettleVotes(cur realm, id int) int {
+// SettleVotes settles up to n of a ticket's pool votes (MaxSettle if n is
+// 0 or more), in order, and says how many are left: a ticket with more to
+// settle than Withdraw settles calls it first, in as many steps as it
+// needs (round 13, new major 1). Anyone may call it for any ticket, so a
+// ticket that voted wrong or not at all is charged without its owner, and
+// one left under half its weight leaves (round 12, minor 2).
+func SettleVotes(cur realm, id, n int) int {
 	caller(cur)
 	t := ticketAt(id)
-	settleVotes(t, MaxSettle)
+	if n <= 0 || n > MaxSettle {
+		n = MaxSettle
+	}
+	settleVotes(t, n)
 	return len(allVotes) - t.votes
 }
 
@@ -295,13 +299,15 @@ func oldBelow(h int64) int {
 	return lo
 }
 
-// eligibleFor says whether a ticket may be drawn into a filing whose round
-// was fixed at height fixed: old enough, not leaving then, and not fined for
-// silence on it; a checker also not a party to it. Panel seats are drawn
-// from every party's stake too, so the liars' share of the seats is their
-// share of the stake (round 11, new major 1).
-func eligibleFor(f *filing, t *ticket, fixed int64, seats bool) bool {
-	return !t.gone && t.id < f.oldBelow && (t.leaving == 0 || t.leaving > fixed) &&
+// eligibleFor says whether a ticket may be drawn into a filing's round:
+// old enough, not leaving when the round was fixed (by the leave counter,
+// so a leave later in the fix's own block is after it, as the floor and the
+// draw's total count it; round 13, minor 2), and not fined for silence on
+// it; a checker also not a party to it. Panel seats are drawn from every
+// party's stake too, so the liars' share of the seats is their share of
+// the stake (round 11, new major 1).
+func eligibleFor(f *filing, t *ticket, seats bool) bool {
+	return !t.gone && t.id < f.oldBelow && (t.leftNo == 0 || t.leftNo > f.leaveMark) &&
 		!f.silent[t.owner] && (seats || !party(f, t.owner))
 }
 
@@ -334,7 +340,7 @@ func pick(sig []byte, what string, id, nth, n int, f *filing, seats bool) []*tic
 			x = x<<8 | uint64(h[j])
 		}
 		t := ticketAt(sumFindAside(sumRoot, int64(x%uint64(total)), aside))
-		if !eligibleFor(f, t, f.fixedAt, seats) || (!seats && chosen[t.owner]) {
+		if !eligibleFor(f, t, seats) || (!seats && chosen[t.owner]) {
 			setAside(aside, t.id, t.weight)
 			total -= t.weight
 			continue

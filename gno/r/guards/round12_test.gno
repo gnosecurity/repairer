@@ -97,7 +97,7 @@ func TestVoteHoldsOnlyWhoStayed(cur realm, t *testing.T) {
 		t.Fatalf("the vote: %s", s)
 	}
 	f0 := FundBalance()
-	SettleVotes(cross(cur), yi) // anyone may settle another's charges
+	SettleVotes(cross(cur), yi, 0) // anyone may settle another's charges
 	if stakeOf(yi) != MinTicket-MinTicket*AbstainShare/100 || FundBalance()-f0 != MinTicket*AbstainShare/100 {
 		t.Errorf("y's stake %d, the fund +%d", stakeOf(yi), FundBalance()-f0)
 	}

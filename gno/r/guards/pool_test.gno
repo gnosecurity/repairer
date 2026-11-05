@@ -90,7 +90,8 @@ func TestPoolDecides(cur realm, t *testing.T) {
 		CommitVote(cross(cur), id, itoa(i), Commitment(a, "vote", sayV(a), "v"))
 	}
 	testing.SetRealm(u(owners[0]))
-	refuses(t, "already committed", func() { CommitVote(cross(cur), id, "0", Commitment(owners[0], "vote", ok, "w")) })
+	refuses(t, "only with that same commitment", func() { CommitVote(cross(cur), id, "0", Commitment(owners[0], "vote", ok, "w")) })
+	refuses(t, "already voted", func() { CommitVote(cross(cur), id, "0", Commitment(owners[0], "vote", sayV(owners[0]), "v")) })
 	refuses(t, "votes open when the commit window closes", func() { RevealVote(cross(cur), id, sayV(owners[0]), "v") })
 	testing.SetRealm(u(anyone))
 	refuses(t, "the vote is still open", func() { Tally(cross(cur), id) })
@@ -393,7 +394,7 @@ func TestPoolStallGivesBondsBack(cur realm, t *testing.T) {
 	if FundBalance() != PoolFee+int64(size)*PanelFee || Burned() != 0 {
 		t.Errorf("fund %d, burned %d", FundBalance(), Burned())
 	}
-	if !strings.Contains(Render("filing/"+itoa(id)), "every bond went back") {
+	if !strings.Contains(Render("filing/"+itoa(id)), "the bonds went back, less each answering checker's fee") {
 		t.Errorf("the filing's page:\n%s", Render("filing/"+itoa(id)))
 	}
 }

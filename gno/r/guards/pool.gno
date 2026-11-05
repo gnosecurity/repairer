@@ -11,30 +11,35 @@ import (
 // The pool's vote (AUTOPATCH.md, the swarm's rule 3): the last word on a
 // dispute no panel decided or a panel's word appealed past the largest.
 // Every ticket staked MinTicketAge before the filing and not leaving when
-// the vote opens votes with its weight: its owner commits once, naming its
-// tickets, then reveals after the commit window. A transcript revealed with more than a
-// third of all that weight, when no other is, wins, and the dispute ends as
-// a panel's would (final) (round 11, new major 1). Liars under a third
-// can't make a transcript win alone, and honest runs agree byte for byte,
-// so one that holds over a third has honest weight behind it and is right;
-// only more than half the honest weight staying away stalls the vote.
+// the vote opens votes with its weight: its owner commits, naming its
+// tickets (in more calls if they are many, each with the same commitment;
+// round 13, minor 3), then reveals after the commit window. A transcript
+// revealed with more than a third of the vote's weight, the stake not
+// leaving when it opened (round 13, minor 1), when no other is, wins, and
+// the dispute ends as a panel's would (final) (round 11, new major 1).
+// Liars under a third of that weight can't make a transcript win alone,
+// and honest runs agree byte for byte, so one that holds over a third has
+// honest weight behind it and is right; only more than half the honest
+// weight staying away stalls the vote.
 //
 // No call walks every ticket or every voter (round 9, new major 6): the
 // total is the stake tree's sum, revealed weight is kept as it comes in,
-// winners claim their share of PoolFee by weight, and each ticket's charge
-// is settled when it is withdrawn, or by anyone once the vote has closed
-// (round 12, minor 2): AbstainShare percent for a ticket that didn't vote
-// (decided or not: a stall is the abstainers'), WrongShare percent, and at
-// least the voter's share of Slash, for one that voted what wasn't decided
-// (round 9, minor 11), each to the fund (round 11, minor 3). A vote holds
-// the tickets in it: none can leave until it closes. A ticket leaving
-// before a vote opens isn't in it, so a leaving ticket waits only for votes
-// already open, which close within UnbondBlocks (round 12, new major 1). A
-// vote that stalls decides nothing: no level, every bond back but CheckFee
-// for each checker that answered, no seat paid, nobody charged but the
-// abstainers, and no panel's word settles any money (round 11, new major
-// 1; round 12, minor 3). What winners leave unclaimed for PoolClaimWindow
-// goes to the fund.
+// winners claim their share of PoolFee by weight, voters are kept in a
+// tree, so finding one reads one path (round 13, new major 1), and each
+// ticket's charge is settled when it is withdrawn, or by anyone once the
+// vote has closed (round 12, minor 2): AbstainShare percent for a ticket
+// that didn't vote (decided or not: a stall is the abstainers'), WrongShare
+// percent, and at least the voter's share of Slash, for one that voted what
+// wasn't decided (round 9, minor 11), each to the fund (round 11, minor 3).
+// A vote holds the tickets in it: none can be withdrawn until it closes. A
+// ticket leaving before a vote opens isn't in it, so a leaving ticket waits
+// only for votes already open, which close within UnbondBlocks (round 12,
+// new major 1). A vote that stalls decides nothing: no level, the bonds
+// back but CheckFee from the filer's for each checker that answered, no
+// seat paid, and no panel's word settles any money; the abstainers are
+// charged, and fines for silence already taken stand (round 11, new major
+// 1; round 12, minor 3; round 13, minor 5). What winners leave unclaimed
+// for PoolClaimWindow goes to the fund.
 var (
 	PoolCommitWindow int64 = 10000      // blocks (about 10 hours)
 	PoolRevealWindow int64 = 5000       // blocks
@@ -63,7 +68,7 @@ type poolVote struct {
 	reveals   int
 	by        map[string]int64 // transcript → revealed weight
 	order     []string         // transcripts in the order first revealed: ties go to the first
-	voters    map[address]*voter
+	voters    *avl.Tree // owner → *voter: one path read per lookup (round 13, new major 1)
 	voted     *avl.Tree // key(ticket) → true
 	closed    bool
 	closedAt  int64
@@ -99,7 +104,7 @@ func OpenPool(cur realm, id int) string {
 	fund -= PoolFee
 	f.panelCost += PoolFee
 	v := &poolVote{filing: id, open: now(), leaveMark: leaves, oldBelow: f.oldBelow, total: total, by: map[string]int64{},
-		voters: map[address]*voter{}, voted: avl.NewTree(), pot: PoolFee}
+		voters: avl.NewTree(), voted: avl.NewTree(), pot: PoolFee}
 	votes[id] = v
 	openVotes = append(openVotes, len(allVotes))
 	allVotes = append(allVotes, v)
@@ -110,19 +115,25 @@ func OpenPool(cur realm, id int) string {
 
 // CommitVote commits an owner's vote with the tickets it names
 // ("3,17,42"), each its own, staked MinTicketAge before the filing and not
-// withdrawn: Commitment(owner, "vote", transcript, salt).
+// leaving when the vote opened: Commitment(owner, "vote", transcript, salt).
+// An owner with more tickets than one call can name commits again with the
+// same commitment, naming more (round 13, minor 3).
 func CommitVote(cur realm, id int, ticketList, commitment string) {
 	who := caller(cur)
 	v := openVote(id)
+	vt := v.voterOf(who)
 	switch {
 	case now() > v.open+PoolCommitWindow:
 		panic("guards: the vote's commit window has passed")
 	case !isHex(commitment, 64):
 		panic("guards: a commitment is 64 hex digits")
-	case v.voters[who] != nil:
-		panic("guards: already committed")
+	case vt != nil && vt.commitment != commitment:
+		panic("guards: more tickets join your commitment only with that same commitment")
 	}
-	vt := &voter{commitment: commitment}
+	first := vt == nil
+	if first {
+		vt = &voter{commitment: commitment}
+	}
 	for _, s := range strings.Split(ticketList, ",") {
 		tid, err := strconv.Atoi(strings.TrimSpace(s))
 		if err != nil {
@@ -141,8 +152,18 @@ func CommitVote(cur realm, id int, ticketList, commitment string) {
 		vt.weight += t.weight
 		vt.tickets = append(vt.tickets, tid)
 	}
-	v.voters[who] = vt
-	v.committed++
+	if first {
+		v.voters.Set(string(who), vt)
+		v.committed++
+	}
+}
+
+// voterOf is an owner's vote in v, or nil.
+func (v *poolVote) voterOf(a address) *voter {
+	if x := v.voters.Get(string(a)); x != nil {
+		return x.(*voter)
+	}
+	return nil
 }
 
 // RevealVote opens a vote, once the commit window has closed and before the
@@ -159,7 +180,7 @@ func RevealVote(cur realm, id int, transcript, salt string) {
 	case verdict(transcript) == "":
 		panic("guards: a transcript is its 64-hex hash and pass or fail")
 	}
-	vt := v.voters[who]
+	vt := v.voterOf(who)
 	if vt == nil {
 		panic("guards: no vote of yours was committed")
 	}
@@ -204,7 +225,7 @@ func Tally(cur realm, id int) string {
 			over++
 		}
 	}
-	if over != 1 { // a stall: nothing decided, every bond back
+	if over != 1 { // a stall: nothing decided; the bonds back but the checkers' fees
 		fund += v.pot
 		f.panelCost -= v.pot
 		v.pot = 0
@@ -221,7 +242,7 @@ func ClaimVote(cur realm, id int) int64 {
 	if v == nil || !v.closed || v.decided == "" {
 		panic("guards: no decided vote on this filing")
 	}
-	vt := v.voters[who]
+	vt := v.voterOf(who)
 	if vt == nil || !vt.revealed || vt.transcript != v.decided || vt.claimed {
 		panic("guards: nothing of yours to claim")
 	}
@@ -248,10 +269,10 @@ func SweepVote(cur realm, id int) int64 {
 	return n
 }
 
-// undecided ends a dispute whose vote stalled: no level, nobody charged
-// for the dispute, every bond back, every ticket let go. Each checker that
-// answered is paid CheckFee from the bond for running the rig, as an
-// abandon pays it (round 12, minor 3); no panel seat is paid.
+// undecided ends a dispute whose vote stalled: no level, the bonds back,
+// every ticket let go. Each checker that answered is paid CheckFee from the
+// filer's bond for running the rig, as an abandon pays it (round 12, minor
+// 3); no panel seat is paid. Fines for silence already taken stand.
 func undecided(cur realm, f *filing, id int) string {
 	fund += f.reserve
 	f.reserve = 0
@@ -326,8 +347,14 @@ func settleVotes(t *ticket, max int) {
 		if !v.closed {
 			return
 		}
-		vt := v.voters[t.owner]
-		voted := v.voted.Has(key(uint64(t.id))) && vt != nil && vt.revealed
+		// The ticket's own entry first: an abstainer's charge reads no voter
+		// (round 13, new major 1).
+		voted := v.voted.Has(key(uint64(t.id)))
+		var vt *voter
+		if voted {
+			vt = v.voterOf(t.owner)
+			voted = vt != nil && vt.revealed
+		}
 		switch {
 		case !voted:
 			fund += charge(t, t.stake*AbstainShare/100)
@@ -344,8 +371,12 @@ func settleVotes(t *ticket, max int) {
 // VoteOf says an owner's weight in a filing's vote and whether it revealed.
 func VoteOf(id int, a address) (int64, bool) {
 	v := votes[id]
-	if v == nil || v.voters[a] == nil {
+	if v == nil {
 		return 0, false
 	}
-	return v.voters[a].weight, v.voters[a].revealed
+	vt := v.voterOf(a)
+	if vt == nil {
+		return 0, false
+	}
+	return vt.weight, vt.revealed
 }

@@ -111,13 +111,13 @@ func renderFiling(id int) string {
 		b.WriteString("- " + what + ": `" + f.verdict + "`, final after height " + strconv.FormatInt(f.until, 10) + " unless someone objects or appeals\n")
 	}
 	if f.floor {
-		b.WriteString("- Decided passing, but the weight its draw could take was under the floor: no level written\n")
+		b.WriteString("- Decided passing, but its pool's stake not leaving when it was drawn was under the floor: no level written\n")
 	}
 	if f.pulled {
 		b.WriteString("- Decided passing after its level was pulled: the pull stands; a fixed guard is filed as a new version\n")
 	}
 	if f.state == Undecided {
-		b.WriteString("- The pool's vote found no transcript over a third of its weight with no rival: every bond went back, and no level was written or pulled\n")
+		b.WriteString("- The pool's vote found no transcript over a third of its weight with no rival: the bonds went back, less each answering checker's fee from the filer's, and no level was written or pulled\n")
 	}
 	if o := f.objector; o != nil {
 		b.WriteString("- Objected to by " + link(o.owner) + ": `" + o.transcript + "`\n")

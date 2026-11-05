@@ -90,7 +90,12 @@ func testPage(t *testing.T, w testWallet) (*Server, *httptest.Server, ed25519.Pr
 		Time: now.Add(-2 * time.Minute), Policy: p.Hash(),
 		Pending:  &agent.PendingReport{Hash: strings.Repeat("ab", 32), FirstSeen: now.Add(-time.Hour)},
 		OnTheWay: []agent.OnTheWay{{Hash: strings.Repeat("cd", 32), Name: "cve-2099-1/test v1", Ask: true, Last: "health failed 3 times in a row"}},
-		Hits:     []agent.HitResult{{Check: strings.Repeat("ef", 32), Name: "cve-2099-1/hit v1", Ran: now.Add(-time.Hour), Flag: true, Count: 1, Paths: []string{"/var/tmp/.s"}}}}
+		Hits:     []agent.HitResult{{Check: strings.Repeat("ef", 32), Name: "cve-2099-1/hit v1", Ran: now.Add(-time.Hour), Flag: true, Count: 1, Paths: []string{"/var/tmp/.s"}}},
+		Tick:     &agent.TickResult{Reboot: "a reboot into 6.8.0-149-generic is owed; it waits for the window 03:00-04:00 UTC"},
+		Facts: &agent.Report{OS: agent.OSFacts{ID: "ubuntu", Version: "25.04", EOL: "2026-01-15"},
+			Kernel:  agent.Kernel{Newest: "6.8.0-149.149", DKMSMissing: []string{"mlnx-ofed"}},
+			Updates: agent.Updates{DpkgAudit: []string{"linux-image-6.8.0-149-generic: half configured"}, KeptBack: []string{"openssl", "sudo"}, LastUnattended: now.Add(-14 * 24 * time.Hour)},
+			Disk:    []agent.Disk{{Path: "/boot", Free: 300 << 20}, {Path: "/", Free: 500 << 20}, {Path: "/var", Free: 20 << 30}}}}
 	body, _ := json.Marshal(rep)
 	signed, _ := json.Marshal(approve.SignReport(key, body))
 	col := &lookout.Collector{Policy: p, Dir: t.TempDir(), Now: clock,
@@ -189,10 +194,21 @@ func TestSignInAndDashboard(t *testing.T) {
 	_, body = get(t, ts, "/admin", ck)
 	for _, want := range []string{"mail", "2 min ago", "PENDING", "waiting for you: health failed 3 times in a row", "cve-2099-1/test v1",
 		"<td>web</td>", "no agent key in the policy yet", // a machine that can't report yet is listed
-		"was I hit: cve-2099-1/hit v1 (2026-11-05 11:00 UTC): FLAGGED, 1 found: /var/tmp/.s"} {
+		"was I hit: cve-2099-1/hit v1 (2026-11-05 11:00 UTC): FLAGGED, 1 found: /var/tmp/.s",
+		// November's failures, which the plan says the page shows
+		"reboot: a reboot into 6.8.0-149-generic is owed; it waits for the window 03:00-04:00 UTC",
+		"ubuntu 25.04 has had no fixes since its support ended on 2026-01-15",
+		"updates are stuck: dpkg --audit says linux-image-6.8.0-149-generic: half configured",
+		"unattended-upgrades keeps back 2 package(s): openssl, sudo",
+		"unattended-upgrades last ran 2026-10-22 12:00 UTC",
+		"the newest kernel, 6.8.0-149.149, lacks its driver builds: mlnx-ofed",
+		"only 500 MB free on /<"} { // room enough for a kernel on /boot, not for updates on /
 		if !strings.Contains(body, want) {
 			t.Errorf("the dashboard lacks %q", want)
 		}
+	}
+	if strings.Contains(body, "free on /boot") || strings.Contains(body, "free on /var") {
+		t.Errorf("a disk with room flagged: %s", body)
 	}
 }
 

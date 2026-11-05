@@ -171,6 +171,13 @@ type machineRow struct {
 	Failing []string
 	Wants   int
 	Hits    []hitRow // the newest result of each was-I-hit check run there
+	// Reboot is the agent's reboot step, in its words: a reboot owed and why
+	// it waits, or one under way (B3); RebootBad marks one that needs you.
+	Reboot    string
+	RebootBad bool
+	// Facts are the problems behind November's failures that the machine's
+	// facts show, in words (AUTOPATCH-BRIEF.md, section 1).
+	Facts []string
 }
 
 // hitRow is one was-I-hit result, in words.
@@ -213,7 +220,10 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 					row.Failing = append(row.Failing, k+": "+why)
 				}
 				sort.Strings(row.Failing)
+				row.Reboot = rep.Tick.Reboot
+				row.RebootBad = rebootNeedsYou(rep.Tick.Reboot)
 			}
+			row.Facts = factLines(rep.Facts, s.Now())
 			for _, g := range rep.Guards {
 				row.Guards = append(row.Guards, guardLine(g))
 			}
@@ -296,6 +306,63 @@ func guardLine(g agent.GuardState) string {
 		line += "; failed to come off: " + g.Failed
 	}
 	return line
+}
+
+// rebootNeedsYou says whether the agent's reboot line is one to act on: a
+// reboot owed and waiting, or one that failed.
+func rebootNeedsYou(line string) bool {
+	for _, w := range []string{"owed", "fail", "didn't", "gone", "replaced in place"} {
+		if strings.Contains(line, w) {
+			return true
+		}
+	}
+	return false
+}
+
+// factLines says, in words, what a machine's facts show that needs you:
+// the failures of November (AUTOPATCH-BRIEF.md, section 1). A fix installed
+// but not running is the reboot line's; the rest are here: a release past
+// its end of support, updates that stopped (dpkg left half done, packages
+// kept back, unattended-upgrades not run for two days), a newer kernel's
+// missing driver builds, and a disk too full to update.
+func factLines(f *agent.Report, now time.Time) []string {
+	if f == nil {
+		return nil
+	}
+	var out []string
+	if end, err := time.Parse("2006-01-02", f.OS.EOL); err == nil && !now.Before(end) {
+		out = append(out, fmt.Sprintf("%s %s has had no fixes since its support ended on %s", f.OS.ID, f.OS.Version, f.OS.EOL))
+	}
+	if len(f.Updates.DpkgAudit) > 0 {
+		out = append(out, "updates are stuck: dpkg --audit says "+clipLine(strings.Join(f.Updates.DpkgAudit, " / "), 300))
+	}
+	if n := len(f.Updates.KeptBack); n > 0 {
+		out = append(out, fmt.Sprintf("unattended-upgrades keeps back %d package(s): %s", n, clipLine(strings.Join(f.Updates.KeptBack, ", "), 300)))
+	}
+	if t := f.Updates.LastUnattended; !t.IsZero() && now.Sub(t) > 48*time.Hour {
+		out = append(out, "unattended-upgrades last ran "+t.UTC().Format("2006-01-02 15:04 UTC"))
+	}
+	if len(f.Kernel.DKMSMissing) > 0 {
+		out = append(out, fmt.Sprintf("the newest kernel, %s, lacks its driver builds: %s", f.Kernel.Newest, clipLine(strings.Join(f.Kernel.DKMSMissing, ", "), 300)))
+	}
+	for _, d := range f.Disk {
+		min := uint64(1 << 30)
+		if d.Path == "/boot" {
+			min = 100 << 20 // a kernel and its initrd
+		}
+		if d.Free < min {
+			out = append(out, fmt.Sprintf("only %d MB free on %s", d.Free>>20, d.Path))
+		}
+	}
+	return out
+}
+
+// clipLine cuts a line to n bytes.
+func clipLine(s string, n int) string {
+	if len(s) > n {
+		return s[:n-3] + "..."
+	}
+	return s
 }
 
 // hitLine says what a was-I-hit check found, and when it ran.

@@ -405,11 +405,12 @@ func TestRebootTheCanaryBoots(t *testing.T) {
 		}
 	}
 	// Only an admitted guard, on and not yet booted, counts: not one put on
-	// by hand, one already booted, or one still on trial.
+	// by hand, one already booted, one still on trial, or one half on.
 	for name, e := range map[string]*Entry{
 		"by hand":        {Hash: g.Hash(), Guard: g, Status: Confirmed, Later: true},
 		"booted already": {Hash: g.Hash(), Guard: g, Status: Confirmed, Later: true, By: "rig", Booted: true},
 		"on trial":       {Hash: g.Hash(), Guard: g, Status: Pending, Later: true, By: "rig"},
+		"half on":        {Hash: g.Hash(), Guard: g, Status: Applying, Later: true, By: "rig"},
 	} {
 		a, sys, f, p, _ := rebootAgent(t, `,"reboot":"window","reboot_window":"03:00-04:00","canaries":["web"]`)
 		sys.runOut[dpkgQuery] = "linux-image-" + oldRel + " 6.8.0-142.142 ii \n"

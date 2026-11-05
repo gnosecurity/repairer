@@ -569,4 +569,8 @@ func TestPrepareCheck(t *testing.T) {
 	if err := st.verify(sign([]string{other.Hash()}, memo), pub); err == nil {
 		t.Fatal("a signed file for another check passed")
 	}
+	// The hash binds: this check's memo over another check's hash is refused.
+	if err := st.verify(sign([]string{other.Hash()}, st.Memo), pub); err == nil {
+		t.Fatal("this check's memo over another's hash passed")
+	}
 }

@@ -234,6 +234,15 @@ func TestCheckOnYourWord(t *testing.T) {
 	if res := tick([]Message{m1}); res.Held == "" || len(res.Hits) != 0 {
 		t.Fatalf("without its file: %+v", res)
 	}
+	// Another check's file under this check's hash is no file for it: held.
+	other := mkCheck(t, check.NewSince, check.Args{What: "keys", Since: since})
+	js, _ := json.Marshal(Bundle{Messages: []Message{m1}, Checks: map[string][]byte{c.Hash(): other.Canonical()}})
+	if _, err := Intake(filepath.Join(a.StateDir, spoolDir), bytes.NewReader(js)); err != nil {
+		t.Fatal(err)
+	}
+	if res := tick(nil); res.Held == "" || len(res.Hits) != 0 {
+		t.Fatalf("another check's file: %+v", res)
+	}
 	res := tick([]Message{m1}, c) // the lookout sends it again with the file: taken
 	if strings.Join(res.Hits, ",") != c.Name() || res.Held != "" {
 		t.Fatalf("with its file: %+v", res)

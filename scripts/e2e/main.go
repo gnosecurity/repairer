@@ -76,7 +76,7 @@ func gen3(dir string) error {
 		return err
 	}
 	sg, err := approve.SignStatement(rig, approve.Statement{Version: approve.MemoVersion, Kind: approve.KindTested,
-		Chain: "autopatch:vet", Guard: g.Hash(), Rig: strings.Repeat("0", 64)})
+		Chain: "autopatch:vet", Guard: g.Hash(), Rig: strings.Repeat("0", 64), Image: "ubuntu 24.04"})
 	if err != nil {
 		return err
 	}
@@ -129,7 +129,7 @@ func gen(dir string) error {
 	var names []string
 	for _, g := range []*guard.Guard{now, later} {
 		sg, err := approve.SignStatement(rig, approve.Statement{Version: approve.MemoVersion, Kind: approve.KindTested,
-			Chain: "autopatch:vet", Guard: g.Hash(), Rig: strings.Repeat("0", 64)})
+			Chain: "autopatch:vet", Guard: g.Hash(), Rig: strings.Repeat("0", 64), Image: "ubuntu 24.04"})
 		if err != nil {
 			return err
 		}

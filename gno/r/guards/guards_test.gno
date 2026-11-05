@@ -45,7 +45,8 @@ var (
 
 func reset() {
 	tickets, nTickets, filings, nFilings = avl.NewTree(), 0, avl.NewTree(), 0
-	levels, records, beacon, burned = avl.NewTree(), avl.NewTree(), avl.NewTree(), 0
+	levels, records, beacon, burned, fund = avl.NewTree(), avl.NewTree(), avl.NewTree(), 0, 0
+	Reruns, PanelSizes = 2, []int{4, 7}
 	MinTicketAge, RevealWindow, CheckWindow, UnbondBlocks, DrawDelay = 10, 5, 20, 10, 3
 }
 
@@ -214,7 +215,7 @@ func TestHonest(cur realm, t *testing.T) {
 			t.Errorf("checker paid %d", got)
 		}
 	}
-	if got := bal(worker) - before[worker]; got != FilingBond-int64(Checkers)*CheckFee {
+	if got := bal(worker) - before[worker]; got != FilingBond-int64(Checkers)*CheckFee-FundFee {
 		t.Errorf("worker got back %d", got)
 	}
 	if r := RecordOf(worker); r.Passed != 1 {
@@ -299,7 +300,7 @@ func TestLazyChecker(cur realm, t *testing.T) {
 	if bal(lazy) != before[lazy] || RecordOf(lazy).Silent != 1 {
 		t.Errorf("the lazy checker: paid %d, record %+v", bal(lazy)-before[lazy], RecordOf(lazy))
 	}
-	if got := bal(worker) - before[worker]; got != FilingBond-int64(Checkers)*CheckFee {
+	if got := bal(worker) - before[worker]; got != FilingBond-int64(Checkers)*CheckFee-FundFee {
 		t.Errorf("worker got back %d", got)
 	}
 	if Burned() != NoShowFine {
@@ -307,9 +308,9 @@ func TestLazyChecker(cur realm, t *testing.T) {
 	}
 }
 
-// A drawn checker who lies makes a dispute: nothing is tested, nobody is
-// paid, and no honest bond or stake is taken. The bond and the drawn
-// tickets stay held for the panel; an undrawn ticket can leave.
+// A drawn checker who lies starts a dispute (a rerun first): nothing is
+// tested, nobody is paid, and no honest bond or stake is taken. The bond
+// and the drawn tickets stay held; an undrawn ticket can leave.
 func TestLiar(cur realm, t *testing.T) {
 	reset()
 	owners := []address{alice, bob, carol, dave}
@@ -333,7 +334,7 @@ func TestLiar(cur realm, t *testing.T) {
 		RevealCheck(cross(cur), id, or(says[c], ok), salt(c))
 	}
 	testing.SetRealm(u(anyone))
-	if s := Settle(cross(cur), id); s != Disputed || Level(GuardHash(guardText)) != "" {
+	if s := Settle(cross(cur), id); s != Rerun || Level(GuardHash(guardText)) != "" {
 		t.Fatalf("with a liar: %s", s)
 	}
 	for _, a := range append([]address{worker}, owners...) {
@@ -365,7 +366,7 @@ func TestLiar(cur realm, t *testing.T) {
 }
 
 // A liar and a silent checker together: the open transcripts already
-// differ, so the filing goes straight to a panel, and the silent one is
+// differ, so the dispute begins without a redraw, and the silent one is
 // fined; no honest bond or stake is taken.
 func TestLiarAndSilent(cur realm, t *testing.T) {
 	reset()
@@ -391,7 +392,7 @@ func TestLiarAndSilent(cur realm, t *testing.T) {
 	}
 	testing.SkipHeights(RevealWindow + 1)
 	testing.SetRealm(u(anyone))
-	if s := Settle(cross(cur), id); s != Disputed {
+	if s := Settle(cross(cur), id); s != Rerun {
 		t.Fatalf("settled %s", s)
 	}
 	for tid, c := range owners {
@@ -576,7 +577,34 @@ func TestEveryoneSaysItFails(cur realm, t *testing.T) {
 			t.Errorf("checker paid %d", got)
 		}
 	}
-	if got := bal(worker) - before[worker]; got != FilingBond-int64(Checkers)*CheckFee || RecordOf(worker).Failed != 1 {
+	if got := bal(worker) - before[worker]; got != FilingBond-int64(Checkers)*CheckFee-FundFee || RecordOf(worker).Failed != 1 {
 		t.Errorf("worker got back %d, record %+v", got, RecordOf(worker))
 	}
+}
+
+// An owner fined for silence on a filing is never drawn into it again:
+// with only the three owners there were, the redraw finds nobody.
+func TestSilentOwnerNotRedrawn(cur realm, t *testing.T) {
+	reset()
+	for _, w := range []address{alice, bob, carol} {
+		testing.SetRealm(u(w))
+		stakeOne(t, cur)
+	}
+	testing.SkipHeights(MinTicketAge)
+	testing.SetRealm(u(worker))
+	id := file(t, cur, ok, 1001)
+	testing.SetRealm(u(anyone))
+	drawn := draw(t, cur, id, 1001, sig1001)
+	for _, c := range drawn[1:] {
+		testing.SetRealm(u(c))
+		CommitCheck(cross(cur), id, Commitment(c, "check", ok, salt(c)))
+	}
+	testing.SkipHeights(CheckWindow + 1)
+	aim(1002)
+	testing.SetRealm(u(anyone))
+	if s := Settle(cross(cur), id); s != Revealed {
+		t.Fatalf("after the window: %s", s)
+	}
+	SubmitBeacon(cross(cur), 1002, sig1002)
+	refuses(t, "too few staked checkers", func() { Draw(cross(cur), id) })
 }

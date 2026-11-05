@@ -6,7 +6,7 @@ qa: fmt vet test build
 
 # vendor/ holds decred's secp256k1, pinned and reviewed; it is checked as shipped.
 fmt:
-	@out=$$(gofmt -l agent approve cmd guard nft); if [ -n "$$out" ]; then echo "gofmt needed:"; echo "$$out"; exit 1; fi
+	@out=$$(gofmt -l agent approve cmd guard nft policy); if [ -n "$$out" ]; then echo "gofmt needed:"; echo "$$out"; exit 1; fi
 
 vet:
 	go vet ./...

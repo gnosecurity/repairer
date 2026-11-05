@@ -237,6 +237,7 @@ func Reveal(cur realm, id int, guard, transcriptCommitment, salt string) {
 		panic("guards: that isn't what was committed")
 	}
 	f.guardHash = h
+	keepGuard(id, h, strings.TrimSuffix(guard, "\n"))
 	f.checks = []*check{{ticket: -1, owner: who, commitment: transcriptCommitment}}
 	f.state, f.round = Revealed, drawRound()
 	chain.Emit("GuardRevealed", "filing", strconv.Itoa(id), "hash", h, "round", strconv.FormatUint(f.round, 10), "guard", strings.TrimSuffix(guard, "\n"))
@@ -565,17 +566,6 @@ func RecordOf(a address) Record {
 
 // Burned is what forfeits and fines have locked here for good.
 func Burned() int64 { return burned }
-
-// Render lists the tested guards.
-func Render(path string) string {
-	var b strings.Builder
-	b.WriteString("# Guards\n\n" + strconv.Itoa(nFilings) + " filings, " + strconv.Itoa(nTickets) + " tickets.\n\n## Tested\n\n")
-	levels.Iterate("", "", func(h string, v any) bool {
-		b.WriteString("- `" + h + "`\n")
-		return false
-	})
-	return b.String()
-}
 
 func caller(cur realm) address {
 	if !cur.Previous().IsUserCall() {

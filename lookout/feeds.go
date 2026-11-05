@@ -4,7 +4,6 @@ import (
 	"archive/zip"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -17,10 +16,9 @@ import (
 // Feed addresses. Every feed is fetched whole (or, for OSV, every changed
 // record), so no request says what the fleet runs.
 const (
-	KEVURL     = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
-	DebianURL  = "https://security-tracker.debian.org/tracker/data/json"
-	OSVBase    = "https://osv-vulnerabilities.storage.googleapis.com"
-	UbuntuCVEs = "https://ubuntu.com/security/cves/" // + ID + ".json"
+	KEVURL    = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
+	DebianURL = "https://security-tracker.debian.org/tracker/data/json"
+	OSVBase   = "https://osv-vulnerabilities.storage.googleapis.com"
 )
 
 // Feeds is the lookout's copy of the public flaw feeds and what it found
@@ -29,7 +27,7 @@ type Feeds struct {
 	Dir     string // <Dir>/feeds, <Dir>/osv-ubuntu, <Dir>/osv-debian, <Dir>/ubuntu-cves, <Dir>/findings.json
 	Fetcher *Fetcher
 	// Base addresses, for tests; empty means the real ones.
-	KEV, Debian, OSV, Ubuntu string
+	KEV, Debian, OSV string
 }
 
 func (f *Feeds) url(test, real string) string {
@@ -43,11 +41,14 @@ func (f *Feeds) osv(eco string) *OSVSync {
 	return &OSVSync{Fetcher: f.Fetcher, Base: f.url(f.OSV, OSVBase), Ecosystem: eco, Dir: filepath.Join(f.Dir, "osv-"+strings.ToLower(eco))}
 }
 
-// Refresh fetches what changed in every feed. watch names the flaws whose
-// Ubuntu records it fetches too (the ones a guard is for, and those on
-// CISA's list that reach a machine): those records say when a fix is only
-// in -proposed, which OSV doesn't.
-func (f *Feeds) Refresh(ctx context.Context, watch []string) []error {
+// Refresh fetches what changed in every feed. Every request is the same
+// whatever the fleet runs: whole feeds, and every changed OSV record. It
+// never asks for one flaw's record because it matters here; that would
+// tell the feed what the fleet runs. Ubuntu's own per-flaw records, which
+// know a fix in -proposed, are read when present in <Dir>/ubuntu-cves (put
+// there from a whole copy of Ubuntu's tracker); fetching that whole copy
+// is still to come.
+func (f *Feeds) Refresh(ctx context.Context) []error {
 	var errs []error
 	if _, err := f.Fetcher.Get(ctx, "kev.json", f.url(f.KEV, KEVURL), 64<<20); err != nil {
 		errs = append(errs, fmt.Errorf("CISA's list: %w", err))
@@ -58,15 +59,6 @@ func (f *Feeds) Refresh(ctx context.Context, watch []string) []error {
 	for _, eco := range []string{"Ubuntu", "Debian"} {
 		if _, err := f.osv(eco).Sync(ctx); err != nil {
 			errs = append(errs, fmt.Errorf("OSV %s: %w", eco, err))
-		}
-	}
-	cves := &Fetcher{Dir: filepath.Join(f.Dir, "ubuntu-cves"), Client: f.Fetcher.Client}
-	for _, id := range watch {
-		if !strings.HasPrefix(id, "CVE-") || !osvIDRe.MatchString(id) {
-			continue
-		}
-		if _, err := cves.Get(ctx, id+".json", f.url(f.Ubuntu, UbuntuCVEs)+id+".json", 16<<20); err != nil && !errors.Is(err, ErrNotFound) {
-			errs = append(errs, fmt.Errorf("Ubuntu's %s: %w", id, err))
 		}
 	}
 	return errs

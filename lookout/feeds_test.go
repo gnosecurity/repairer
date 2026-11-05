@@ -148,9 +148,10 @@ func TestOSVSync(t *testing.T) {
 }
 
 // The hourly feed step against stand-in feeds: OSV says CVE-2026-98432 has
-// no fix for noble, but Ubuntu's own record (fetched because a kept guard
-// is for that flaw) knows the fix is in -proposed, and wins; CISA's list
-// marks an exploited flaw, which comes first.
+// no fix for noble, but Ubuntu's own record (present locally; the lookout
+// never fetches one flaw's record because it matters here) knows the fix
+// is in -proposed, and wins; CISA's list marks an exploited flaw, which
+// comes first. Every request is the same whatever the fleet runs.
 func TestFeedsRefreshAndFind(t *testing.T) {
 	now := time.Now().UTC()
 	ubuntuCVE := read(t, "ubuntu-cve-2026-98432.json")
@@ -169,16 +170,22 @@ func TestFeedsRefreshAndFind(t *testing.T) {
 			fmt.Fprint(w, `{"id":"UBUNTU-CVE-2026-98432","upstream":["CVE-2026-98432"],"affected":[{"package":{"ecosystem":"Ubuntu:24.04:LTS","name":"linux"},"ranges":[{"type":"ECOSYSTEM","events":[{"introduced":"0"}]}]}]}`)
 		case "/osv/Ubuntu/UBUNTU-CVE-2099-7.json":
 			fmt.Fprint(w, `{"id":"UBUNTU-CVE-2099-7","upstream":["CVE-2099-7"],"affected":[{"package":{"ecosystem":"Ubuntu:22.04:LTS","name":"linux"},"ranges":[{"type":"ECOSYSTEM","events":[{"introduced":"0"},{"fixed":"5.15.0-300.300"}]}]}]}`)
-		case "/ubuntu/CVE-2026-98432.json":
-			w.Write(ubuntuCVE)
 		default:
 			http.NotFound(w, r)
 		}
 	}))
 	defer ts.Close()
 	dir := t.TempDir()
+	var paths []string
+	ts.Config.Handler = logPaths(ts.Config.Handler, &paths)
 	f := &Feeds{Dir: dir, Fetcher: &Fetcher{Dir: filepath.Join(dir, "feeds")},
-		KEV: ts.URL + "/kev", Debian: ts.URL + "/debian", OSV: ts.URL + "/osv", Ubuntu: ts.URL + "/ubuntu/"}
+		KEV: ts.URL + "/kev", Debian: ts.URL + "/debian", OSV: ts.URL + "/osv"}
+	if err := os.MkdirAll(filepath.Join(dir, "ubuntu-cves"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "ubuntu-cves", "CVE-2026-98432.json"), ubuntuCVE, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	store := &Store{Dir: filepath.Join(dir, "store")}
 	if _, err := store.AddGuard(read(t, "cve-2026-98432-ipopt.json")); err != nil {
 		t.Fatal(err)
@@ -187,15 +194,17 @@ func TestFeedsRefreshAndFind(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if errs := f.Refresh(context.Background(), nil); len(errs) != 0 {
+	if errs := f.Refresh(context.Background()); len(errs) != 0 {
 		t.Fatal(errs)
 	}
 	watch := f.Watch(store, ms)
 	if strings.Join(watch, " ") != "CVE-2026-98432 CVE-2099-7" {
 		t.Fatalf("watch %v", watch)
 	}
-	if errs := f.Refresh(context.Background(), watch); len(errs) != 0 {
-		t.Fatal(errs)
+	for _, p := range paths {
+		if strings.Contains(p, "CVE-2026-98432") && !strings.HasPrefix(p, "/osv/") {
+			t.Fatalf("a request named a flaw that matters here: %s", p)
+		}
 	}
 	fs, err := f.Find(ms, watch, time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC))
 	if err != nil {
@@ -217,4 +226,14 @@ func TestFeedsRefreshAndFind(t *testing.T) {
 	if err != nil || len(kept) != len(fs) {
 		t.Fatalf("kept %d of %d: %v", len(kept), len(fs), err)
 	}
+}
+
+func logPaths(h http.Handler, paths *[]string) http.Handler {
+	var mu sync.Mutex
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		*paths = append(*paths, r.URL.Path)
+		mu.Unlock()
+		h.ServeHTTP(w, r)
+	})
 }

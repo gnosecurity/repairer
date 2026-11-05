@@ -1,0 +1,4 @@
+{"id": "planted/p7-mixed", "version": 1, "flaws": ["CVE-2099-907"],
+ "for": [{"os": "ubuntu", "releases": ["24.04"]}],
+ "blocks": [{"drop": {"family": "ipv4", "protocol": "tcp", "ip_options": true}}, {"setting": {"name": "net.mptcp.enabled", "value": "0"}}],
+ "breaks": "IP options on TCP, and new MPTCP sockets"}

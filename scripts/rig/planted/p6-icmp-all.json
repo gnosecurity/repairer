@@ -1,0 +1,4 @@
+{"id": "planted/p6-icmp-all", "version": 1, "flaws": ["CVE-2099-906"],
+ "for": [{"os": "ubuntu", "releases": ["24.04"]}],
+ "blocks": [{"drop": {"family": "ipv4", "protocol": "icmp"}}],
+ "breaks": "ping, and path MTU discovery"}

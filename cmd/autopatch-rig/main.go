@@ -104,7 +104,7 @@ type Transcript struct {
 
 // required are the checks every rig runs; a transcript missing one, or
 // failing one, is never signed.
-var required = []string{"applies", "one_timing", "probe_blocked", "twice_no_change", "traffic", "survives", "undo_exact", "nothing_else"}
+var required = []string{"applies", "one_timing", "probe_blocked", "twice_no_change", "traffic", "traffic_lan", "survives", "undo_exact", "nothing_else"}
 
 // Sign checks a transcript and, when every check that ran passed, signs
 // Tested for the guard with the rig's key.

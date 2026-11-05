@@ -1,0 +1,8 @@
+# The rig's images, pinned by sha256 (scripts/rig/images.sh fetches and checks them against the
+# vendors' sums: Ubuntu's signed with its cloud image key, Debian's over HTTPS). rig.sh boots only
+# these bytes. system	file	sha256	source (fetched 2026-11-05)
+ubuntu 22.04	ubuntu-22.04-server-cloudimg-amd64.img	2099e63da0b822ef8e05e3d596c1b402eaaae658fc08ab919cb8495bfcdc488b	https://cloud-images.ubuntu.com/releases/22.04/release/ubuntu-22.04-server-cloudimg-amd64.img
+ubuntu 24.04	ubuntu-24.04-server-cloudimg-amd64.img	04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94	https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img
+ubuntu 26.04	ubuntu-26.04-server-cloudimg-amd64.img	5645d0318ad21f643ebb1ac4567514620e9893380b07b0201fda163baa5b7eb5	https://cloud-images.ubuntu.com/releases/26.04/release/ubuntu-26.04-server-cloudimg-amd64.img
+debian 12	debian-12-genericcloud-amd64.qcow2	24036a8b79cbb11d809752c60f2f885b1a3b02b1d663faa0b648eb87bd7a256e	https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2
+debian 13	debian-13-genericcloud-amd64.qcow2	de9d63f5e5ec5927d7548bc05b6043b87457b8c1cb9bcb95365168e8d0293b4f	https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2

@@ -19,11 +19,12 @@ func TestSign(t *testing.T) {
 	_, key, _ := ed25519.GenerateKey(nil)
 	seed := []byte(hex.EncodeToString(key.Seed()))
 	rig := strings.Repeat("ab", 32)
-	good := `{"rig":"single-vm/1","image":"ubuntu 24.04","guard":"73804a3fcab787f11c404c13c46b06eb8452aa585fb7f92429fa7ab98635ed6c","checks":{
+	good := `{"rig":"two-vm/1","image":"ubuntu 24.04","guard":"73804a3fcab787f11c404c13c46b06eb8452aa585fb7f92429fa7ab98635ed6c","checks":{
 		"applies":{"pass":true,"evidence":["applied"]},"one_timing":{"pass":true,"evidence":["bites now"]},"probe_blocked":{"pass":true,"evidence":["stopped"]},
 		"twice_no_change":{"pass":true,"evidence":[]},"traffic":{"pass":true,"evidence":["ssh login: ok"]},
+		"traffic_lan":{"pass":true,"evidence":["all 20 checks between the two machines pass"]},
 		"survives":{"pass":true,"evidence":[]},"undo_exact":{"pass":true,"evidence":[]},"nothing_else":{"pass":true,"evidence":[]},
-		"traffic_needing_a_client_vm":{"pass":null,"evidence":["not run"]}}}`
+		"extra":{"pass":null,"evidence":["not run"]}}}`
 	sg, err := Sign(seed, rig, g, []byte(good))
 	if err != nil {
 		t.Fatal(err)
@@ -36,7 +37,8 @@ func TestSign(t *testing.T) {
 		"a required not run":                   strings.Replace(good, `"survives":{"pass":true`, `"survives":{"pass":null`, 1),
 		"a missing check":                      strings.Replace(good, `"nothing_else":{"pass":true,"evidence":[]},`, ``, 1),
 		"another guard":                        strings.Replace(good, `73804a3f`, `00000000`, 1),
-		"an extra failed one":                  strings.Replace(good, `"traffic_needing_a_client_vm":{"pass":null`, `"traffic_needing_a_client_vm":{"pass":false`, 1),
+		"an extra failed one":                  strings.Replace(good, `"extra":{"pass":null`, `"extra":{"pass":false`, 1),
+		"the single-VM rig (no traffic_lan)":   strings.Replace(good, `"traffic_lan":{"pass":true,"evidence":["all 20 checks between the two machines pass"]},`, ``, 1),
 		"a system the guard isn't written for": strings.Replace(good, `ubuntu 24.04`, `debian 11`, 1),
 		"no system":                            strings.Replace(good, `"image":"ubuntu 24.04",`, ``, 1),
 	} {

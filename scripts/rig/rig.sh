@@ -1,6 +1,7 @@
 #!/bin/bash
-# rig.sh GUARD.json OUT.json: the rig's checks of one guard in a fresh Ubuntu
-# 24.04 VM on this machine (KVM, no internet). Writes a transcript: canonical
+# rig.sh GUARD.json OUT.json: the rig's checks of one guard in a fresh VM of
+# a pinned image (RIG_IMAGE, such as "debian 12"; scripts/rig/images.tsv) on
+# this machine (KVM, no internet). Writes a transcript: canonical
 # JSON with no times, ports, process ids or MACs, one entry per check with
 # pass or fail and sorted evidence. Single-VM rig (D1a): the traffic checks
 # that need a client VM and a router are listed as not run.
@@ -13,8 +14,13 @@ set -euo pipefail
 guard=$(readlink -f "${1:?guard file}"); outfile=${2:?transcript file}
 R=${RIG:?the rig directory}; AGENT=$(readlink -f "${AGENT:?the agent binary}")
 here=$(dirname "$(readlink -f "$0")")
-img=$R/images/ubuntu-24.04-server-cloudimg-amd64.img
-export RIG_IMAGE="ubuntu 24.04"
+# The system to run (RIG_IMAGE, "ubuntu 24.04" by default): only an image
+# pinned by sha256 in images.tsv boots.
+export RIG_IMAGE=${RIG_IMAGE:-ubuntu 24.04}
+read -r imgfile imgsum < <(awk -F'\t' -v s="$RIG_IMAGE" '$1 == s {print $2, $3}' "$here/images.tsv")
+[ -n "${imgfile:-}" ] || { echo "rig.sh: no image pinned for $RIG_IMAGE" >&2; exit 1; }
+img=$R/images/$imgfile
+[ "$(sha256sum "$img" | cut -d' ' -f1)" = "$imgsum" ] || { echo "rig.sh: $imgfile isn't the pinned image" >&2; exit 1; }
 qv=$(qemu-system-x86_64 --version | head -1 | awk '{print $4}')
 if [ "$qv" != "${RIG_QEMU:-8.2.2}" ]; then echo "rig.sh: QEMU $qv, but the rig pins ${RIG_QEMU:-8.2.2}" >&2; exit 1; fi
 python3 -I -c 'import json,sys; print(json.dumps({"cpu": next((l.split(":",1)[1].strip() for l in open("/proc/cpuinfo") if l.startswith("model name")), ""), "qemu": sys.argv[1]}, sort_keys=True))' "$qv" > "$outfile.env.json"
@@ -32,21 +38,67 @@ else:
 fwd=""; pfwd=$((2900 + RANDOM % 300))
 [ "$pproto" != "-" ] && fwd=",hostfwd=$pproto:127.0.0.1:$pfwd-:$pport"
 qemu-img create -q -f qcow2 -F qcow2 -b "$img" "$w/disk.qcow2" 8G
+# Two VMs (RIG_CLIENT=1, the default): the guarded machine and a client of
+# the same image, joined by a private link (a QEMU socket, 10.99.0.0/24 and
+# fd99::/64, MTU 1280), each running the everyday services (services.py),
+# each checking the other's (traffic.py). RIG_CLIENT=0 is the single-VM rig.
+two=${RIG_CLIENT:-1}
+lan=$((3200 + RANDOM % 300)); cport=$((3500 + RANDOM % 300))
+lannic() { echo "-netdev socket,id=lan,$1=127.0.0.1:$lan -device virtio-net-pci,netdev=lan,mac=52:54:00:99:00:0$2"; }
 boot() {
+  local extra=""
+  [ "$two" = 1 ] && extra=$(lannic listen 1)
   qemu-system-x86_64 -enable-kvm -cpu host -m 2048 -smp 2 \
     -drive file="$w/disk.qcow2",if=virtio -drive file="$R/seed.iso",if=virtio,format=raw,readonly=on \
-    -nic user,model=virtio,restrict=on,hostfwd=tcp:127.0.0.1:$port-:22$fwd \
+    -nic user,model=virtio,restrict=on,hostfwd=tcp:127.0.0.1:$port-:22$fwd $extra \
     -display none -serial file:"$w/console.log" -daemonize -pidfile "$w/qemu.pid"
 }
-cleanup() { kill "$(cat "$w/qemu.pid" 2>/dev/null)" 2>/dev/null || true; rm -rf "$w"; }
+bootclient() {
+  qemu-img create -q -f qcow2 -F qcow2 -b "$img" "$w/client.qcow2" 8G
+  qemu-system-x86_64 -enable-kvm -cpu host -m 2048 -smp 2 \
+    -drive file="$w/client.qcow2",if=virtio -drive file="$R/seed.iso",if=virtio,format=raw,readonly=on \
+    -nic user,model=virtio,restrict=on,hostfwd=tcp:127.0.0.1:$cport-:22 $(lannic connect 2) \
+    -display none -serial file:"$w/client.log" -daemonize -pidfile "$w/qemu2.pid"
+}
+cleanup() { kill "$(cat "$w/qemu.pid" 2>/dev/null)" "$(cat "$w/qemu2.pid" 2>/dev/null)" 2>/dev/null || true; rm -rf "$w"; }
 trap cleanup EXIT
 S=(ssh -q -i "$R/rig_ed25519" -p $port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -o BatchMode=yes rig@127.0.0.1)
+C=(ssh -q -i "$R/rig_ed25519" -p $cport -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -o BatchMode=yes rig@127.0.0.1)
 waitssh() { for i in $(seq 1 90); do "${S[@]}" true 2>/dev/null && return 0; sleep 2; done; return 1; }
+waitclient() { for i in $(seq 1 90); do "${C[@]}" true 2>/dev/null && return 0; sleep 2; done; return 1; }
 snap() { "${S[@]}" 'sudo python3 -I -' < "$here/snapshot.py"; }
-boot; waitssh
+boot
+[ "$two" = 1 ] && bootclient
+waitssh
 CP=(scp -q -i "$R/rig_ed25519" -P $port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
 "${CP[@]}" "$AGENT" rig@127.0.0.1:autopatch-agent
 "${CP[@]}" "$guard" rig@127.0.0.1:
+# The link's address and the services, on a machine (again after a reboot):
+# ssh array name, MAC's last digit, IPv4, IPv6.
+lanup() {
+  local -n sh=$1
+  "${sh[@]}" "n=\$(ip -o link | awk -F': ' '/52:54:00:99:00:0$2/ {print \$2}'); sudo ip link set \"\$n\" up mtu 1280 && sudo ip addr replace $3/24 dev \"\$n\" && sudo ip -6 addr replace $4/64 dev \"\$n\" nodad && (systemctl is-active --quiet rigsvc || sudo systemd-run --quiet --unit=rigsvc python3 -I /home/rig/services.py $3 $4)" < /dev/null
+}
+# traffic both ways: the client's checks of the guarded machine, and the
+# guarded machine's of the client; one line each, prefixed by direction.
+traffic() {
+  { "${C[@]}" 'python3 -I /home/rig/traffic.py 10.99.0.1 fd99::1' < /dev/null | sed 's/^/to the guarded machine: /'
+    "${S[@]}" 'python3 -I /home/rig/traffic.py 10.99.0.2 fd99::2' < /dev/null | sed 's/^/from the guarded machine: /'; } | sort
+}
+if [ "$two" = 1 ]; then
+  waitclient
+  CC=(scp -q -i "$R/rig_ed25519" -P $cport -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
+  for f in services.py traffic.py; do "${CP[@]}" "$here/$f" rig@127.0.0.1: && "${CC[@]}" "$here/$f" rig@127.0.0.1:; done
+  lanup S 1 10.99.0.1 fd99::1
+  lanup C 2 10.99.0.2 fd99::2
+  sleep 2
+  base=$(traffic)
+  if echo "$base" | grep -q FAILED; then
+    echo "rig.sh: the rig's own traffic fails before any guard; this rig isn't sound here:" >&2
+    echo "$base" >&2
+    exit 3
+  fi
+fi
 "${S[@]}" 'sudo install -o root -g root -m 0755 autopatch-agent /usr/local/sbin/autopatch-agent && sudo /usr/local/sbin/autopatch-agent install >/dev/null && for i in $(ls /sys/class/net); do [ "$i" = lo ] || sudo ip link set dev "$i" mtu 1280; done'
 A="sudo /usr/local/sbin/autopatch-agent"
 G=/home/rig/$(basename "$guard")
@@ -86,8 +138,20 @@ if printf '%s\n' "${t[@]}" | grep -q FAILED; then check traffic false "$(printf 
 "${S[@]}" 'for u in $(systemctl list-units --type=service --state=running --no-legend --plain | awk "{print \$1}" | grep -vE "^(dbus|systemd-|ssh|getty|serial-getty|user@)"); do sudo systemctl restart "$u" || true; done
   for t in $(systemctl list-timers --all --no-legend --plain | awk "{print \$NF}" | grep "\.timer$"); do s=$(systemctl show -p Unit --value "$t"); sudo systemctl start "$s" || true; done' >/dev/null 2>&1 || true
 if out=$("${S[@]}" "$A check" 2>&1) && echo "$out" | grep -q "as set"; then r1="after restarts and timers: as set"; else r1="after restarts and timers: $out"; fi
+if [ "$two" = 1 ]; then lan1=$(traffic); fi
 "${S[@]}" 'sudo systemctl reboot' >/dev/null 2>&1 || true
 sleep 5; waitssh
+if [ "$two" = 1 ]; then
+  lanup S 1 10.99.0.1 fd99::1
+  sleep 2
+  lan2=$(traffic)
+  # Everyday traffic between the two machines, with the guard on and after
+  # a reboot with it: any check that passed before the guard and fails now.
+  failed=$(printf '%s\n%s\n' "$lan1" "$lan2" | grep FAILED | sort -u || true) # no match is the good case
+  n=$(echo "$base" | wc -l)
+  if [ -z "$failed" ]; then check traffic_lan true "all $n checks between the two machines pass with the guard on and after a reboot"
+  else check traffic_lan false "$(echo "$failed" | tr '\n' ';' | sed 's/;$//; s/;/; /g')"; fi
+fi
 if out=$("${S[@]}" "$A check" 2>&1) && echo "$out" | grep -q "as set"; then r2="after a reboot: as set"; else r2="after a reboot: $out"; fi
 if [[ $r1 == *"as set" && $r2 == *"as set" ]]; then check survives true "$r1; $r2"; else check survives false "$r1; $r2"; fi
 # Nothing else changed: after the reboot, against before the guard, only what the guard declares.
@@ -99,4 +163,4 @@ if cmp -s "$w/s0.json" "$w/s4.json"; then check undo_exact true "after undo the 
 extra=$(python3 "$here/diffkeys.py" "$w/s0.json" "$w/s3.json" "$guard")
 if [ -z "$extra" ]; then check nothing_else true "only what the guard declares changed"; else check nothing_else false "also changed: $extra"; fi
 for k in "${!pass[@]}"; do printf '%s\t%s\t%s\n' "$k" "${pass[$k]}" "${ev[$k]}"; done > "$w/results.tsv"
-python3 "$here/transcript.py" "$w/results.tsv" "$guard" > "$outfile"
+RIG_CLIENT=$two python3 "$here/transcript.py" "$w/results.tsv" "$guard" > "$outfile"

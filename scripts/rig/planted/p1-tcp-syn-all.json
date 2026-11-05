@@ -1,0 +1,4 @@
+{"id": "planted/p1-tcp-syn-all", "version": 1, "flaws": ["CVE-2099-901"],
+ "for": [{"os": "ubuntu", "releases": ["24.04"]}],
+ "blocks": [{"drop": {"family": "ipv4", "protocol": "tcp", "syn": true}}],
+ "breaks": "every new inbound TCP connection, ssh included"}

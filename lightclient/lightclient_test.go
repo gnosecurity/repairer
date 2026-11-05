@@ -35,7 +35,10 @@ func TestParamOnALocalChain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lc := &Client{RPC: c, ChainID: st.NodeInfo.Network, Validators: types.NewValidatorSet(vals.Validators), MaxAge: time.Hour, Now: time.Now}
+	lc := &Client{RPC: c, ChainID: st.NodeInfo.Network, MaxAge: time.Hour, Now: time.Now}
+	if err := lc.Start(ctx, Checkpoint{Height: 1, ValidatorsHash: types.NewValidatorSet(vals.Validators).Hash(), Time: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
 	const realm = "gno.land/r/autopatch/guards"
 	const key = "lvl_73804a3fcab787f11c404c13c46b06eb8452aa585fb7f92429fa7ab98635ed6c"
 	v, found, err := lc.Param(ctx, realm, key, h)
@@ -62,10 +65,11 @@ func TestParamOnALocalChain(t *testing.T) {
 	if err != nil || found {
 		t.Fatalf("an absent level: %q %v %v", v, found, err)
 	}
-	// Validators the client doesn't trust.
-	other := &Client{RPC: c, ChainID: lc.ChainID, Validators: types.NewValidatorSet(nil)}
-	if _, err := other.Header(ctx, h+1); err == nil {
-		t.Fatal("a header from validators the client doesn't trust")
+	// Validators the client doesn't trust: a checkpoint naming another set.
+	stranger, _ := types.RandValidatorSet(1, 10)
+	other := &Client{RPC: c, ChainID: lc.ChainID, MaxAge: time.Hour, Now: time.Now}
+	if err := other.Start(ctx, Checkpoint{Height: 1, ValidatorsHash: stranger.Hash(), Time: time.Now()}); err == nil {
+		t.Fatal("a checkpoint naming validators the chain never had")
 	}
 }
 

@@ -2,8 +2,12 @@
 // the node it asks: a realm param (chain/params, stored at
 // /pv/vm:<realm>:<key> in the proven main store) with its ics23 proofs,
 // checked against the app hash of a header that more than two thirds of a
-// trusted validator set signed. It is a separate module, so the agent never
-// carries tm2.
+// trusted validator set signed. Trust starts at an owner-signed checkpoint
+// and follows the validator set forward (G2): a header signed by a new set
+// is accepted only when more than two thirds of the trusted set signed it
+// too, stepping through heights in between when too much changed at once,
+// and never more than MaxGap past the checkpoint. It is a separate module,
+// so the agent never carries tm2.
 package lightclient
 
 import (
@@ -15,18 +19,45 @@ import (
 	"time"
 
 	"github.com/gnolang/gno/tm2/pkg/bft/rpc/client"
+	ctypes "github.com/gnolang/gno/tm2/pkg/bft/rpc/core/types"
 	"github.com/gnolang/gno/tm2/pkg/bft/types"
 	"github.com/gnolang/gno/tm2/pkg/crypto/merkle"
 	"github.com/gnolang/gno/tm2/pkg/store/rootmulti"
 )
 
+// Node is what the client asks: a gno.land node's RPC client (one you run),
+// or a stand-in in tests.
+type Node interface {
+	ABCIQueryWithOptions(ctx context.Context, path string, data []byte, opts client.ABCIQueryOptions) (*ctypes.ResultABCIQuery, error)
+	Commit(ctx context.Context, height *int64) (*ctypes.ResultCommit, error)
+	Validators(ctx context.Context, height *int64) (*ctypes.ResultValidators, error)
+}
+
+// Checkpoint is where trust starts: a height, the hash of the validator set
+// that signs it, and its time, as the owner signs them in a Checkpoint
+// statement (the caller checks that signature).
+type Checkpoint struct {
+	Height         int64
+	ValidatorsHash []byte
+	Time           time.Time
+}
+
+// MaxGap is the most a header's time may be past the checkpoint's: the
+// owner signs a new checkpoint at least this often, so validators retired
+// longer ago than that can't sign a history the client would follow
+// (gno.land's validators aren't slashed).
+const MaxGap = 30 * 24 * time.Hour
+
 // Client proves realm params at heights.
 type Client struct {
-	RPC     *client.RPCClient
+	RPC     Node
 	ChainID string
-	// Validators is the set the client trusts: from its pinned start (an
-	// owner-signed checkpoint), followed forward.
-	Validators *types.ValidatorSet
+	// Validators is the set the client trusts, at TrustedHeight: from the
+	// checkpoint (Start), followed forward.
+	Validators    *types.ValidatorSet
+	TrustedHeight int64
+	Checkpoint    *Checkpoint
+	trustedNext   []byte // the set the trusted header names for the height after it
 	// MaxAge refuses a proof whose header is older than this (the plan's
 	// five minutes); it and Now are required.
 	MaxAge time.Duration
@@ -83,34 +114,137 @@ func Verify(proof *merkle.Proof, appHash, key, value []byte) error {
 	return prt.VerifyValue(proof, appHash, kp.String(), value)
 }
 
-// Header fetches header h with its commit and checks that the trusted
-// validators signed it: the set named in the header is the trusted set,
-// and more than two thirds of its power signed this block.
+// Start trusts the validator set a node gives for the checkpoint's height,
+// once its hash is the checkpoint's: the only way trust begins.
+func (c *Client) Start(ctx context.Context, cp Checkpoint) error {
+	set, err := c.validators(ctx, cp.Height)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(set.Hash(), cp.ValidatorsHash) {
+		return errors.New("lightclient: the node's validators at the checkpoint aren't the ones the owner signed")
+	}
+	c.Validators, c.TrustedHeight, c.Checkpoint = set, cp.Height, &cp
+	sh, _, err := c.signed(ctx, cp.Height) // the checkpoint's header names the next set
+	if err != nil {
+		return err
+	}
+	if err := set.VerifyCommit(c.ChainID, sh.Commit.BlockID, cp.Height, sh.Commit); err != nil {
+		return fmt.Errorf("lightclient: the checkpoint's header: %w", err)
+	}
+	c.trustedNext = sh.Header.NextValidatorsHash
+	return nil
+}
+
+// Header fetches header h with its commit, checks that the trusted
+// validators signed it, following a change of validators from the trusted
+// height (verify), and that it is fresh.
 func (c *Client) Header(ctx context.Context, h int64) (*types.Header, error) {
-	rc, err := c.RPC.Commit(ctx, &h)
+	hdr, err := c.verify(ctx, h, 0)
 	if err != nil {
 		return nil, err
 	}
-	sh := rc.SignedHeader
-	if sh.Header == nil || sh.Commit == nil {
-		return nil, errors.New("lightclient: no signed header")
-	}
-	if sh.Header.Height != h || sh.Header.ChainID != c.ChainID {
-		return nil, fmt.Errorf("lightclient: header %d of %q, wanted %d of %q", sh.Header.Height, sh.Header.ChainID, h, c.ChainID)
-	}
-	if !bytes.Equal(sh.Header.ValidatorsHash, c.Validators.Hash()) {
-		return nil, errors.New("lightclient: the header names another validator set (following a change isn't built yet)")
-	}
-	if !bytes.Equal(sh.Commit.BlockID.Hash, sh.Header.Hash()) {
-		return nil, errors.New("lightclient: the commit is for another header")
-	}
-	if err := c.Validators.VerifyCommit(c.ChainID, sh.Commit.BlockID, h, sh.Commit); err != nil {
-		return nil, fmt.Errorf("lightclient: the signatures: %w", err)
-	}
-	if err := c.fresh(sh.Header); err != nil {
+	if err := c.fresh(hdr); err != nil {
 		return nil, err
 	}
+	return hdr, nil
+}
+
+// maxSteps bounds how many heights between the trusted one and a target
+// the client verifies on its way, when too much of the set changed at once.
+const maxSteps = 64
+
+// verify checks header h:
+//   - signed by the trusted set: more than two thirds of its power signed it;
+//   - the height right after the trusted one, signed by the set the trusted
+//     header named as the next one: more than two thirds of that set signed
+//     it (a change of any size, one height at a time);
+//   - any later height, signed by another set: that set signed it with more
+//     than two thirds of its power, and more than two thirds of the trusted
+//     set's power signed it too. When too much changed at once for that, it
+//     verifies a height halfway there first, and tries again.
+//
+// A header verified after the trusted height becomes the trusted one, with
+// its set and the next set it names. Trust never moves back.
+func (c *Client) verify(ctx context.Context, h int64, steps int) (*types.Header, error) {
+	if c.Validators == nil || c.Checkpoint == nil {
+		return nil, errors.New("lightclient: start from a checkpoint first")
+	}
+	sh, set, err := c.signed(ctx, h)
+	if err != nil {
+		return nil, err
+	}
+	if sh.Header.Time.Sub(c.Checkpoint.Time) > MaxGap {
+		return nil, fmt.Errorf("lightclient: header %d is more than %s past the checkpoint; the owner signs a new one", h, MaxGap)
+	}
+	switch {
+	case bytes.Equal(set.Hash(), c.Validators.Hash()):
+		if err := c.Validators.VerifyCommit(c.ChainID, sh.Commit.BlockID, h, sh.Commit); err != nil {
+			return nil, fmt.Errorf("lightclient: the signatures: %w", err)
+		}
+	case h <= c.TrustedHeight:
+		return nil, fmt.Errorf("lightclient: header %d is signed by another set than the one trusted from %d on", h, c.TrustedHeight)
+	case h == c.TrustedHeight+1 && bytes.Equal(set.Hash(), c.trustedNext):
+		if err := set.VerifyCommit(c.ChainID, sh.Commit.BlockID, h, sh.Commit); err != nil {
+			return nil, fmt.Errorf("lightclient: the signatures of the next set: %w", err)
+		}
+	default:
+		err := c.Validators.VerifyFutureCommit(set, c.ChainID, sh.Commit.BlockID, h, sh.Commit)
+		if types.IsErrTooMuchChange(err) && h > c.TrustedHeight+1 && steps < maxSteps {
+			if _, err := c.verify(ctx, c.TrustedHeight+(h-c.TrustedHeight)/2, steps+1); err != nil {
+				return nil, err
+			}
+			return c.verify(ctx, h, steps+1)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("lightclient: header %d is signed by a new set the trusted one didn't sign over to: %w", h, err)
+		}
+	}
+	if h > c.TrustedHeight {
+		c.Validators, c.TrustedHeight, c.trustedNext = set, h, sh.Header.NextValidatorsHash
+	}
 	return sh.Header, nil
+}
+
+// signed fetches header h with its commit and the validators that sign it,
+// and checks they belong together: the header is h of this chain, the
+// commit is for it, and the set is the one the header names.
+func (c *Client) signed(ctx context.Context, h int64) (*types.SignedHeader, *types.ValidatorSet, error) {
+	rc, err := c.RPC.Commit(ctx, &h)
+	if err != nil {
+		return nil, nil, err
+	}
+	sh := rc.SignedHeader
+	if sh.Header == nil || sh.Commit == nil {
+		return nil, nil, errors.New("lightclient: no signed header")
+	}
+	if sh.Header.Height != h || sh.Header.ChainID != c.ChainID {
+		return nil, nil, fmt.Errorf("lightclient: header %d of %q, wanted %d of %q", sh.Header.Height, sh.Header.ChainID, h, c.ChainID)
+	}
+	if !bytes.Equal(sh.Commit.BlockID.Hash, sh.Header.Hash()) {
+		return nil, nil, errors.New("lightclient: the commit is for another header")
+	}
+	set := c.Validators
+	if !bytes.Equal(sh.Header.ValidatorsHash, set.Hash()) {
+		if set, err = c.validators(ctx, h); err != nil {
+			return nil, nil, err
+		}
+		if !bytes.Equal(sh.Header.ValidatorsHash, set.Hash()) {
+			return nil, nil, errors.New("lightclient: the node's validators aren't the ones the header names")
+		}
+	}
+	return &sh, set, nil
+}
+
+func (c *Client) validators(ctx context.Context, h int64) (*types.ValidatorSet, error) {
+	rv, err := c.RPC.Validators(ctx, &h)
+	if err != nil {
+		return nil, err
+	}
+	if len(rv.Validators) == 0 {
+		return nil, fmt.Errorf("lightclient: no validators at %d", h)
+	}
+	return types.NewValidatorSet(rv.Validators), nil
 }
 
 // fresh refuses a header older than MaxAge, dated more than MaxSkew in the

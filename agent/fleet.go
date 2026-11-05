@@ -29,6 +29,9 @@ const (
 	MaxBundle = 1 << 20
 )
 
+// errNoFleet is loadFleet's error before init has installed a policy.
+var errNoFleet = errors.New("agent: no policy installed; run init as root")
+
 // Fleet is what the agent knows of its fleet: this host's name in the
 // policy, the policy in force, a signed change waiting out its delay, the
 // last sequence accepted from the owner, and guards refused for good.
@@ -126,7 +129,7 @@ func (a *Agent) privateKey() (ed25519.PrivateKey, error) {
 func (a *Agent) loadFleet() (*Fleet, error) {
 	b, err := os.ReadFile(filepath.Join(a.StateDir, fleetFile))
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, errors.New("agent: no policy installed; run init as root")
+		return nil, errNoFleet
 	}
 	if err != nil {
 		return nil, err

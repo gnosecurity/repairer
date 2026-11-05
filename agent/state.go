@@ -38,6 +38,16 @@ type Entry struct {
 	// entry stays, as Applying with every step counted, until a later undo
 	// or boot takes it off.
 	Failed string `json:"failed,omitempty"`
+	// By is the role that admitted the guard ("me", "rig", "vetters",
+	// "model"), or "" for a guard put on by hand; Keep is the owner's keep.
+	By   string `json:"by,omitempty"`
+	Keep bool   `json:"keep,omitempty"`
+	// Later is set for a guard that bites later than now. It gets one more
+	// window after its first boot (BootWindow while it runs), and Booted is
+	// set once health held through it: what a canary's "booted" says.
+	Later      bool `json:"later,omitempty"`
+	BootWindow bool `json:"boot_window,omitempty"`
+	Booted     bool `json:"booted,omitempty"`
 }
 
 // UnitState is a unit's state before the first guard masked it.

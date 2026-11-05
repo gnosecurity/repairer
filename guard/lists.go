@@ -196,6 +196,29 @@ func (b Block) Effect() Effect {
 	return Now // drop, service
 }
 
+// Later reports whether any of the guard's blocks bites later than now. A
+// guard that mixes the two counts as later as a whole, and waits for a
+// canary's boot; the realm and the rig refuse a mix, so that an urgent drop
+// never waits for one.
+func (g *Guard) Later() bool {
+	for _, b := range g.Blocks {
+		if b.Effect().Later() {
+			return true
+		}
+	}
+	return false
+}
+
+// Auto reports whether every block may go on without the owner's yes.
+func (g *Guard) Auto() bool {
+	for _, b := range g.Blocks {
+		if !b.Auto() {
+			return false
+		}
+	}
+	return true
+}
+
 // Auto reports whether the block may go on without the owner's yes, under
 // the agent's own lists. A block that bites later never goes on
 // automatically before a canary boot, whatever this says.

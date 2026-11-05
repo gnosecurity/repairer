@@ -6,6 +6,7 @@ package admit
 import (
 	"encoding/hex"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -59,7 +60,16 @@ func Admit(p *policy.Policy, host string, g *guard.Guard, ev Evidence, m Machine
 	}
 	h := g.Hash()
 	by, why := "", []string{}
-	for _, role := range tier.Admit {
+	// The owner's Yes first, whatever order the tier lists the roles in, so
+	// that its keep and nocanary are never lost to another role's statement.
+	roles := append([]string(nil), tier.Admit...)
+	sort.SliceStable(roles, func(i, j int) bool { return roles[i] == "me" && roles[j] != "me" })
+	auto := g.Auto()
+	for _, role := range roles {
+		if role != "me" && !auto {
+			why = append(why, role+": a block outside the agent's auto lists needs the owner's yes")
+			continue
+		}
 		switch role {
 		case "me":
 			if y := ev.Yes; y != nil && y.Hash == h && contains(y.Tiers, tier.Name) && now.Before(y.Until) {
@@ -96,8 +106,12 @@ func Admit(p *policy.Policy, host string, g *guard.Guard, ev Evidence, m Machine
 		return Decision{Why: strings.Join(why, "; ")}
 	}
 	if len(tier.Canaries) > 0 && !contains(tier.Canaries, host) && !(ev.Yes != nil && ev.Yes.NoCanary && by == "me") {
-		if !canaryHealthy(p, tier, h, ev.Signed, nonce) {
-			return Decision{By: by, Wait: true, Why: "waiting for a canary's Healthy (" + strings.Join(tier.Canaries, " or ") + ")"}
+		if later := g.Later(); !canaryHealthy(p, tier, h, ev.Signed, nonce, later) {
+			want := "a canary's Healthy"
+			if later {
+				want = "a canary's Healthy after a boot, since the guard bites later,"
+			}
+			return Decision{By: by, Wait: true, Why: "waiting for " + want + " (" + strings.Join(tier.Canaries, " or ") + ")"}
 		}
 	}
 	return Decision{OK: true, By: by}
@@ -159,13 +173,18 @@ func countKeys(ss []Signed, kind, hash string, role []policy.Key) int {
 }
 
 // canaryHealthy reports whether an agent of one of the tier's canaries
-// signed Healthy for this guard with this host's nonce. "Refused there for a
-// stated reason" counts too: a canary that can't take a guard must not hold
-// its tier bare.
-func canaryHealthy(p *policy.Policy, tier *policy.Tier, hash string, ss []Signed, nonce string) bool {
+// signed Healthy for this guard with this host's nonce. For a guard that
+// bites now, "on" counts, and so does "refused" for one of the canary's own
+// listed reasons, so a canary that can't take it doesn't hold its tier bare;
+// each machine's own trial then tests it. A guard that bites later needs
+// "booted": nothing stands in for the canary's boot.
+func canaryHealthy(p *policy.Policy, tier *policy.Tier, hash string, ss []Signed, nonce string, later bool) bool {
 	for _, s := range ss {
 		st := s.Statement
 		if st.Kind != approve.KindHealthy || st.Guard != hash || st.Nonce != nonce || !contains(tier.Canaries, st.Host) {
+			continue
+		}
+		if later && st.State != approve.StateBooted {
 			continue
 		}
 		for _, k := range p.Signers.Agents {

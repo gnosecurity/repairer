@@ -165,7 +165,8 @@ func TestModelRule6(t *testing.T) {
 
 func TestCanary(t *testing.T) {
 	k := newKeys(t, "rig", "v1", "v2", "v3", "model", "backup", "mail")
-	p, g := fleet(t, k), guardOne(t)
+	p := fleet(t, k)
+	g := dropOnly(t, "CVE-2099-14", `{"drop":{"family":"ipv4","protocol":"tcp","ip_options":true}}`) // bites now
 	rig := sign(t, k, "rig", approve.Statement{Kind: approve.KindTested, Chain: "autopatch:vet", Guard: g.Hash(), Rig: strings.Repeat("c", 64)})
 	healthy := func(who, host, state, why, n string) Signed {
 		return sign(t, k, who, approve.Statement{Kind: approve.KindHealthy, Chain: "autopatch:x/home", Guard: g.Hash(), Host: host, State: state, Why: why, Nonce: n})
@@ -176,7 +177,8 @@ func TestCanary(t *testing.T) {
 		ok   bool
 	}{
 		{"the canary's Healthy", healthy("backup", "backup", "on", "", nonce), true},
-		{"the canary refused it here, with a reason", healthy("backup", "backup", "refused", "containers keep their own MPTCP", nonce), true},
+		{"the canary booted with it", healthy("backup", "backup", "booted", "", nonce), true},
+		{"the canary refused it here, for a listed reason", healthy("backup", "backup", "refused", "netns", nonce), true},
 		{"an old nonce", healthy("backup", "backup", "on", "", strings.Repeat("cd", 16)), false},
 		{"a machine that isn't a canary", healthy("mail", "mail", "on", "", nonce), false},
 		{"a canary's host signed by another agent's key", healthy("mail", "backup", "on", "", nonce), false},
@@ -186,6 +188,88 @@ func TestCanary(t *testing.T) {
 		if d.OK != c.ok {
 			t.Errorf("%s: %+v", c.name, d)
 		}
+	}
+}
+
+// A guard that bites later (here, guard one, whose MPTCP setting bites only
+// for new sockets) needs a canary's Healthy after a boot: neither "on" nor a
+// refusal stands in for it (round 4, new major 2).
+func TestCanaryLater(t *testing.T) {
+	k := newKeys(t, "rig", "v1", "v2", "v3", "model", "backup", "mail")
+	p, g := fleet(t, k), guardOne(t)
+	if !g.Later() {
+		t.Fatal("guard one should bite later")
+	}
+	rig := sign(t, k, "rig", approve.Statement{Kind: approve.KindTested, Chain: "autopatch:vet", Guard: g.Hash(), Rig: strings.Repeat("c", 64)})
+	healthy := func(state, why string) Signed {
+		return sign(t, k, "backup", approve.Statement{Kind: approve.KindHealthy, Chain: "autopatch:x/home", Guard: g.Hash(), Host: "backup", State: state, Why: why, Nonce: nonce})
+	}
+	for state, ok := range map[string]bool{"on": false, "refused": false, "booted": true} {
+		why := ""
+		if state == "refused" {
+			why = "netns"
+		}
+		d := Admit(p, "mysites", g, Evidence{Signed: []Signed{rig, healthy(state, why)}}, Machine{}, nonce, now)
+		if d.OK != ok || (!ok && !d.Wait) {
+			t.Errorf("%s: %+v", state, d)
+		}
+	}
+	// The owner's nocanary still lets it go at once.
+	yes := &approve.Yes{Hash: g.Hash(), Tiers: []string{"A"}, Until: now.Add(time.Hour), Mode: "undo", NoCanary: true}
+	if d := Admit(p, "mysites", g, Evidence{Yes: yes}, Machine{}, nonce, now); !d.OK {
+		t.Fatalf("nocanary: %+v", d)
+	}
+}
+
+// A refusal must give one of the listed reasons, or it can't be signed.
+func TestRefusalReasons(t *testing.T) {
+	k := newKeys(t, "backup")
+	st := approve.Statement{Version: approve.MemoVersion, Kind: approve.KindHealthy, Chain: "autopatch:x/home", Guard: strings.Repeat("a", 64), Host: "backup", State: "refused", Nonce: nonce}
+	for why, ok := range map[string]bool{"in-use": true, "netns": true, "never-touch": true, "protected-flow": true, "": false, "containers keep their own MPTCP": false, "no Tested": false} {
+		st.Why = why
+		if _, err := approve.SignStatement(k["backup"], st); (err == nil) != ok {
+			t.Errorf("refused for %q: %v", why, err)
+		}
+	}
+	st.State, st.Why = "on", "netns"
+	if _, err := approve.SignStatement(k["backup"], st); err == nil {
+		t.Error("an on with a reason")
+	}
+}
+
+// The owner's Yes counts first, whatever order the tier lists the roles in,
+// so its keep and nocanary hold even when the rig has signed Tested.
+func TestOwnerFirst(t *testing.T) {
+	k := newKeys(t, "rig", "v1", "v2", "v3", "model", "backup", "mail")
+	p := fleet(t, k)
+	p.Tiers[0].Admit = []string{"rig", "vetters", "model", "me"}
+	g := dropOnly(t, "CVE-2099-12", `{"drop":{"family":"ipv4","protocol":"tcp","ip_options":true}}`)
+	rig := sign(t, k, "rig", approve.Statement{Kind: approve.KindTested, Chain: "autopatch:vet", Guard: g.Hash(), Rig: strings.Repeat("c", 64)})
+	yes := &approve.Yes{Hash: g.Hash(), Tiers: []string{"A"}, Until: now.Add(time.Hour), Mode: "keep", NoCanary: true}
+	if d := Admit(p, "mysites", g, Evidence{Yes: yes, Signed: []Signed{rig}}, Machine{}, nonce, now); !d.OK || d.By != "me" {
+		t.Fatalf("the owner's yes with the rig's Tested: %+v", d)
+	}
+}
+
+// A block outside the agent's auto lists (a module not on them) needs the
+// owner's yes; the rig's Tested isn't enough.
+func TestNotAutoNeedsOwner(t *testing.T) {
+	k := newKeys(t, "rig", "v1", "v2", "v3", "model", "backup", "mail")
+	p := fleet(t, k)
+	g, err := guard.Decode([]byte(`{"id":"test/mod","version":1,"flaws":["CVE-2099-13"],"for":[{"os":"ubuntu","releases":["24.04"]}],"blocks":[{"module":{"name":"cifs"}}],"breaks":"x"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.Auto() {
+		t.Fatal("cifs is on the auto list; pick another module")
+	}
+	rig := sign(t, k, "rig", approve.Statement{Kind: approve.KindTested, Chain: "autopatch:vet", Guard: g.Hash(), Rig: strings.Repeat("c", 64)})
+	if d := Admit(p, "backup", g, Evidence{Signed: []Signed{rig}}, Machine{}, nonce, now); d.OK || !strings.Contains(d.Why, "owner's yes") {
+		t.Fatalf("the rig admitted a block outside the auto lists: %+v", d)
+	}
+	yes := &approve.Yes{Hash: g.Hash(), Tiers: []string{"A"}, Until: now.Add(time.Hour), Mode: "undo"}
+	if d := Admit(p, "backup", g, Evidence{Yes: yes}, Machine{}, nonce, now); !d.OK {
+		t.Fatalf("the owner's yes: %+v", d)
 	}
 }
 

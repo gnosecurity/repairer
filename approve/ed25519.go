@@ -17,6 +17,27 @@ const (
 	KindModel   = "ModelYes" // the local model, within rule 6's limits
 )
 
+// What a canary's Healthy says.
+const (
+	StateOn      = "on"      // on and confirmed here, keep included
+	StateBooted  = "booted"  // on, and confirmed again after a boot
+	StateRefused = "refused" // refused here, for one of RefusalCodes
+)
+
+// RefusalCodes are the only reasons a canary may give for refusing a guard:
+// conditions of its own, never a missing signature or a passing error.
+var RefusalCodes = []string{"in-use", "netns", "never-touch", "protected-flow"}
+
+// IsRefusalCode reports whether s is one of RefusalCodes.
+func IsRefusalCode(s string) bool {
+	for _, c := range RefusalCodes {
+		if s == c {
+			return true
+		}
+	}
+	return false
+}
+
 // Statement is what an agent, the rig, a vetter or the local model signs
 // with Ed25519. The signed bytes are the statement's canonical JSON, which
 // the checker rebuilds itself from the fields; it never checks a signature
@@ -28,9 +49,9 @@ type Statement struct {
 	Guard   string `json:"guard"` // the guard's hash
 	// Rig is the pinned rig's hash, for Tested.
 	Rig string `json:"rig,omitempty"`
-	// Host, State ("on" or "refused") and Why, for Healthy; Nonce is the
-	// fresh number the waiting agent chose, so an old Healthy can't be
-	// replayed.
+	// Host, State (StateOn, StateBooted or StateRefused) and Why (a refusal
+	// code), for Healthy; Nonce is the fresh number the waiting agent chose,
+	// so an old Healthy can't be replayed.
 	Host  string `json:"host,omitempty"`
 	State string `json:"state,omitempty"`
 	Why   string `json:"why,omitempty"`
@@ -66,8 +87,9 @@ func (st Statement) bytes() ([]byte, error) {
 			return nil, errors.New("approve: a Tested statement names the rig and no fleet")
 		}
 	case KindHealthy:
-		if st.Host == "" || (st.State != "on" && st.State != "refused") || len(st.Nonce) != 32 || (st.State == "refused") != (st.Why != "") {
-			return nil, errors.New("approve: a Healthy statement names a host, on or refused (with why), and a nonce")
+		okState := st.State == StateOn || st.State == StateBooted || (st.State == StateRefused && IsRefusalCode(st.Why))
+		if st.Host == "" || !okState || (st.State != StateRefused && st.Why != "") || len(st.Nonce) != 32 {
+			return nil, errors.New("approve: a Healthy statement names a host; on, booted, or refused with a listed reason; and a nonce")
 		}
 	case KindModel:
 		if st.Rig != "" || st.Host != "" || st.State != "" {

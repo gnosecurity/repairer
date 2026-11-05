@@ -164,6 +164,10 @@ func run(ctx context.Context, cmd string, args []string) error {
 		e, err := a.Undo(ctx, key, *ifUnconfirmed)
 		if e != nil {
 			fmt.Printf("%s is off\n", e.Guard.Name())
+			if !*ifUnconfirmed && err == nil {
+				// A hand took it off: tick leaves it off until the owner's next Yes.
+				err = a.Hold(e.Hash, "taken off by hand")
+			}
 		}
 		return err
 	case "status":

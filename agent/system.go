@@ -65,6 +65,9 @@ type System interface {
 	// Listening lists TCP and UDP sockets listening on an address other than
 	// loopback, with the process that holds each.
 	Listening() ([]Listen, error)
+	// ListeningAll is every port anything listens on, loopback included, as
+	// "tcp/22" and "udp/53".
+	ListeningAll() (map[string]bool, error)
 }
 
 // FileID is what the agent knows of a file it strips.
@@ -81,6 +84,8 @@ type Linux struct {
 	// Root prefixes every file path except those under /proc and /sys. It
 	// is "" on a real machine; tests set it to a temporary directory.
 	Root string
+
+	withLoopback bool // Listening includes loopback (ListeningAll)
 }
 
 // progDirs are where Linux looks for the programs it runs, in order. The
@@ -375,7 +380,7 @@ func (l Linux) Listening() ([]Listen, error) {
 			}
 			addr, ok := procAddr(hexAddr)
 			port, err := strconv.ParseUint(hexPort, 16, 16)
-			if !ok || err != nil || addr.IsLoopback() {
+			if !ok || err != nil || (addr.IsLoopback() && !l.withLoopback) {
 				continue
 			}
 			socks = append(socks, sock{Listen{Proto: src.proto, Addr: addr.String(), Port: int(port)}, f[9]})
@@ -414,6 +419,20 @@ func (l Linux) Listening() ([]Listen, error) {
 		}
 		return out[i].Proto+out[i].Addr < out[j].Proto+out[j].Addr
 	})
+	return out, nil
+}
+
+// ListeningAll is every listening port, loopback included.
+func (l Linux) ListeningAll() (map[string]bool, error) {
+	l.withLoopback = true
+	ls, err := l.Listening()
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]bool{}
+	for _, x := range ls {
+		out[fmt.Sprintf("%s/%d", x.Proto, x.Port)] = true
+	}
 	return out, nil
 }
 

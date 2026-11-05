@@ -320,6 +320,14 @@ func (f *fakeSys) EphemeralPorts() (int, int, error) { return f.ephLo, f.ephHi, 
 
 func (f *fakeSys) Listening() ([]Listen, error) { return f.listen, nil }
 
+func (f *fakeSys) ListeningAll() (map[string]bool, error) {
+	out := map[string]bool{}
+	for _, l := range f.listen {
+		out[fmt.Sprintf("%s/%d", l.Proto, l.Port)] = true
+	}
+	return out, nil
+}
+
 func (f *fakeSys) FileID(path string) (FileID, error) {
 	ff, ok := f.strips[path]
 	if !ok {

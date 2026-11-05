@@ -17,7 +17,10 @@ import (
 // Ledger to sign.
 const MaxMemo = 600
 
-var tierRe = regexp.MustCompile(`^[A-Za-z0-9]{1,8}$`)
+var (
+	tierRe = regexp.MustCompile(`^[A-Za-z0-9]{1,8}$`)
+	hostRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$`) // as policy names hosts
+)
 
 // Yes is an owner's yes to a guard: on these tiers, until a time, with its
 // undo kept or not.
@@ -105,9 +108,74 @@ func MemoYes(g *guard.Guard, y Yes) (string, error) {
 	return checkMemo(b.String())
 }
 
-// MemoOff writes the memo for taking a guard off.
-func MemoOff(g *guard.Guard) (string, error) {
-	return checkMemo(fmt.Sprintf("%s Off %s %s", MemoVersion, g.Name(), g.Hash()[:16]))
+// Off takes a guard off the hosts it names and keeps it off there, until a
+// later Yes from the owner for the same guard.
+type Off struct {
+	Hash  string
+	Hosts []string
+}
+
+// Args are the Off's arguments as signed: the hash and the hosts joined by
+// commas.
+func (o Off) Args() []string { return []string{o.Hash, strings.Join(o.Hosts, ",")} }
+
+// Names reports whether the Off names a host.
+func (o Off) Names(host string) bool {
+	for _, h := range o.Hosts {
+		if h == host {
+			return true
+		}
+	}
+	return false
+}
+
+// ParseOff reads an Off from a statement's call, strictly.
+func ParseOff(c Call) (Off, error) {
+	if c.Func != "Off" || len(c.Args) != 2 {
+		return Off{}, errors.New("approve: not an Off with two arguments")
+	}
+	o := Off{Hash: c.Args[0], Hosts: strings.Split(c.Args[1], ",")}
+	if !isHash(o.Hash) {
+		return Off{}, fmt.Errorf("approve: %q is not a guard hash", o.Hash)
+	}
+	seen := map[string]bool{}
+	for _, h := range o.Hosts {
+		if !hostRe.MatchString(h) || seen[h] {
+			return Off{}, fmt.Errorf("approve: hosts %q", c.Args[1])
+		}
+		seen[h] = true
+	}
+	return o, nil
+}
+
+// MemoOff writes the memo for taking a guard off some hosts.
+func MemoOff(g *guard.Guard, o Off) (string, error) {
+	if g.Hash() != o.Hash {
+		return "", errors.New("approve: the Off names another guard")
+	}
+	return checkMemo(fmt.Sprintf("%s Off %s %s: hosts %s", MemoVersion, g.Name(), o.Hash[:16], strings.Join(o.Hosts, ",")))
+}
+
+// VerifyOff checks an owner's Off for guard g in gnokey's signed transaction
+// file, as VerifyYes does for a Yes.
+func VerifyOff(txJSON []byte, chainID string, seq uint64, ownerPub []byte, g *guard.Guard) (Off, error) {
+	var tx GnokeyTx
+	if err := json.Unmarshal(txJSON, &tx); err != nil || len(tx.Msg) != 1 {
+		return Off{}, errors.New("approve: not one message")
+	}
+	m := tx.Msg[0]
+	o, err := ParseOff(Call{Caller: m.Caller, Func: m.Func, Args: m.Args})
+	if err != nil {
+		return Off{}, err
+	}
+	memo, err := MemoOff(g, o)
+	if err != nil {
+		return Off{}, err
+	}
+	if _, err := VerifyGnokey(txJSON, chainID, seq, ownerPub, memo); err != nil {
+		return Off{}, err
+	}
+	return o, nil
 }
 
 func checkMemo(m string) (string, error) {

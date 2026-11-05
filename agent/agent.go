@@ -18,6 +18,7 @@ import (
 
 	"github.com/jaekwon/autopatch/guard"
 	"github.com/jaekwon/autopatch/nft"
+	"github.com/jaekwon/autopatch/policy"
 )
 
 // Files the agent owns. The sysctl file sorts after 99-sysctl.conf, so its
@@ -33,6 +34,8 @@ type Agent struct {
 	Timer    Timer
 	StateDir string
 	Now      func() time.Time
+	// Health runs a policy health check; nil means LiveHealth.
+	Health HealthChecker
 }
 
 func (a *Agent) now() time.Time {
@@ -140,8 +143,47 @@ type Plan struct {
 	// InUse are problems that -force may override: something uses what a
 	// block would take away, or a setting can't reach everything.
 	InUse []string
+	// Codes are the listed reasons (approve.RefusalCodes) behind Problems
+	// and InUse, each once: the only reasons a canary may sign.
+	Codes []string
 	// Unprobed reports whether some drop has no probe.
 	Unprobed bool
+}
+
+func (p *Plan) code(c string) {
+	if c == "" {
+		return
+	}
+	for _, x := range p.Codes {
+		if x == c {
+			return
+		}
+	}
+	p.Codes = append(p.Codes, c)
+}
+
+// Refusal is Apply's error when this machine won't take a guard as it is
+// now. Code is the first listed reason behind it, or "" when none is.
+type Refusal struct {
+	Code string
+	msg  string
+}
+
+func (r *Refusal) Error() string { return r.msg }
+
+// refusal says why a plan can't go on, or returns nil.
+func refusal(g *guard.Guard, p *Plan, force bool) *Refusal {
+	code := ""
+	if len(p.Codes) > 0 {
+		code = p.Codes[0]
+	}
+	if len(p.Problems) > 0 {
+		return &Refusal{Code: code, msg: fmt.Sprintf("%s can't go on here: %s", g.Name(), strings.Join(p.Problems, "; "))}
+	}
+	if len(p.InUse) > 0 && !force {
+		return &Refusal{Code: code, msg: fmt.Sprintf("%s would take away something in use, or can't reach everything (-force overrides): %s", g.Name(), strings.Join(p.InUse, "; "))}
+	}
+	return nil
 }
 
 // Plan says what the guard would do here, and changes nothing.
@@ -173,10 +215,18 @@ func (a *Agent) Plan(g *guard.Guard) (*Plan, error) {
 				p.Problems = append(p.Problems, fmt.Sprintf("can't tell whether %s is in use: %v", what, err))
 			} else if used != "" {
 				p.InUse = append(p.InUse, used)
+				if what == "netns" {
+					p.code("netns")
+				} else {
+					p.code("in-use")
+				}
 			}
 		}
 	}
-	p.Problems = append(p.Problems, a.unsafe(g)...)
+	for _, pr := range a.problems(g) {
+		p.Problems = append(p.Problems, pr.why)
+		p.code(pr.code)
+	}
 	return p, nil
 }
 
@@ -200,23 +250,41 @@ func inUseChecks(s step) []string {
 	return nil
 }
 
-// unsafe returns why a guard would be unsafe on this machine as it is now,
-// beyond what the guard's own fields can show: a module named by alias or
-// built in, a drop that would cut ssh or the machine's own replies, a strip
-// of a file that is sudo by another name or that someone else could swap.
+// unsafe returns why a guard would be unsafe on this machine as it is now.
 func (a *Agent) unsafe(g *guard.Guard) []string {
 	var out []string
+	for _, p := range a.problems(g) {
+		out = append(out, p.why)
+	}
+	return out
+}
+
+// problem is one reason a guard can't go on here, with its listed code
+// (approve.RefusalCodes) when it has one.
+type problem struct{ code, why string }
+
+// problems returns why a guard would be unsafe on this machine as it is
+// now, beyond what the guard's own fields can show: a module named by alias
+// or built in, a drop that would cut ssh, the machine's own replies or a
+// flow the policy protects here, a strip of a file that is sudo by another
+// name or that someone else could swap.
+func (a *Agent) problems(g *guard.Guard) []problem {
+	var out []problem
 	var sshPorts []int
+	var flows []policy.Flow
 	lo, hi := 0, 0
 	for _, b := range g.Blocks {
 		if b.Drop != nil && len(b.Drop.Ports) > 0 && lo == 0 {
 			var err error
 			if lo, hi, err = a.Sys.EphemeralPorts(); err != nil {
-				out = append(out, "can't read the ephemeral port range: "+err.Error())
+				out = append(out, problem{"", "can't read the ephemeral port range: " + err.Error()})
 				lo, hi = 1, 65535 // refuse every port drop
 			}
 			if sshPorts, err = a.Sys.RemoteAccessPorts(); err != nil {
-				out = append(out, "can't tell which ports ssh listens on: "+err.Error())
+				out = append(out, problem{"", "can't tell which ports ssh listens on: " + err.Error()})
+			}
+			if flows, err = a.protectedFlows(); err != nil {
+				out = append(out, problem{"", "can't read the policy's protected flows: " + err.Error()})
 			}
 		}
 	}
@@ -226,11 +294,17 @@ func (a *Agent) unsafe(g *guard.Guard) []string {
 			ranges, _ := b.Drop.PortRanges()
 			for _, r := range ranges {
 				if r[0] <= hi && lo <= r[1] {
-					out = append(out, fmt.Sprintf("ports %d-%d overlap %d-%d, the ports this machine's own connections use, so their replies would be dropped", r[0], r[1], lo, hi))
+					out = append(out, problem{"protected-flow", fmt.Sprintf("ports %d-%d overlap %d-%d, the ports this machine's own connections use, so their replies would be dropped", r[0], r[1], lo, hi)})
 				}
 				for _, p := range sshPorts {
 					if b.Drop.Protocol == "tcp" && r[0] <= p && p <= r[1] {
-						out = append(out, fmt.Sprintf("ssh listens on port %d", p))
+						out = append(out, problem{"protected-flow", fmt.Sprintf("ssh listens on port %d", p)})
+					}
+				}
+				// A drop narrowed by IP options matches no ordinary flow.
+				for _, f := range flows {
+					if !b.Drop.IPOptions && b.Drop.Protocol == f.Proto && r[0] <= f.Port && f.Port <= r[1] {
+						out = append(out, problem{"protected-flow", fmt.Sprintf("the policy protects %s port %d here", f.Proto, f.Port)})
 					}
 				}
 			}
@@ -238,35 +312,60 @@ func (a *Agent) unsafe(g *guard.Guard) []string {
 			loadable, builtin, err := a.Sys.Module(b.Module.Name)
 			switch {
 			case err != nil:
-				out = append(out, "module "+b.Module.Name+": "+err.Error())
+				out = append(out, problem{"", "module " + b.Module.Name + ": " + err.Error()})
 			case builtin:
-				out = append(out, "module "+b.Module.Name+" is built into this kernel; a block can't stop it")
+				out = append(out, problem{"", "module " + b.Module.Name + " is built into this kernel; a block can't stop it"})
 			case !loadable:
-				out = append(out, "this kernel has no module named exactly "+b.Module.Name+" (aliases are refused)")
+				out = append(out, problem{"", "this kernel has no module named exactly " + b.Module.Name + " (aliases are refused)"})
 			}
 		case b.Strip != nil:
 			id, err := a.Sys.FileID(b.Strip.Path)
 			if err != nil {
-				out = append(out, err.Error())
+				out = append(out, problem{"", err.Error()})
 				continue
 			}
 			if !id.Regular || id.UID != 0 {
-				out = append(out, b.Strip.Path+" is not a regular file owned by root")
+				out = append(out, problem{"never-touch", b.Strip.Path + " is not a regular file owned by root"})
 			}
 			for _, never := range guard.NeverStripPaths() {
 				same, err := a.Sys.SameFile(b.Strip.Path, never)
 				if err != nil {
-					out = append(out, "can't compare "+b.Strip.Path+" with "+never+": "+err.Error())
+					out = append(out, problem{"", "can't compare " + b.Strip.Path + " with " + never + ": " + err.Error()})
 					break
 				}
 				if same {
-					out = append(out, b.Strip.Path+" is "+never+" by another name")
+					out = append(out, problem{"never-touch", b.Strip.Path + " is " + never + " by another name"})
 					break
 				}
 			}
 		}
 	}
 	return out
+}
+
+// protectedFlows are the policy's protected flows for this host, or none
+// when no policy is installed (a guard put on by hand).
+func (a *Agent) protectedFlows() ([]policy.Flow, error) {
+	f, err := a.loadFleet()
+	if errors.Is(err, errNoFleet) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	p, err := f.InstalledPolicy()
+	if err != nil {
+		return nil, err
+	}
+	var out []policy.Flow
+	for _, fl := range p.Protected {
+		for _, h := range fl.Hosts {
+			if h == f.Host {
+				out = append(out, fl)
+			}
+		}
+	}
+	return out, nil
 }
 
 // ApplyOptions say how a guard goes on.
@@ -276,6 +375,11 @@ type ApplyOptions struct {
 	ConfirmWithin time.Duration
 	// Force puts a block on even when something uses what it takes away.
 	Force bool
+	// By is the role that admitted the guard; "" for a guard put on by hand.
+	By string
+	// Keep is the owner's keep: confirmed as soon as its probe passes, with
+	// no trial and no window after a boot.
+	Keep bool
 }
 
 // minArm is the shortest time an undo is armed for, to cover the apply.
@@ -309,16 +413,17 @@ func (a *Agent) Apply(ctx context.Context, g *guard.Guard, o ApplyOptions) (*Ent
 	if err != nil {
 		return nil, err
 	}
-	if len(p.Problems) > 0 {
-		return nil, fmt.Errorf("%s can't go on here: %s", g.Name(), strings.Join(p.Problems, "; "))
+	if r := refusal(g, p, o.Force); r != nil {
+		return nil, r
 	}
-	if len(p.InUse) > 0 && !o.Force {
-		return nil, fmt.Errorf("%s would take away something in use, or can't reach everything (-force overrides): %s", g.Name(), strings.Join(p.InUse, "; "))
+	if o.Keep {
+		o.ConfirmWithin = 0
 	}
 
 	arm := max(o.ConfirmWithin, minArm)
 	start := a.now()
-	e := &Entry{Hash: h, Guard: g, Status: Applying, AppliedAt: start, ConfirmBy: start.Add(arm), Unprobed: p.Unprobed}
+	e := &Entry{Hash: h, Guard: g, Status: Applying, AppliedAt: start, ConfirmBy: start.Add(arm), Unprobed: p.Unprobed,
+		By: o.By, Keep: o.Keep, Later: g.Later()}
 	st.Guards = append(st.Guards, e)
 	if err := s.save(st); err != nil {
 		return nil, err
@@ -702,6 +807,9 @@ func (a *Agent) confirm(ctx context.Context, s *store, st *State, e *Entry) erro
 	}
 	e.Status = Confirmed
 	e.ConfirmBy = time.Time{}
+	if e.BootWindow {
+		e.BootWindow, e.Booted = false, true
+	}
 	if err := a.writeSysctlFile(st); err != nil {
 		return err
 	}
@@ -751,6 +859,7 @@ func (a *Agent) Boot(ctx context.Context) error {
 	}
 	defer s.close()
 	var errs []error
+	var windows []string
 	for _, e := range append([]*Entry(nil), st.Guards...) {
 		if e.Status == Confirmed {
 			why := ""
@@ -765,6 +874,13 @@ func (a *Agent) Boot(ctx context.Context) error {
 						errs = append(errs, fmt.Errorf("%s: putting back %q: %w", e.Guard.Name(), stp.describe(), err))
 					}
 				}
+				// A guard that bites later gets one more window after its
+				// first boot, with its undo armed: the boot is when it bites.
+				if e.Later && !e.Keep && !e.Booted && e.By != "" {
+					now := a.now()
+					e.Status, e.BootWindow, e.AppliedAt, e.ConfirmBy = Pending, true, now, now.Add(trialArm)
+					windows = append(windows, e.Hash)
+				}
 				continue
 			}
 			errs = append(errs, fmt.Errorf("%s: taken off because %s", e.Guard.Name(), why))
@@ -774,6 +890,11 @@ func (a *Agent) Boot(ctx context.Context) error {
 		}
 	}
 	errs = append(errs, a.writeSysctlFile(st), s.save(st))
+	for _, h := range windows { // armed after the save, as Apply does
+		if err := a.Timer.Arm(ctx, h, trialArm); err != nil {
+			errs = append(errs, fmt.Errorf("arming the undo for %s's window after boot: %w", h[:12], err))
+		}
+	}
 	return errors.Join(errs...)
 }
 

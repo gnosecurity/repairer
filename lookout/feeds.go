@@ -261,6 +261,16 @@ func (f *Feeds) KernelNew(ctx context.Context, now time.Time) ([]*KernelCVE, err
 	return out, nil
 }
 
+// KernelNewKept reads the kernel's new network flaws KernelNew last kept.
+func (f *Feeds) KernelNewKept() ([]*KernelCVE, error) {
+	b, err := os.ReadFile(filepath.Join(f.Dir, "kernel-new.json"))
+	if err != nil {
+		return nil, err
+	}
+	var out []*KernelCVE
+	return out, json.Unmarshal(b, &out)
+}
+
 // ubuntuRecord is Ubuntu's own record of a flaw: from the tracker's copy,
 // else from <Dir>/ubuntu-cves, else nil.
 func (f *Feeds) ubuntuRecord(id string) *UbuntuCVE {

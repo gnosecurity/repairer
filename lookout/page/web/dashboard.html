@@ -20,6 +20,10 @@
 {{range .Findings}}<tr><td>{{.Host}}</td><td{{if .Exploited}} class="bad"{{end}}>{{.Flaw}}{{if .Exploited}} (exploited){{end}}</td>
 <td>{{.Package}} {{.Version}}</td><td>{{.State}}{{if .Fix}} ({{.Fix}}){{end}}</td></tr>{{end}}</table>
 {{else}}<p class="small">None found yet, or the feeds haven't run.</p>{{end}}
+{{if .KernelNew}}<h3>New kernel flaws a network can reach</h3>
+<p class="small">Named by the kernel in the last two weeks, before any distro rates them: whether your kernels carry the fix is the distros' word.</p>
+<table><tr><th>Flaw</th><th>What</th><th>Files</th><th>Fixed in</th></tr>
+{{range .KernelNew}}<tr><td>{{.ID}}<br><span class="small">{{ago .Seen}}</span></td><td>{{.Title}}</td><td class="small">{{.Files}}</td><td>{{.Fixed}}</td></tr>{{end}}</table>{{end}}
 
 <h2>Machines</h2>
 <table><tr><th>Machine</th><th>Last report</th><th>Guards on</th><th>Notes</th></tr>

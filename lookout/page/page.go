@@ -145,8 +145,17 @@ type view struct {
 	Findings []lookout.Finding
 	// FeedProblems: a feed a day old, or a record skipped (round 8, minor 8).
 	FeedProblems []string
-	Notice       string
-	Problem      string
+	// KernelNew: the kernel's flaws a network can reach, named in the last
+	// two weeks, before any distro rates them: what a guard could be
+	// thought about for.
+	KernelNew []kernelRow
+	Notice    string
+	Problem   string
+}
+
+type kernelRow struct {
+	ID, Title, Files, Fixed string
+	Seen                    time.Time
 }
 
 type machineRow struct {
@@ -230,8 +239,30 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 			v.Findings = fs[:min(len(fs), 200)] // exploited first
 		}
 		v.FeedProblems = s.Feeds.Problems(s.Now())
+		if ks, err := s.Feeds.KernelNewKept(); err == nil {
+			for _, k := range ks[:min(len(ks), 100)] {
+				v.KernelNew = append(v.KernelNew, kernelRow{ID: k.ID, Title: k.Title, Files: strings.Join(k.Files, " "), Fixed: kernelFixes(k), Seen: k.FirstSeen})
+			}
+		}
 	}
 	s.render(w, "dashboard.html", v)
+}
+
+// kernelFixes lists the releases that fix a kernel flaw, by series, then
+// mainline's.
+func kernelFixes(k *lookout.KernelCVE) string {
+	var out []string
+	for _, v := range k.Fixed {
+		out = append(out, v)
+	}
+	sort.Slice(out, func(i, j int) bool { return lookout.KernelReleaseLess(out[i], out[j]) })
+	if k.Mainline != "" {
+		out = append(out, "mainline "+k.Mainline)
+	}
+	if len(out) == 0 {
+		return "no fix yet"
+	}
+	return strings.Join(out, ", ")
 }
 
 func guardLine(g agent.GuardState) string {

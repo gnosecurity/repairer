@@ -314,3 +314,34 @@ func TestSignOut(t *testing.T) {
 		t.Fatal("the old cookie still opens the page")
 	}
 }
+
+// The dashboard lists the kernel's new flaws a network can reach, as the
+// feeds command kept them: name, what, the files, and the releases that fix
+// them in order, mainline last.
+func TestDashboardShowsNewKernelFlaws(t *testing.T) {
+	w := newTestWallet(t)
+	s, ts, _ := testPage(t, w)
+	b, err := os.ReadFile("../testdata/vulns-CVE-2026-98432.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	k, err := lookout.ParseKernelCVE(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	k.FirstSeen = time.Date(2026, 11, 5, 9, 0, 0, 0, time.UTC)
+	dir := t.TempDir()
+	kept, _ := json.Marshal([]*lookout.KernelCVE{k})
+	if err := os.WriteFile(filepath.Join(dir, "kernel-new.json"), kept, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s.Feeds = &lookout.Feeds{Dir: dir, Fetcher: &lookout.Fetcher{Dir: filepath.Join(dir, "copies")}}
+	ck := signIn(t, ts, w)
+	_, body := get(t, ts, "/admin", ck)
+	for _, want := range []string{"New kernel flaws a network can reach", "CVE-2026-98432", "ipv4: free inet_opt and ireq_opt",
+		"net/ipv4/af_inet.c net/ipv4/tcp_ipv4.c", "5.10.272, 5.15.223, 6.1.190, 6.6.159, 6.12.113, 6.18.56, 7.2.10, mainline 7.3", "3 h ago"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the dashboard lacks %q", want)
+		}
+	}
+}

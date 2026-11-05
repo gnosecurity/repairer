@@ -7,11 +7,12 @@
 # waits for drand evmnet's real round and submits its signature; the three
 # drawn checkers commit and open their transcripts; the agreement waits out
 # its objection window and is finalized; the level param says "tested". Then
-# a ticket nobody drew is unstaked and withdrawn, which takes a new version
-# of the stake tree. Then a dispute: a second filing where one drawn checker
-# lies goes, with no reruns in this build, to a panel of 7 seats drawn by
-# stake from a later real round; its word, after the appeal window, slashes
-# the liar. Prints the gas each call used. Touches only a temporary
+# a ticket nobody drew is unstaked and withdrawn, which takes its weight out
+# of the tree at once, since no round waits. Then a dispute: a second filing
+# where one drawn checker lies goes, with no reruns in this build, to a panel
+# of 7 seats drawn by stake, from every ticket, from a later real round; its
+# word, after the appeal window, slashes the liar. Prints the gas each call
+# used. Touches only a temporary
 # directory, 127.0.0.1, and api.drand.sh (to read public beacon rounds).
 set -euo pipefail
 B=${1:?the directory with gnodev and gnokey}

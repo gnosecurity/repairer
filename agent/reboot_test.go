@@ -48,14 +48,17 @@ func rebootAgent(t *testing.T, tier string) (*Agent, *fakeSys, *Fleet, *policy.P
 	clock := time.Date(2026, 11, 5, 3, 10, 0, 0, time.UTC)
 	a.Now = func() time.Time { return clock }
 	sys.files["/proc/sys/kernel/osrelease"] = oldRel + "\n"
+	sys.files["/proc/sys/kernel/random/boot_id"] = "boot-1\n"
 	sys.files["/etc/default/grub"] = "# comment\nGRUB_DEFAULT=saved\nGRUB_TIMEOUT=0\n"
 	sys.files["/proc/cmdline"] = "BOOT_IMAGE=/boot/vmlinuz-" + oldRel + " root=UUID=0d5a ro panic=10\n"
 	sys.files["/boot/grub/grub.cfg"] = grubCfg
-	sys.files["/boot/vmlinuz-"+newRel] = "kernel"
-	sys.files["/boot/initrd.img-"+newRel] = "initrd"
+	for _, rel := range []string{oldRel, newRel} {
+		sys.files["/boot/vmlinuz-"+rel] = "kernel"
+		sys.files["/boot/initrd.img-"+rel] = "initrd"
+	}
 	sys.units["ssh.socket"] = &fakeUnit{enabled: "enabled"}
 	sys.runOut = map[string]string{
-		"dpkg-query -W -f ${Package} ${Version} ${db:Status-Abbrev}\n linux-image-[0-9]*": "linux-image-" + oldRel + " 6.8.0-142.142 ii \nlinux-image-" + newRel + " 6.8.0-149.149 ii \n",
+		dpkgQuery:                "linux-image-" + oldRel + " 6.8.0-142.142 ii \nlinux-image-" + newRel + " 6.8.0-149.149 ii \n",
 		"dkms status":            "",
 		"ls /etc/default/grub.d": "",
 		"findmnt -n -o FSTYPE,SOURCE --target /boot/grub": "ext4   /dev/vda1\n",
@@ -67,6 +70,15 @@ func rebootAgent(t *testing.T, tier string) (*Agent, *fakeSys, *Fleet, *policy.P
 		t.Fatal(err)
 	}
 	return a, sys, &Fleet{Host: "web"}, p, func(d time.Duration) { clock = clock.Add(d) }
+}
+
+// dpkgQuery is the call that lists the installed kernels.
+const dpkgQuery = "dpkg-query -W -f ${Package} ${Version} ${db:Status-Abbrev}\n linux-image-[0-9]*"
+
+// bootInto is the machine coming up again, on kernel rel: a new boot id.
+func bootInto(sys *fakeSys, rel string) {
+	sys.files["/proc/sys/kernel/osrelease"] = rel + "\n"
+	sys.files["/proc/sys/kernel/random/boot_id"] = "boot-after-" + strings.TrimSpace(sys.files["/proc/sys/kernel/random/boot_id"]) + "\n"
 }
 
 // rstep runs the reboot step and then, as Tick does, the reboot it asks for.
@@ -115,7 +127,7 @@ func TestRebootInTheWindow(t *testing.T) {
 		t.Fatalf("before it goes down: %q", m)
 	}
 	after(2 * time.Minute)
-	sys.files["/proc/sys/kernel/osrelease"] = newRel + "\n"
+	bootInto(sys, newRel)
 	if m := rstep(t, a, f, p, nil); !strings.HasPrefix(m, "booted into "+newRel) {
 		t.Fatalf("after the boot: %q", m)
 	}
@@ -135,19 +147,21 @@ func TestRebootInTheWindow(t *testing.T) {
 	}
 }
 
-// A new kernel that doesn't boot (the machine comes back on the pinned
-// default) is marked failed once the deadline passes, and the agent never
-// tries it again by itself, not even in the next day's window.
+// A new kernel that doesn't boot: the machine comes back on the pinned
+// default. The first tick on the new boot marks the kernel failed and takes
+// the one-shot entry back, and the agent never tries the kernel again by
+// itself, not even in the next day's window.
 func TestRebootThatDidntBoot(t *testing.T) {
 	a, sys, f, p, after := rebootAgent(t, `,"reboot":"window","reboot_window":"03:00-04:00"`)
 	rstep(t, a, f, p, nil)
-	after(RebootDeadline - time.Minute)
+	after(time.Minute)
 	if m := rstep(t, a, f, p, nil); m != "rebooting into "+newRel {
-		t.Fatalf("before the deadline: %q", m)
+		t.Fatalf("before it goes down: %q", m)
 	}
 	after(2 * time.Minute)
+	bootInto(sys, oldRel)
 	if m := rstep(t, a, f, p, nil); m != newRel+" didn't boot: back on "+oldRel {
-		t.Fatalf("past the deadline: %q", m)
+		t.Fatalf("back on the old kernel: %q", m)
 	}
 	if got := ran(sys, "grub-editenv"); len(got) != 1 || got[0] != "grub-editenv - unset next_entry" {
 		t.Fatalf("the one-shot boot wasn't taken back: %q", got)
@@ -158,13 +172,80 @@ func TestRebootThatDidntBoot(t *testing.T) {
 	}
 }
 
+// A machine that never goes down (the same boot past the deadline): the
+// reboot is marked failed, waiting for the owner, and its one-shot entry is
+// taken back so a later reboot doesn't try the kernel unasked.
+func TestRebootNeverWentDown(t *testing.T) {
+	a, sys, f, p, after := rebootAgent(t, `,"reboot":"window","reboot_window":"03:00-04:00"`)
+	rstep(t, a, f, p, nil)
+	after(RebootDeadline - time.Minute)
+	if m := rstep(t, a, f, p, nil); m != "rebooting into "+newRel {
+		t.Fatalf("before the deadline: %q", m)
+	}
+	after(2 * time.Minute)
+	if m := rstep(t, a, f, p, nil); m != "the machine didn't go down to reboot into "+newRel {
+		t.Fatalf("past the deadline: %q", m)
+	}
+	if got := ran(sys, "grub-editenv"); len(got) != 1 {
+		t.Fatalf("the one-shot boot wasn't taken back: %q", got)
+	}
+}
+
+// With no newer kernel, a reboot the system asks for (/run/reboot-required)
+// follows the same rules: the tier's word, then the gates, then a plain
+// reboot with no GRUB change; on the new boot the health window, then done.
+// A health failure after it is reported and marks no kernel failed.
+func TestRebootTheSystemAsks(t *testing.T) {
+	a, sys, f, p, after := rebootAgent(t, `,"reboot":"window","reboot_window":"03:00-04:00"`)
+	sys.runOut[dpkgQuery] = "linux-image-" + oldRel + " 6.8.0-142.142 ii \n"
+	if m := rstep(t, a, f, p, nil); m != "" {
+		t.Fatalf("nothing asked: %q", m)
+	}
+	sys.files["/run/reboot-required"] = "*** System restart required ***\n"
+	sys.files["/run/reboot-required.pkgs"] = "libc6\nsystemd\nlibc6\n"
+	if m := rstep(t, a, f, p, nil); m != "rebooting (the system asked)" {
+		t.Fatalf("asked: %q", m)
+	}
+	if got := ran(sys, "grub-", "systemctl reboot"); strings.Join(got, "|") != "systemctl reboot" {
+		t.Fatalf("ran %q: a plain reboot changes nothing in GRUB", got)
+	}
+	after(time.Minute)
+	if m := rstep(t, a, f, p, nil); m != "rebooting (the system asked)" {
+		t.Fatalf("before it goes down: %q", m)
+	}
+	bootInto(sys, oldRel)
+	delete(sys.files, "/run/reboot-required") // /run is new at every boot
+	delete(sys.files, "/run/reboot-required.pkgs")
+	if m := rstep(t, a, f, p, nil); m != "rebooted; its health window runs" {
+		t.Fatalf("after the boot: %q", m)
+	}
+	after(TrialWindow)
+	if m := rstep(t, a, f, p, map[string]string{"site": "http 502"}); m != "health failed after the reboot: site: http 502" {
+		t.Fatalf("health failed: %q", m)
+	}
+	if st, _ := a.loadReboot(); len(st.Failed) != 0 {
+		t.Fatalf("a kernel marked failed: %v", st.Failed)
+	}
+	if m := rstep(t, a, f, p, nil); m != "" {
+		t.Fatalf("nothing owed after: %q", m)
+	}
+	// A tier that waits for the owner says what the system asked for.
+	b, bsys, bf, bp, _ := rebootAgent(t, ``)
+	bsys.runOut[dpkgQuery] = "linux-image-" + oldRel + " 6.8.0-142.142 ii \n"
+	bsys.files["/run/reboot-required"] = "*** System restart required ***\n"
+	bsys.files["/run/reboot-required.pkgs"] = "libc6\nsystemd\n"
+	if m := rstep(t, b, bf, bp, nil); m != "a reboot is owed: the system asks for one (libc6, systemd); this tier waits for your signed Reboot" {
+		t.Fatalf("a yes tier: %q", m)
+	}
+}
+
 // A check failing at the end of the health window that held before the
 // reboot fails the new kernel: it isn't made the default, so the next
 // reboot goes back. A check that was already failing doesn't count.
 func TestRebootHealthFails(t *testing.T) {
 	a, sys, f, p, after := rebootAgent(t, `,"reboot":"window","reboot_window":"03:00-04:00"`)
 	rstep(t, a, f, p, map[string]string{"backup": "was down already"})
-	sys.files["/proc/sys/kernel/osrelease"] = newRel + "\n"
+	bootInto(sys, newRel)
 	after(time.Minute)
 	rstep(t, a, f, p, nil)
 	after(TrialWindow)
@@ -228,12 +309,12 @@ func TestRebootHeld(t *testing.T) {
 	// Rebooted once today already: not again, though another kernel came.
 	a, sys, f, p, after := rebootAgent(t, `,"reboot":"window","reboot_window":"03:00-04:00"`)
 	rstep(t, a, f, p, nil)
-	sys.files["/proc/sys/kernel/osrelease"] = newRel + "\n"
+	bootInto(sys, newRel)
 	after(time.Minute)
 	rstep(t, a, f, p, nil)
 	after(TrialWindow)
 	rstep(t, a, f, p, nil)
-	sys.runOut["dpkg-query -W -f ${Package} ${Version} ${db:Status-Abbrev}\n linux-image-[0-9]*"] += "linux-image-6.8.0-150-generic 6.8.0-150.150 ii \n"
+	sys.runOut[dpkgQuery] += "linux-image-6.8.0-150-generic 6.8.0-150.150 ii \n"
 	if m := rstep(t, a, f, p, nil); !strings.Contains(m, "this machine rebooted today") {
 		t.Errorf("a second reboot the same day: %q", m)
 	}

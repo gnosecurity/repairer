@@ -124,10 +124,11 @@ func TestRebootOnYourWord(t *testing.T) {
 	if st, _ := a.loadReboot(); st.Spent != 1 {
 		t.Fatalf("the Reboot isn't spent: spent %d", st.Spent)
 	}
-	// It doesn't boot: back on the old kernel past the deadline.
-	after(RebootDeadline + time.Minute)
+	// It doesn't boot: the machine comes back on the old kernel.
+	after(2 * time.Minute)
+	bootInto(sys, oldRel)
 	if res := tick(); res.Reboot != newRel+" didn't boot: back on "+oldRel {
-		t.Fatalf("past the deadline: %q", res.Reboot)
+		t.Fatalf("back on the old kernel: %q", res.Reboot)
 	}
 	if res := tick(); !strings.Contains(res.Reboot, "so it waits for your signed Reboot") || len(ran(sys, "grub-reboot")) != 1 {
 		t.Fatalf("the spent Reboot was used again: %q", res.Reboot)
@@ -192,6 +193,15 @@ func TestRebootOrderWaits(t *testing.T) {
 		sys.files["/boot/initrd.img-"+newRel] = "initrd"
 		if res := tick(); res.Reboot != "rebooting into "+newRel {
 			t.Fatalf("once the gates pass: %q", res.Reboot)
+		}
+	})
+	t.Run("the system asks", func(t *testing.T) {
+		a, sys, tick, reboot, _ := orderAgent(t, ``)
+		sys.runOut[dpkgQuery] = "linux-image-" + oldRel + " 6.8.0-142.142 ii \n"
+		sys.files["/run/reboot-required"] = "*** System restart required ***\n"
+		res := tick(reboot("web", oldRel, a.now().Add(time.Hour).Truncate(time.Minute)))
+		if res.Reboot != "rebooting (the system asked)" || len(ran(sys, "systemctl reboot")) != 1 || len(ran(sys, "grub-")) != 0 {
+			t.Fatalf("%q", res.Reboot)
 		}
 	})
 	t.Run("a tier that never reboots", func(t *testing.T) {

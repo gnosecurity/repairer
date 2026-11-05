@@ -121,10 +121,8 @@ func TestRebootOnYourWord(t *testing.T) {
 	if json.Unmarshal(reported, &sr) != nil || json.Unmarshal(sr.Body, &body) != nil || body.Tick == nil || body.Tick.Reboot != "rebooting into "+newRel {
 		t.Fatalf("the report when it rebooted: %s", reported)
 	}
-	f, _ := a.loadFleet()
-	st, _ := a.loadReboot()
-	if len(f.Reboots) != 0 || st.Spent != 1 {
-		t.Fatalf("the Reboot isn't spent: %+v, spent %d", f.Reboots, st.Spent)
+	if st, _ := a.loadReboot(); st.Spent != 1 {
+		t.Fatalf("the Reboot isn't spent: spent %d", st.Spent)
 	}
 	// It doesn't boot: back on the old kernel past the deadline.
 	after(RebootDeadline + time.Minute)
@@ -133,6 +131,9 @@ func TestRebootOnYourWord(t *testing.T) {
 	}
 	if res := tick(); !strings.Contains(res.Reboot, "so it waits for your signed Reboot") || len(ran(sys, "grub-reboot")) != 1 {
 		t.Fatalf("the spent Reboot was used again: %q", res.Reboot)
+	}
+	if f, _ := a.loadFleet(); len(f.Reboots) != 0 {
+		t.Fatalf("the spent Reboot is still kept: %+v", f.Reboots)
 	}
 	// A new Reboot tries it again.
 	if res := tick(reboot("web", newRel, a.now().Add(time.Hour).Truncate(time.Minute))); res.Reboot != "rebooting into "+newRel || len(ran(sys, "grub-reboot")) != 2 {

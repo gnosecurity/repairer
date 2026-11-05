@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -349,8 +348,7 @@ func (a *Agent) rebootStep(ctx context.Context, f *Fleet, p *policy.Policy, samp
 	}
 	spent := st.Spent
 	if use != nil {
-		spent = max(spent, use.Seq)
-		f.Reboots = slices.DeleteFunc(f.Reboots, func(o RebootOrder) bool { return o.Seq <= spent })
+		spent = max(spent, use.Seq) // order drops it from the fleet file at the next tick
 	}
 	*st = rebootState{Kernel: newest, Entry: newEntry, Phase: Rebooting, Since: now, Day: now.Format("2006-01-02"),
 		Failing: sortedKeys(sample), Failed: st.Failed, Spent: spent}

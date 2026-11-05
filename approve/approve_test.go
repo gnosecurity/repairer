@@ -7,6 +7,9 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/jaekwon/autopatch/guard"
 )
 
 // The fixture is a real statement: gnokey v1.7.0 signed it offline on the
@@ -165,5 +168,92 @@ func TestChainID(t *testing.T) {
 	}
 	if a == ChainID([]byte{1, 2, 4}, "home") {
 		t.Fatal("two owners' fleets named home share a chain id")
+	}
+}
+
+func guardOne(t *testing.T) *guard.Guard {
+	t.Helper()
+	b, err := os.ReadFile("../guard/testdata/cve-2026-98432.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := guard.Parse(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return g
+}
+
+// yes-guard-one.json is a Yes to guard one on tier A until 2026-11-06, mode
+// undo, with the memo MemoYes writes (TestPrintMemo made it), signed by
+// gnokey v1.7.0 with the public test key "owner" for that key's fleet
+// "test", sequence 7.
+func TestVerifyYes(t *testing.T) {
+	b := read(t, "yes-guard-one.json")
+	var tx GnokeyTx
+	if err := json.Unmarshal(b, &tx); err != nil {
+		t.Fatal(err)
+	}
+	pub := tx.Signatures[0].PubKey.Value
+	chain := ChainID(pub, "test")
+	if chain != "autopatch:c9216f6e4272339f/test" {
+		t.Fatalf("chain id %q", chain)
+	}
+	g := guardOne(t)
+	y, err := VerifyYes(b, chain, 7, pub, g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if y.Hash != g.Hash() || len(y.Tiers) != 1 || y.Tiers[0] != "A" || y.Mode != "undo" || y.Until.Format(time.RFC3339) != "2026-11-06T00:00:00Z" {
+		t.Fatalf("yes %+v", y)
+	}
+
+	g2 := *g
+	g2.Version = 2
+	edits := map[string][]byte{
+		"tier B instead of A":   []byte(strings.Replace(string(b), `"A","1793923200"`, `"B","1793923200"`, 1)),
+		"a later end":           []byte(strings.Replace(string(b), `"1793923200"`, `"1893923200"`, 1)),
+		"keep instead of undo":  []byte(strings.Replace(string(b), `"undo"]`, `"keep"]`, 1)),
+		"a memo in other words": []byte(strings.Replace(string(b), "mode undo", "mode undo ", 1)),
+		"another function":      []byte(strings.Replace(string(b), `"func":"Yes"`, `"func":"Off"`, 1)),
+	}
+	for name, e := range edits {
+		if _, err := VerifyYes(e, chain, 7, pub, g); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	if _, err := VerifyYes(b, chain, 7, pub, &g2); err == nil {
+		t.Error("a Yes to guard one accepted for another version of it")
+	}
+	if _, err := VerifyYes(b, ChainID(pub, "prod"), 7, pub, g); err == nil {
+		t.Error("accepted for another fleet")
+	}
+}
+
+func TestMemoLimits(t *testing.T) {
+	g := guardOne(t)
+	y := Yes{Hash: g.Hash(), Tiers: []string{"A"}, Until: time.Unix(1793923200, 0), Mode: "undo"}
+	if _, err := MemoYes(g, y); err != nil {
+		t.Fatal(err)
+	}
+	long := *g
+	long.Blocks = nil
+	for i := 0; i < 16; i++ {
+		long.Blocks = append(long.Blocks, guard.Block{Drop: &guard.Drop{Family: "ipv4", Protocol: "udp", Ports: []string{"1000-1999", "3000-3010"}}})
+	}
+	y.Hash = long.Hash()
+	if _, err := MemoYes(&long, y); err == nil || !strings.Contains(err.Error(), "split the guard") {
+		t.Fatalf("a too-long memo: %v", err)
+	}
+	for _, bad := range []Call{
+		{Func: "Yes", Args: []string{"zz", "A", "1", "undo"}},
+		{Func: "Yes", Args: []string{g.Hash(), "A,A", "1", "undo"}},
+		{Func: "Yes", Args: []string{g.Hash(), "A", "01", "undo"}},
+		{Func: "Yes", Args: []string{g.Hash(), "A", "1", "forever"}},
+		{Func: "Yes", Args: []string{g.Hash(), "A", "1"}},
+	} {
+		if _, err := ParseYes(bad); err == nil {
+			t.Errorf("%v accepted", bad.Args)
+		}
 	}
 }

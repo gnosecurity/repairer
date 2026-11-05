@@ -3,6 +3,9 @@ package agent
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
+	"encoding/binary"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -913,5 +916,41 @@ func TestTrackerSource(t *testing.T) {
 		if got := trackerSource(c.os, c.src); got != c.want {
 			t.Errorf("%s %s: %s, want %s", c.os, c.src, got, c.want)
 		}
+	}
+}
+
+func TestAuthorizedKeys(t *testing.T) {
+	sshKey := func(comment string) string {
+		pub, _, _ := ed25519.GenerateKey(nil)
+		wire := binary.BigEndian.AppendUint32(nil, 11)
+		wire = append(wire, "ssh-ed25519"...)
+		wire = binary.BigEndian.AppendUint32(wire, 32)
+		wire = append(wire, pub...)
+		return strings.TrimSpace("ssh-ed25519 " + base64.StdEncoding.EncodeToString(wire) + " " + comment)
+	}
+	k1, k2 := sshKey("lookout-report"), sshKey("")
+	lines, err := AuthorizedKeys("/usr/local/sbin/autopatch-agent", "/var/lib/autopatch", k1, k2, "203.0.113.9,198.51.100.0/24")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `restrict,from="203.0.113.9,198.51.100.0/24",command="/usr/local/sbin/autopatch-agent report -state-dir /var/lib/autopatch" ` + k1 + "\n" +
+		`restrict,from="203.0.113.9,198.51.100.0/24",command="/usr/local/sbin/autopatch-agent intake -state-dir /var/lib/autopatch" ` + k2 + "\n"
+	if lines != want {
+		t.Fatalf("got\n%swant\n%s", lines, want)
+	}
+	for _, bad := range []string{
+		`command="sh" ` + k1,               // options smuggled in the key
+		k1 + "\n" + k2,                     // two lines
+		"ssh-rsa AAAAB3NzaC1yc2EAAAADAQAB", // another key type
+	} {
+		if _, err := AuthorizedKeys("/a", "/b", bad, k2, ""); err == nil {
+			t.Errorf("accepted %q", bad)
+		}
+	}
+	if _, err := AuthorizedKeys("/a", "/b", k1, k1, ""); err == nil {
+		t.Error("one key for both")
+	}
+	if _, err := AuthorizedKeys("/a", "/b", k1, k2, `1.2.3.4",command="sh`); err == nil {
+		t.Error("a quote in from")
 	}
 }

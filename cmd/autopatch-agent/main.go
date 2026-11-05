@@ -16,6 +16,7 @@
 //	autopatch-agent intake               take one bundle from the lookout on stdin (the unprivileged half)
 //	autopatch-agent tick                 what the minute timer runs
 //	autopatch-agent report               the last signed report (-facts: this machine's facts now)
+//	autopatch-agent authorize            the intake user's two ssh lines for the lookout's keys
 package main
 
 import (
@@ -50,6 +51,9 @@ const usage = `usage: autopatch-agent <command> [flags] [args]
                        floor), -intake-user (the unprivileged user that runs intake and report)
   intake               take one bundle from the lookout on stdin; acts on nothing (unprivileged)
   tick                 what the minute timer runs: repair, take in bundles, move guards on, report
+  authorize            the intake user's ssh lines: -report-key and -intake-key (the lookout's public
+                       keys), -from (the lookouts' addresses); -write puts them in the user's
+                       ~/.ssh/authorized_keys (with -intake-user)
 
 Every command takes -state-dir (default /var/lib/autopatch).
 `
@@ -77,6 +81,10 @@ func run(ctx context.Context, cmd string, args []string) error {
 	seq := fs.Uint64("seq", 0, "init: the owner's sequence floor (the last sequence already used)")
 	intakeUser := fs.String("intake-user", "", "init: the unprivileged user that runs intake and report")
 	facts := fs.Bool("facts", false, "report: this machine's facts now, not the last signed report")
+	reportKey := fs.String("report-key", "", "authorize: the lookout's public key for report")
+	intakeKey := fs.String("intake-key", "", "authorize: the lookout's public key for intake")
+	from := fs.String("from", "", "authorize: the lookouts' addresses, comma-separated")
+	write := fs.Bool("write", false, "authorize: write the lines into the intake user's authorized_keys")
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -105,7 +113,8 @@ func run(ctx context.Context, cmd string, args []string) error {
 		StateDir: *stateDir,
 	}
 	// intake and report are the unprivileged half's; intake only writes the spool.
-	changes := cmd != "fmt" && cmd != "plan" && cmd != "status" && cmd != "report" && cmd != "gates" && cmd != "intake" && !(cmd == "check" && !*repair)
+	changes := cmd != "fmt" && cmd != "plan" && cmd != "status" && cmd != "report" && cmd != "gates" && cmd != "intake" &&
+		!(cmd == "check" && !*repair) && !(cmd == "authorize" && !*write)
 	if changes && os.Geteuid() != 0 && *root == "" {
 		return errors.New(cmd + " changes the machine; run it as root")
 	}
@@ -275,6 +284,19 @@ func run(ctx context.Context, cmd string, args []string) error {
 		}
 		fmt.Printf("policy installed for %s; this agent's key (add it to the next policy as %s's agent key):\n%x\n", *host, *host, pub)
 		return nil
+	case "authorize":
+		lines, err := agent.AuthorizedKeys(self, *stateDir, *reportKey, *intakeKey, *from)
+		if err != nil {
+			return err
+		}
+		if !*write {
+			fmt.Print(lines)
+			return nil
+		}
+		if *intakeUser == "" {
+			return errors.New("authorize -write needs -intake-user")
+		}
+		return agent.WriteAuthorizedKeys(*intakeUser, lines)
 	case "intake":
 		name, err := agent.Intake(filepath.Join(*stateDir, agent.SpoolDir), os.Stdin)
 		if err != nil {

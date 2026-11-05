@@ -34,7 +34,66 @@ func run(args []string) error {
 	if len(args) == 3 && args[0] == "verify" {
 		return verify(args[1], args[2])
 	}
-	return fmt.Errorf("usage: gen DIR | verify REPORT KEYHEX")
+	if len(args) == 2 && args[0] == "gen3" {
+		return gen3(args[1])
+	}
+	return fmt.Errorf("usage: gen DIR | gen3 DIR | verify REPORT KEYHEX")
+}
+
+// gen3 makes C2's inputs: a policy for three machines (vm1 the canary,
+// vm2 and vm3 five minutes apart) with their agents' keys, each machine's
+// key seed, the guard, and the rig's Tested for it.
+func gen3(dir string) error {
+	_, rig, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		return err
+	}
+	files := map[string][]byte{}
+	var agents []string
+	for _, h := range []string{"vm1", "vm2", "vm3"} {
+		_, k, err := ed25519.GenerateKey(nil)
+		if err != nil {
+			return err
+		}
+		files[h+".seed"] = []byte(hex.EncodeToString(k.Seed()) + "\n")
+		agents = append(agents, `{"name":"`+h+`","key":"`+hex.EncodeToString(k.Public().(ed25519.PublicKey))+`","host":"`+h+`"}`)
+	}
+	p, err := policy.Decode([]byte(`{"fleet":"c2","replaces":"","delay_seconds":86400,
+		"signers":{"me":{"name":"owner","key":"02db41e6e79a9f5fc6813df46202e996d245ef327e5ff3cc47c11bdb46071ab08e"},
+		"rig":[{"name":"rig1","key":"` + hex.EncodeToString(rig.Public().(ed25519.PublicKey)) + `"}],
+		"agents":[` + strings.Join(agents, ",") + `]},
+		"tiers":[{"name":"A","hosts":["vm1","vm2","vm3"],"admit":["rig"],"canaries":["vm1"],"spacing_seconds":300}],
+		"health":[{"hosts":["vm1","vm2","vm3"],"kind":"tcp","target":"127.0.0.1:22","want":""}]}`))
+	if err != nil {
+		return err
+	}
+	g, err := guard.Decode([]byte(`{"id":"cve-2026-98432/linux-ipv4-ipopt","version":1,"flaws":["CVE-2026-98432"],
+		"for":[{"os":"ubuntu","releases":["22.04","24.04","26.04"]}],
+		"blocks":[{"drop":{"family":"ipv4","protocol":"tcp","ip_options":true}}],
+		"breaks":"IP Record Route and Timestamp on TCP"}`))
+	if err != nil {
+		return err
+	}
+	sg, err := approve.SignStatement(rig, approve.Statement{Version: approve.MemoVersion, Kind: approve.KindTested,
+		Chain: "autopatch:vet", Guard: g.Hash(), Rig: strings.Repeat("0", 64)})
+	if err != nil {
+		return err
+	}
+	tested, err := json.Marshal(sg)
+	if err != nil {
+		return err
+	}
+	files["policy.json"], files["guard.json"], files["tested.json"] = p.Canonical(), g.Canonical(), tested
+	files["guard.txt"] = []byte(g.Hash() + "\n")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	for name, data := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), data, 0o600); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func gen(dir string) error {

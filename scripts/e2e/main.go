@@ -305,7 +305,9 @@ func genCheck(dir, since, pkg string) error {
 			For: []guard.Target{{OS: "ubuntu", Releases: []string{"24.04"}}}, Kind: kind, Args: args, Flag: flag}
 		return c, c.Validate()
 	}
-	mk := func(kind string, args check.Args, flag string) (*check.Check, error) { return mkID("e2e/"+kind, kind, args, flag) }
+	mk := func(kind string, args check.Args, flag string) (*check.Check, error) {
+		return mkID("e2e/"+kind, kind, args, flag)
+	}
 	setuid, err := mk(check.NewSince, check.Args{What: "setuid", Since: since}, "a setuid or setgid file is new")
 	if err != nil {
 		return err

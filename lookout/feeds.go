@@ -29,6 +29,9 @@ type Feeds struct {
 	// Tracker is the whole copy of Ubuntu's CVE tracker, where Ubuntu's own
 	// per-flaw records are read; nil reads them only from <Dir>/ubuntu-cves.
 	Tracker *UbuntuTracker
+	// Kernel is the whole copy of the kernel's vulns.git: the kernel flaws a
+	// network can reach, as soon as the kernel names them; nil has none.
+	Kernel *KernelVulns
 	// Base addresses, for tests; empty means the real ones.
 	KEV, Debian, OSV string
 }
@@ -56,6 +59,11 @@ func (f *Feeds) Refresh(ctx context.Context) []error {
 	if f.Tracker != nil {
 		if err := f.Tracker.Sync(ctx); err != nil {
 			errs = append(errs, fmt.Errorf("Ubuntu's tracker: %w", err))
+		}
+	}
+	if f.Kernel != nil {
+		if err := f.Kernel.Sync(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("the kernel's vulns.git: %w", err))
 		}
 	}
 	if _, err := f.Fetcher.Get(ctx, "kev.json", f.url(f.KEV, KEVURL), 64<<20); err != nil {
@@ -104,6 +112,9 @@ func (f *Feeds) Problems(now time.Time) []string {
 	}
 	if f.Tracker != nil {
 		age("Ubuntu's tracker", f.Tracker.Synced())
+	}
+	if f.Kernel != nil {
+		age("the kernel's vulns.git", f.Kernel.Synced())
 	}
 	age("the findings", filepath.Join(f.Dir, "findings.json"))
 	return out
@@ -218,6 +229,33 @@ func (f *Feeds) Find(ms []Machine, watch []string, now time.Time) ([]Finding, er
 		return nil, err
 	}
 	if err := os.WriteFile(filepath.Join(f.Dir, "findings.json"), b, 0o600); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// KernelNew is the kernel flaws a network can reach that the kernel named
+// in the last KernelNewWindow, kept in <Dir>/kernel-new.json for the page:
+// what a guard could be thought about for before any distro rates them.
+func (f *Feeds) KernelNew(ctx context.Context, now time.Time) ([]*KernelCVE, error) {
+	if f.Kernel == nil {
+		return nil, nil
+	}
+	all, err := f.Kernel.New(ctx, now.Add(-KernelNewWindow))
+	if err != nil {
+		return nil, err
+	}
+	var out []*KernelCVE
+	for _, c := range all {
+		if c.Network() {
+			out = append(out, c)
+		}
+	}
+	b, err := json.MarshalIndent(out, "", " ")
+	if err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(filepath.Join(f.Dir, "kernel-new.json"), b, 0o600); err != nil {
 		return nil, err
 	}
 	return out, nil

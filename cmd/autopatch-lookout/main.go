@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -105,7 +106,8 @@ func run(ctx context.Context, cmd string, args []string, stdout io.Writer) error
 		}}
 	store := &lookout.Store{Dir: filepath.Join(c.State, "store")}
 	feeds := &lookout.Feeds{Dir: filepath.Join(c.State, "feeds"), Fetcher: &lookout.Fetcher{Dir: filepath.Join(c.State, "feeds", "copies")},
-		Tracker: &lookout.UbuntuTracker{Dir: filepath.Join(c.State, "feeds", "ubuntu-cve-tracker.git")}}
+		Tracker: &lookout.UbuntuTracker{Dir: filepath.Join(c.State, "feeds", "ubuntu-cve-tracker.git")},
+		Kernel:  &lookout.KernelVulns{Dir: filepath.Join(c.State, "feeds", "kernel-vulns.git")}}
 	var lastFeeds time.Time
 	// feedProblems says, once an hour, what is wrong with the feeds: the
 	// feeds command fetches them, apart from the delivery loop (round 8,
@@ -199,6 +201,13 @@ func run(ctx context.Context, cmd string, args []string, stdout io.Writer) error
 			return err
 		}
 		fmt.Fprintf(stdout, "feeds: %d findings leave a machine exposed\n", len(fs))
+		news, err := feeds.KernelNew(fctx, time.Now())
+		if err != nil {
+			fmt.Fprintf(stdout, "feeds: the kernel's new flaws: %v\n", err)
+		}
+		for _, k := range news {
+			fmt.Fprintf(stdout, "kernel: %s %s (network; %s; fixed in %s)\n", k.ID, k.Title, strings.Join(k.Files, " "), fixes(k))
+		}
 		for _, pr := range feeds.Problems(time.Now()) {
 			fmt.Fprintf(stdout, "ALERT feeds: %s\n", pr)
 		}
@@ -268,4 +277,21 @@ func match(stdout io.Writer, sts []lookout.HostStatus, ubuntu []string, debian s
 	lookout.SortFindings(all)
 	fmt.Fprint(stdout, lookout.Summary(all))
 	return nil
+}
+
+// fixes lists the releases that fix a kernel flaw, by series, then
+// mainline's.
+func fixes(k *lookout.KernelCVE) string {
+	var out []string
+	for s, v := range k.Fixed {
+		out = append(out, s+":"+v)
+	}
+	sort.Strings(out)
+	if k.Mainline != "" {
+		out = append(out, "mainline:"+k.Mainline)
+	}
+	if len(out) == 0 {
+		return "nothing yet"
+	}
+	return strings.Join(out, " ")
 }

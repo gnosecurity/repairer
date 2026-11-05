@@ -267,7 +267,7 @@ func TestPoolUndecided(cur realm, t *testing.T) {
 	if s := Tally(cross(cur), id); s != Undecided || lvl() != "" {
 		t.Fatalf("an undecided vote: %s", s)
 	}
-	if !strings.Contains(Render("filing/"+itoa(id)), "- Undecided: no transcript held over a third of the stake with no rival") {
+	if !strings.Contains(Render("filing/"+itoa(id)), "- Undecided: no transcript held over a third of the stake not leaving when the vote opened, with no rival") {
 		t.Errorf("the filing's page:\n%s", Render("filing/"+itoa(id)))
 	}
 	if bal(worker)-before != FilingBond-int64(Checkers)*CheckFee || FundBalance() != PoolFee || Burned() != 0 { // the checkers who answered are paid (round 12, minor 3)

@@ -111,7 +111,7 @@ func renderFiling(id int) string {
 		b.WriteString("- " + what + ": `" + f.verdict + "`, final after height " + strconv.FormatInt(f.until, 10) + " unless someone objects or appeals\n")
 	}
 	if f.floor {
-		b.WriteString("- Decided passing, but its pool's stake not leaving when it was drawn was under the floor: no level written\n")
+		b.WriteString("- Decided passing, but its pool's stake not leaving when its first round was fixed was under the floor: no level written\n")
 	}
 	if f.pulled {
 		b.WriteString("- Decided passing after its level was pulled: the pull stands; a fixed guard is filed as a new version\n")
@@ -148,7 +148,7 @@ func renderFiling(id int) string {
 			strconv.Itoa(v.committed) + " voters committed, " + strconv.FormatInt(v.revealed, 10) + " of " + strconv.FormatInt(v.total, 10) + " ugnot of stake revealed\n")
 		if v.closed {
 			if v.decided == "" {
-				b.WriteString("- Undecided: no transcript held over a third of the stake with no rival\n")
+				b.WriteString("- Undecided: no transcript held over a third of the stake not leaving when the vote opened, with no rival\n")
 			} else {
 				b.WriteString("- Decided: `" + v.decided + "`\n")
 			}

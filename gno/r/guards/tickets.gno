@@ -219,7 +219,7 @@ func leave(t *ticket) {
 var MaxSettle = 64
 
 // SettleVotes settles up to n of a ticket's pool votes (MaxSettle if n is
-// 0 or more), in order, and says how many are left: a ticket with more to
+// 0 or less, or more than MaxSettle), in order, and says how many are left: a ticket with more to
 // settle than Withdraw settles calls it first, in as many steps as it
 // needs (round 13, new major 1). Anyone may call it for any ticket, so a
 // ticket that voted wrong or not at all is charged without its owner, and

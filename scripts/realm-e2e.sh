@@ -48,7 +48,8 @@ win = "50" if sys.argv[2] == "0" else "400" # a 31-seat panel's commitments take
 dl = "40" if sys.argv[2] == "0" else "400" # 72 leaves and an unbonding wait inside one waiting round
 for f, sets in [("guards.gno", [("MinTicketAge", "3"), ("RevealWindow", win), ("CheckWindow", win), ("DrawDeadline", dl),
                                 ("UnbondBlocks", "60"), ("DrawDelay", "3"), ("ObjectionWindow", "2"), ("LevelFloor", "1")]),
-                ("dispute.gno", [("AppealWindow", "2")])]:
+                ("dispute.gno", [("AppealWindow", "2")])] + ([] if sys.argv[2] == "0" else
+               [("pool.gno", [("PoolCommitWindow", "800"), ("PoolRevealWindow", "800")])]): # 330 commitments, two heights each
     p = sys.argv[1] + "/" + f
     s = open(p).read()
     for name, v in sets:
@@ -147,6 +148,7 @@ if [ "$POOL" -gt 0 ]; then
   echo "" | "$B/gnokey" maketx run -gas-fee 100000000ugnot -gas-wanted 2900000000 -send "$(( POOL * 120000000 ))ugnot" -broadcast -chainid dev \
     -remote "$RPC" -home "$D/kb" -insecure-password-stdin test1 "$D/fund.gno" > "$D/fund.out" 2>&1 || { echo "funding: $(tail -5 "$D/fund.out")"; exit 1; }
   for i in $(seq 1 "$POOL"); do call "p$i" StakeTicket -send 10000000ugnot; done
+  call p100 StakeTicket -send 10000000ugnot # a second ticket, ticket POOL+7: p100 commits its vote in two steps
   echo "a pool of $(( POOL + 7 )) owners"
 fi
 call test1 Fund -send 1000000ugnot # blocks pass; the tickets age
@@ -210,6 +212,7 @@ guard2=$(cat "$repo/guard/testdata/cve-2026-98432-mptcp.json")
 gh2=$(python3 -I -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read().rstrip(b"\n")).hexdigest())' "$repo/guard/testdata/cve-2026-98432-mptcp.json")
 commit2=$(python3 -I -c 'import hashlib,sys; a,gh,sysn,tc=sys.argv[1:5]; print(hashlib.sha256((a+"\0guard\0"+gh+"\0"+sysn+"\0"+tc+"\0s").encode()).hexdigest())' "$worker" "$gh2" "ubuntu 24.04" "$tc")
 call test1 Fund -send 2000000ugnot # the dispute fund pays the panel: 7 seats
+[ "$POOL" -ge 80 ] && call test1 Fund -send 40000000ugnot # and, with POOL, a 31-seat panel and the pool's vote
 call test1 Commit -send 1000000ugnot -args "$commit2"
 call test1 Reveal -args 1 -args "$guard2" -args "ubuntu 24.04" -args "$tc" -args s
 if [ "$POOL" -ge 80 ]; then
@@ -243,10 +246,44 @@ for m in $members; do call "$(keyof "$m")" CommitCheck -args 1 -args "$(C "$m" c
 for m in $members; do call "$(keyof "$m")" RevealCheck -args 1 -args "$tr" -args "p-$m"; done
 call test1 Settle -args 1
 qeval 'State(1)' | grep -q '"appealable"' || { echo "no word: $(qeval 'State(1)')"; exit 1; }
-call test1 Fund -send 1ugnot # the appeal window passes
-call test1 Fund -send 1ugnot
-call test1 Fund -send 1ugnot
-call test1 Settle -args 1
+if [ "$POOL" -ge 80 ]; then
+  # The pool's vote (round 14, minor 1): test1 appeals the panel's word past
+  # the largest panel; 328 owners, a third of the stake and more, commit the
+  # honest transcript (p100 in two steps, naming one ticket each time) and
+  # open it; the vote decides; a winner claims; a voter's ticket and an
+  # abstainer's are settled.
+  height() { # the chain's height, retried
+    local h
+    for k in 1 2 3 4 5; do
+      h=$(curl -sf -m 2 "$RPC/status" | python3 -c "import json,sys; print(json.load(sys.stdin)['result']['sync_info']['latest_block_height'])" 2>/dev/null || true)
+      [ -n "$h" ] && { echo "$h"; return; }
+      sleep 1
+    done
+    echo "no height from the node" >&2; exit 1
+  }
+  cost=$(qeval "AppealCost(1)" | grep -oE '\([0-9]+ int64\)' | grep -oE '[0-9]+' | head -1)
+  call test1 Appeal -send "${cost}ugnot" -args 1
+  qeval 'State(1)' | grep -q '"pool"' || { echo "not at the pool: $(qeval 'State(1)')"; exit 1; }
+  call test1 OpenPool -args 1
+  open=$(height)
+  for i in $(seq 73 400); do
+    cm=$(C "$(addr "p$i")" vote "$tr" "v$i")
+    call "p$i" CommitVote -args 1 -args "$(( i + 6 ))" -args "$cm"
+    if [ "$i" = 100 ]; then call p100 CommitVote -args 1 -args "$(( POOL + 7 ))" -args "$cm"; fi
+  done
+  while [ "$(height)" -le $(( open + 800 )) ]; do call test1 Fund -send 1ugnot; done
+  for i in $(seq 73 400); do call "p$i" RevealVote -args 1 -args "$tr" -args "v$i"; done
+  call test1 Tally -args 1
+  call p80 ClaimVote -args 1
+  call test1 SettleVotes -args 86 -args 0  # p80's ticket: voted, and right
+  call test1 SettleVotes -args 506 -args 0 # p500's: abstained
+  echo "the pool decided: 328 owners voted, p100 in two steps"
+else
+  call test1 Fund -send 1ugnot # the appeal window passes
+  call test1 Fund -send 1ugnot
+  call test1 Fund -send 1ugnot
+  call test1 Settle -args 1
+fi
 qeval 'State(1)' | grep -q '"tested"' || { echo "the last word: $(qeval 'State(1)')"; exit 1; }
 lk=$(keyof "$liar")
 case $lk in c*) ltid=$(( ${lk#c} - 1 ));; p*) ltid=$(( ${lk#p} + 6 ));; esac # c1-c7 staked tickets 0-6, then p1...

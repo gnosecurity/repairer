@@ -47,6 +47,8 @@ func reset() {
 	tickets, nTickets, filings, nFilings = avl.NewTree(), 0, avl.NewTree(), 0
 	levels, records, beacon, burned, fund = avl.NewTree(), avl.NewTree(), avl.NewTree(), 0, 0
 	Reruns, PanelSizes = 2, []int{4, 7}
+	votes = map[int]*poolVote{}
+	PoolCommitWindow, PoolRevealWindow, PoolFee = 5, 5, 1_000_000
 	MinTicketAge, RevealWindow, CheckWindow, UnbondBlocks, DrawDelay = 10, 5, 20, 10, 3
 }
 

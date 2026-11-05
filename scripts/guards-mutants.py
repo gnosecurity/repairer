@@ -59,6 +59,14 @@ M = [
     ("never the pool", "r/guards/dispute.gno", "	if f.panelLevel >= len(PanelSizes) {\n		f.state = Pool", "	if f.panelLevel >= 99 {\n		f.state = Pool"),
     ("a silent checker in a rerun goes free", "r/guards/dispute.gno", "			burned += slash(c, Slash)\n			release(c)\n			f.silent[c.owner] = true", "			burned += 0\n			release(c)\n			f.silent[c.owner] = true"),
     ("the fund gets nothing", "r/guards/guards.gno", "	bond := f.bond - FundFee\n	fund += FundFee", "	bond := f.bond - FundFee\n	fund += 0"),
+    ("pool: under two thirds decides", "r/guards/pool.gno", "	if revealed*3 <= pv.total*2 {\n		return undecided(cur, f, id)", "	if revealed*3 <= pv.total {\n		return undecided(cur, f, id)"),
+    ("pool: early tally without two thirds", "r/guards/pool.gno", "	if !closed && bestStake*3 <= pv.total*2 {", "	if !closed && bestStake*3 <= 0 {"),
+    ("pool: abstainers free", "r/guards/pool.gno", "				n := t.stake * AbstainShare / 100", "				n := t.stake * 0 / 100"),
+    ("pool: losing voters free", "r/guards/pool.gno", "				n := least(left, t.stake)", "				n := least(left, 0)"),
+    ("pool: winners unpaid", "r/guards/pool.gno", "			pay(cur, a, n)\n			reserve -= n", "			pay(cur, a, 0)\n			reserve -= n"),
+    ("pool: tickets not held", "r/guards/pool.gno", "			pv.total += t.stake\n			t.open++", "			pv.total += t.stake"),
+    ("pool: reveals before the commit window closes", "r/guards/pool.gno", "	case h <= pv.open+PoolCommitWindow:", "	case false:"),
+    ("pool: young tickets vote", "r/guards/pool.gno", "t.height+MinTicketAge <= f.committed {\n			vt := pv.voters[t.owner]", "true {\n			vt := pv.voters[t.owner]"),
     ("draw half-applied", "\tfor _, p := range picks {\n\t\tp.open++", "\tfor _, p := range picks[:0] {\n\t\tp.open++"),
 ]
 

@@ -6,8 +6,12 @@ import (
 	"context"
 	"crypto/md5"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -337,4 +341,42 @@ func lines(b []byte) []string {
 		}
 	}
 	return out
+}
+
+const (
+	hitsFile = "hits.json" // the newest result of each check run here
+	maxHits  = 16
+)
+
+// keepHit keeps a check's result, replacing the one before for that check;
+// the newest maxHits checks' results are kept.
+func (a *Agent) keepHit(r *HitResult) error {
+	hits, err := a.loadHits()
+	if err != nil {
+		return err
+	}
+	out := []HitResult{*r}
+	for _, h := range hits {
+		if h.Check != r.Check && len(out) < maxHits {
+			out = append(out, h)
+		}
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		return err
+	}
+	return writeAtomic(filepath.Join(a.StateDir, hitsFile), b, 0o600)
+}
+
+// loadHits reads the kept results, newest first.
+func (a *Agent) loadHits() ([]HitResult, error) {
+	b, err := os.ReadFile(filepath.Join(a.StateDir, hitsFile))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var hits []HitResult
+	return hits, json.Unmarshal(b, &hits)
 }

@@ -54,8 +54,11 @@ type FleetReport struct {
 	// lists statements taken but not acted on, and why.
 	Held    string    `json:"held,omitempty"`
 	Skipped []Skipped `json:"skipped,omitempty"`
-	Errors  []string  `json:"errors,omitempty"`
-	Facts   *Report   `json:"facts,omitempty"`
+	// Hits are the newest results of the was-I-hit checks the owner ran
+	// here, newest first (W1).
+	Hits   []HitResult `json:"hits,omitempty"`
+	Errors []string    `json:"errors,omitempty"`
+	Facts  *Report     `json:"facts,omitempty"`
 }
 
 // PendingReport is a policy change waiting out its delay.
@@ -151,6 +154,8 @@ func (a *Agent) writeReport(ctx context.Context, f *Fleet, p *policy.Policy, res
 	}
 	r.Facts, err = a.facts(ctx)
 	fail("facts", err)
+	r.Hits, err = a.loadHits()
+	fail("was-I-hit results", err)
 
 	body, err := json.Marshal(r)
 	if err != nil {

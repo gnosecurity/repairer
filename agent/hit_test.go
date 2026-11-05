@@ -1,14 +1,19 @@
 package agent
 
 import (
+	"bytes"
 	"crypto/md5"
 	"encoding/hex"
+	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jaekwon/autopatch/approve"
 	"github.com/jaekwon/autopatch/check"
 	"github.com/jaekwon/autopatch/guard"
+	"github.com/jaekwon/autopatch/policy"
 )
 
 func md5hex(s string) string {
@@ -158,5 +163,117 @@ func TestLogTime(t *testing.T) {
 	}
 	if _, ok := logTime("garbage", now); ok {
 		t.Fatal("garbage read as a time")
+	}
+}
+
+// checkAgent is a machine "web" of a fleet whose owner key is ownerKey,
+// with a way to tick it (a bundle of statements and check files first) and
+// to sign the owner's Check of a check, sequence by sequence.
+func checkAgent(t *testing.T) (*Agent, *fakeSys, func([]Message, ...*check.Check) *TickResult, func(*check.Check, string) Message) {
+	t.Helper()
+	a, sys, _ := newAgent(t)
+	key := ownerKey()
+	pub := hex.EncodeToString(key.PubKey().SerializeCompressed())
+	p, err := policy.Decode([]byte(`{"fleet":"test","replaces":"","delay_seconds":86400,
+		"signers":{"me":{"name":"owner","key":"` + pub + `"}},
+		"tiers":[{"name":"A","hosts":["web"],"admit":["me"]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Init("web", p.Canonical(), 0); err != nil {
+		t.Fatal(err)
+	}
+	owner, _ := hex.DecodeString(pub)
+	chain := approve.ChainID(owner, p.Fleet)
+	seq := uint64(0)
+	// sign signs the owner's Check of c, over memo, or over the memo this
+	// agent writes for c when memo is "".
+	sign := func(c *check.Check, memo string) Message {
+		seq++
+		if memo == "" {
+			var err error
+			if memo, err = approve.MemoCheck(c); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return Message{Seq: seq, Tx: signStatement(t, key, chain, seq, "Check", []string{c.Hash()}, memo)}
+	}
+	tick := func(msgs []Message, checks ...*check.Check) *TickResult {
+		t.Helper()
+		if len(msgs) > 0 || len(checks) > 0 {
+			bun := Bundle{Messages: msgs, Checks: map[string][]byte{}}
+			for _, c := range checks {
+				bun.Checks[c.Hash()] = c.Canonical()
+			}
+			js, _ := json.Marshal(bun)
+			if _, err := Intake(filepath.Join(a.StateDir, spoolDir), bytes.NewReader(js)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		res, err := a.Tick(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res
+	}
+	return a, sys, tick, sign
+}
+
+// The owner's Check runs a check once, through intake and the tick, and the
+// signed report carries its result until the next Check of that check. A
+// Check waits for its file, as a Policy does, holding the statements after
+// it; one for another system is taken and not run; one whose memo isn't the
+// one this agent writes is skipped. (The lookout sends every statement after
+// the last one taken again, with the files it names.)
+func TestCheckOnYourWord(t *testing.T) {
+	a, sys, tick, sign := checkAgent(t)
+	c := mkCheck(t, check.DeletedExe, check.Args{})
+	key := strings.Join([]string{"find", "/proc", "-mindepth", "2", "-maxdepth", "2", "-path", "/proc/[0-9]*/exe", "-lname", "* (deleted)", "-printf", `%l\n`}, " ")
+	sys.runOut[key] = "/tmp/.x (deleted)\n"
+	m1 := sign(c, "")
+	if res := tick([]Message{m1}); res.Held == "" || len(res.Hits) != 0 {
+		t.Fatalf("without its file: %+v", res)
+	}
+	res := tick([]Message{m1}, c) // the lookout sends it again with the file: taken
+	if strings.Join(res.Hits, ",") != c.Name() || res.Held != "" {
+		t.Fatalf("with its file: %+v", res)
+	}
+	raw, err := ReadReport(a.StateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sr approve.SignedReport
+	var body FleetReport
+	if json.Unmarshal(raw, &sr) != nil || json.Unmarshal(sr.Body, &body) != nil || len(body.Hits) != 1 {
+		t.Fatalf("the report: %s", raw)
+	}
+	if h := body.Hits[0]; !h.Flag || h.Count != 1 || h.Paths[0] != "/tmp/.x" || h.Check != c.Hash() {
+		t.Fatalf("the result: %+v", h)
+	}
+	// The next tick doesn't run it again; a new Check does, replacing the
+	// result.
+	if res := tick(nil); len(res.Hits) != 0 {
+		t.Fatalf("ran again unasked: %+v", res)
+	}
+	sys.runOut[key] = ""
+	if res := tick([]Message{sign(c, "")}, c); len(res.Hits) != 1 {
+		t.Fatalf("a second Check: %+v", res)
+	}
+	if hits, _ := a.loadHits(); len(hits) != 1 || hits[0].Flag {
+		t.Fatalf("the result wasn't replaced: %+v", hits)
+	}
+	// Another system's check is taken and not run.
+	deb := mkCheck(t, check.DeletedExe, check.Args{})
+	deb.For = []guard.Target{{OS: "debian", Releases: []string{"12"}}}
+	if res := tick([]Message{sign(deb, "")}, deb); len(res.Hits) != 0 || len(res.Accepted) != 1 {
+		t.Fatalf("another system's: %+v", res)
+	}
+	// A memo this agent doesn't write for the check: skipped, nothing run.
+	if res := tick([]Message{sign(c, "autopatch/1 Check a check that reads nothing")}, c); len(res.Hits) != 0 {
+		t.Fatalf("a memo that hides what it reads: %+v", res)
+	}
+	f, _ := a.loadFleet()
+	if n := len(f.Skipped); n == 0 || !strings.Contains(f.Skipped[n-1].Why, "its memo isn't what this agent writes") {
+		t.Fatalf("skipped: %+v", f.Skipped)
 	}
 }

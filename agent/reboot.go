@@ -141,10 +141,16 @@ func (a *Agent) newestKernel(ctx context.Context) (string, error) {
 }
 
 // grubReady says why GRUB can't boot a new kernel once and come back from
-// a panic, or nil: the default must be the saved entry, and the kernel
-// command line must reboot on a panic.
+// a panic, or nil: the default must be the saved entry and GRUB mustn't
+// save each boot's entry as the default (GRUB_SAVEDEFAULT), or a trial
+// kernel would become the default as it boots; GRUB must be able to clear
+// the one-shot entry as it boots it, so its environment file must be on a
+// plain ext2/3/4 or FAT filesystem, where GRUB writes it in place (it can't
+// on btrfs, ZFS, LVM or RAID, and a one-shot entry it can't clear boots a
+// panicking kernel again and again; other filesystems aren't trusted); and
+// the kernel command line must reboot on a panic.
 func (a *Agent) grubReady(ctx context.Context) error {
-	def := ""
+	def, savedef := "", ""
 	files := []string{"/etc/default/grub"}
 	if out, err := a.Sys.Run(ctx, nil, "ls", "/etc/default/grub.d"); err == nil {
 		for _, n := range strings.Fields(string(out)) {
@@ -164,10 +170,27 @@ func (a *Agent) grubReady(ctx context.Context) error {
 			if v, ok := strings.CutPrefix(line, "GRUB_DEFAULT="); ok {
 				def = strings.Trim(v, `"'`)
 			}
+			if v, ok := strings.CutPrefix(line, "GRUB_SAVEDEFAULT="); ok {
+				savedef = strings.Trim(v, `"'`)
+			}
 		}
 	}
 	if def != "saved" {
 		return fmt.Errorf("GRUB_DEFAULT is %q, not saved: a one-shot boot needs it", def)
+	}
+	if savedef == "true" {
+		return errors.New("GRUB_SAVEDEFAULT is true: GRUB would make the new kernel the default as it boots, before its health held")
+	}
+	out, err := a.Sys.Run(ctx, nil, "findmnt", "-n", "-o", "FSTYPE,SOURCE", "--target", "/boot/grub")
+	f := strings.Fields(string(out))
+	if err != nil || len(f) < 2 {
+		return fmt.Errorf("can't tell which filesystem holds /boot/grub: %v", err)
+	}
+	switch fs, src := f[0], f[1]; {
+	case fs != "ext2" && fs != "ext3" && fs != "ext4" && fs != "vfat":
+		return fmt.Errorf("/boot/grub is on %s, not ext2/3/4 or FAT: GRUB may not clear a one-shot boot there, and a kernel that panics would boot again and again", fs)
+	case strings.HasPrefix(src, "/dev/mapper/") || strings.HasPrefix(src, "/dev/md") || strings.HasPrefix(src, "/dev/dm-"):
+		return fmt.Errorf("/boot/grub is on %s (LVM or RAID), where GRUB can't clear a one-shot boot: a kernel that panics would boot again and again", src)
 	}
 	cmd, _ := a.Sys.ReadFile("/proc/cmdline")
 	for _, w := range strings.Fields(string(cmd)) {
@@ -234,14 +257,20 @@ func (a *Agent) rebootStep(ctx context.Context, f *Fleet, p *policy.Policy, samp
 	switch st.Phase {
 	case Rebooting:
 		if running == st.Kernel {
+			// GRUB clears the one-shot entry as it boots it; if it didn't,
+			// clear it now, so a panic from here on comes back to the old
+			// kernel, the default.
 			st.Phase, st.Since = Booted, now
-			return "booted into " + running + "; its health window runs", false, a.saveReboot(st)
+			return "booted into " + running + "; its health window runs", false, errors.Join(a.oneShotGone(ctx), a.saveReboot(st))
 		}
 		if now.Sub(st.Since) < RebootDeadline {
 			return "rebooting into " + st.Kernel, false, nil
 		}
+		// Not on the new kernel by the deadline: it didn't boot, or the
+		// machine never went down; either way the one-shot boot is taken
+		// back, so a later reboot doesn't try the kernel unasked.
 		st.fail(now, st.Kernel+" didn't boot: back on "+running)
-		return st.Why, false, a.saveReboot(st)
+		return st.Why, false, errors.Join(a.oneShotGone(ctx), a.saveReboot(st))
 	case Booted:
 		if running != st.Kernel {
 			st.fail(now, "back on "+running+" before "+st.Kernel+" settled")
@@ -366,12 +395,18 @@ func (a *Agent) rebootStep(ctx context.Context, f *Fleet, p *policy.Policy, samp
 	return "rebooting into " + newest, true, nil
 }
 
+// oneShotGone clears GRUB's one-shot entry, if one is set.
+func (a *Agent) oneShotGone(ctx context.Context) error {
+	_, err := a.Sys.Run(ctx, nil, "grub-editenv", "-", "unset", "next_entry")
+	return err
+}
+
 // rebootNow reboots the machine into the kernel rebootStep readied. If the
 // reboot can't be asked for, the one-shot boot is taken back and the reboot
 // marked failed.
 func (a *Agent) rebootNow(ctx context.Context) error {
 	if _, err := a.Sys.Run(ctx, nil, "systemctl", "reboot"); err != nil {
-		_, uerr := a.Sys.Run(ctx, nil, "grub-editenv", "-", "unset", "next_entry")
+		uerr := a.oneShotGone(ctx)
 		st, lerr := a.loadReboot()
 		if lerr != nil {
 			return errors.Join(err, uerr, lerr)

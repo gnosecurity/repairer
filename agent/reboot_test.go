@@ -58,6 +58,7 @@ func rebootAgent(t *testing.T, tier string) (*Agent, *fakeSys, *Fleet, *policy.P
 		"dpkg-query -W -f ${Package} ${Version} ${db:Status-Abbrev}\n linux-image-[0-9]*": "linux-image-" + oldRel + " 6.8.0-142.142 ii \nlinux-image-" + newRel + " 6.8.0-149.149 ii \n",
 		"dkms status":            "",
 		"ls /etc/default/grub.d": "",
+		"findmnt -n -o FSTYPE,SOURCE --target /boot/grub": "ext4   /dev/vda1\n",
 	}
 	p, err := policy.Decode([]byte(`{"fleet":"test","replaces":"","delay_seconds":86400,
 		"signers":{"me":{"name":"owner","key":"02db41e6e79a9f5fc6813df46202e996d245ef327e5ff3cc47c11bdb46071ab08e"}},
@@ -118,6 +119,9 @@ func TestRebootInTheWindow(t *testing.T) {
 	if m := rstep(t, a, f, p, nil); !strings.HasPrefix(m, "booted into "+newRel) {
 		t.Fatalf("after the boot: %q", m)
 	}
+	if got := ran(sys, "grub-editenv"); len(got) != 1 { // a one-shot entry GRUB left is cleared
+		t.Fatalf("the one-shot entry wasn't cleared on the new kernel: %q", got)
+	}
 	after(TrialWindow - time.Minute)
 	if m := rstep(t, a, f, p, nil); !strings.HasPrefix(m, "booted into ") || len(ran(sys, "grub-set-default "+newEntry)) != 0 {
 		t.Fatalf("inside the health window: %q", m)
@@ -144,6 +148,9 @@ func TestRebootThatDidntBoot(t *testing.T) {
 	after(2 * time.Minute)
 	if m := rstep(t, a, f, p, nil); m != newRel+" didn't boot: back on "+oldRel {
 		t.Fatalf("past the deadline: %q", m)
+	}
+	if got := ran(sys, "grub-editenv"); len(got) != 1 || got[0] != "grub-editenv - unset next_entry" {
+		t.Fatalf("the one-shot boot wasn't taken back: %q", got)
 	}
 	after(24 * time.Hour)
 	if m := rstep(t, a, f, p, nil); !strings.Contains(m, "it failed before ("+newRel+" didn't boot: back on "+oldRel+"), so it waits for your signed Reboot") || len(ran(sys, "grub-reboot")) != 1 {
@@ -186,6 +193,15 @@ func TestRebootHeld(t *testing.T) {
 		}},
 		{"no panic=", `,"reboot":"window","reboot_window":"03:00-04:00"`, "no panic=N", func(s *fakeSys) {
 			s.files["/proc/cmdline"] = "BOOT_IMAGE=/boot/vmlinuz root=UUID=0d5a ro\n"
+		}},
+		{"GRUB saves each boot's entry", `,"reboot":"window","reboot_window":"03:00-04:00"`, "GRUB_SAVEDEFAULT is true", func(s *fakeSys) {
+			s.files["/etc/default/grub"] = "GRUB_DEFAULT=saved\nGRUB_SAVEDEFAULT=true\n"
+		}},
+		{"grubenv on btrfs", `,"reboot":"window","reboot_window":"03:00-04:00"`, "/boot/grub is on btrfs, not ext2/3/4 or FAT", func(s *fakeSys) {
+			s.runOut["findmnt -n -o FSTYPE,SOURCE --target /boot/grub"] = "btrfs  /dev/vda2\n"
+		}},
+		{"grubenv on LVM", `,"reboot":"window","reboot_window":"03:00-04:00"`, "/dev/mapper/vg0-root (LVM or RAID)", func(s *fakeSys) {
+			s.runOut["findmnt -n -o FSTYPE,SOURCE --target /boot/grub"] = "ext4   /dev/mapper/vg0-root\n"
 		}},
 		{"no initrd", `,"reboot":"window","reboot_window":"03:00-04:00"`, "the gates hold it: newest kernel can boot", func(s *fakeSys) {
 			delete(s.files, "/boot/initrd.img-"+newRel)

@@ -6,17 +6,19 @@
 //	autopatch-lookout collect -config lookout.json
 //	autopatch-lookout deliver -config lookout.json
 //	autopatch-lookout run     -config lookout.json         collect and deliver every minute
+//	autopatch-lookout serve   -config lookout.json         run, and serve the page (Adena sign-in) on -listen
 //	autopatch-lookout add     -config lookout.json FILE... a signed message, a guard, a policy, or a Tested
 //	autopatch-lookout match   -config lookout.json -ubuntu CVE.json... [-debian TRACKER.json -cve ID...] [-kev KEV.json]
 package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -24,6 +26,7 @@ import (
 	"time"
 
 	"github.com/jaekwon/autopatch/lookout"
+	"github.com/jaekwon/autopatch/lookout/page"
 	"github.com/jaekwon/autopatch/policy"
 )
 
@@ -32,6 +35,8 @@ const usage = `usage: autopatch-lookout <collect|deliver|run|add|match> -config 
   collect          fetch every machine's signed report (ssh, the report key), keep the newest that verifies
   deliver          carry each machine its bundle (ssh, the intake key)
   run              collect and deliver every minute until stopped
+  serve            run, and serve the page on -listen (127.0.0.1:8794; put TLS in front): sign in with
+                   Adena as one of -admin (Jae's g1ecsu... by default)
   add FILE...      keep a message from autopatch-sign, a guard, a policy, or a signed Tested or model yes
   match            which machines flaws reach: -ubuntu CVE.json (repeat), -debian TRACKER.json with -cve ID
                    (repeat), -kev KEV.json
@@ -63,6 +68,8 @@ func run(ctx context.Context, cmd string, args []string, stdout io.Writer) error
 	fs.Var(&cves, "cve", "match: a flaw to look up in Debian's tracker; repeat")
 	debian := fs.String("debian", "", "match: Debian's tracker JSON")
 	kevFile := fs.String("kev", "", "match: CISA's known exploited list")
+	listen := fs.String("listen", "127.0.0.1:8794", "serve: where the page listens; TLS goes in front")
+	admins := fs.String("admin", page.DefaultAdmin, "serve: comma-separated g1 addresses whose Adena signature opens the page")
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -134,7 +141,21 @@ func run(ctx context.Context, cmd string, args []string, stdout io.Writer) error
 	case "deliver":
 		deliver(col.Collect(ctx))
 		return nil
-	case "run":
+	case "run", "serve":
+		if cmd == "serve" {
+			pg, err := page.New(filepath.Join(c.State, "page"), strings.Split(*admins, ","), p, col, store, time.Now)
+			if err != nil {
+				return err
+			}
+			srv := &http.Server{Addr: *listen, Handler: pg.Handler(), ReadHeaderTimeout: 10 * time.Second,
+				ReadTimeout: time.Minute, WriteTimeout: time.Minute, MaxHeaderBytes: 64 << 10}
+			go func() {
+				if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+					log.Printf("page: %v", err)
+				}
+			}()
+			defer srv.Close()
+		}
 		for {
 			deliver(collect())
 			select {
@@ -149,7 +170,7 @@ func run(ctx context.Context, cmd string, args []string, stdout io.Writer) error
 			if err != nil {
 				return err
 			}
-			what, err := add(store, b)
+			what, err := store.AddFile(b)
 			if err != nil {
 				return fmt.Errorf("%s: %w", f, err)
 			}
@@ -161,28 +182,6 @@ func run(ctx context.Context, cmd string, args []string, stdout io.Writer) error
 	}
 	fs.Usage()
 	return fmt.Errorf("unknown command %q", cmd)
-}
-
-// add keeps a file by what it is.
-func add(store *lookout.Store, b []byte) (string, error) {
-	var probe map[string]json.RawMessage
-	if err := json.Unmarshal(b, &probe); err != nil {
-		return "", err
-	}
-	switch {
-	case probe["seq"] != nil && probe["tx"] != nil:
-		seq, err := store.AddMessage(b)
-		return fmt.Sprintf("the owner's statement %d", seq), err
-	case probe["statement"] != nil:
-		return "a signed statement", store.AddSigned(b)
-	case probe["blocks"] != nil:
-		h, err := store.AddGuard(b)
-		return "guard " + h, err
-	case probe["tiers"] != nil:
-		h, err := store.AddPolicy(b)
-		return "policy " + h, err
-	}
-	return "", errors.New("not a message, a signed statement, a guard or a policy")
 }
 
 func match(stdout io.Writer, sts []lookout.HostStatus, ubuntu []string, debian string, cves []string, kevFile string) error {

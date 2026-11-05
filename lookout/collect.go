@@ -99,6 +99,23 @@ func (c *Collector) collectOne(ctx context.Context, k policy.Key, chain string, 
 	return os.Rename(tmp, filepath.Join(c.Dir, k.Host+".json"))
 }
 
+// Kept is what the lookout holds of every machine now, without fetching.
+func (c *Collector) Kept() []HostStatus {
+	var out []HostStatus
+	for _, k := range c.Policy.Signers.Agents {
+		st := HostStatus{Host: k.Host}
+		if r, err := c.Load(k.Host); err == nil {
+			st.Seq, st.Time, st.Report = r.Seq, r.Time, r
+		} else if !os.IsNotExist(err) {
+			st.Error = err.Error()
+		}
+		st.Silent = st.Report == nil || c.Now().Sub(st.Time) > Silent
+		out = append(out, st)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Host < out[j].Host })
+	return out
+}
+
 // Load reads the newest verified report kept for a machine. The file was
 // verified when it was kept; it is verified again here, against the key
 // the policy names now.

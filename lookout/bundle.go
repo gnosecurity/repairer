@@ -84,6 +84,49 @@ func (s *Store) AddSigned(b []byte) error {
 	return s.put(s.path("signed", name), out)
 }
 
+// AddFile keeps a file by what it is: a message from autopatch-sign, a
+// signed statement, a guard, or a policy. It says what it kept.
+func (s *Store) AddFile(b []byte) (string, error) {
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(b, &probe); err != nil {
+		return "", errors.New("lookout: not JSON")
+	}
+	switch {
+	case probe["seq"] != nil && probe["tx"] != nil:
+		seq, err := s.AddMessage(b)
+		return fmt.Sprintf("the owner's statement %d", seq), err
+	case probe["statement"] != nil:
+		return "a signed statement", s.AddSigned(b)
+	case probe["blocks"] != nil:
+		h, err := s.AddGuard(b)
+		return "guard " + h, err
+	case probe["tiers"] != nil:
+		h, err := s.AddPolicy(b)
+		return "policy " + h, err
+	}
+	return "", errors.New("lookout: not a message, a signed statement, a guard or a policy")
+}
+
+// Guard returns a kept guard file.
+func (s *Store) Guard(hash string) ([]byte, error) {
+	if !isHash(hash) {
+		return nil, errors.New("lookout: not a guard hash")
+	}
+	return os.ReadFile(s.path("guards", hash+".json"))
+}
+
+func isHash(h string) bool {
+	if len(h) != 64 {
+		return false
+	}
+	for _, c := range h {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 // Limits on one bundle, under the agent's 1 MB.
 const (
 	maxBundleMessages = 50

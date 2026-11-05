@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow"><title>Lookout</title>{{template "style"}}</head>
+<body>
+<h1>{{.Host}}: the lookout for fleet {{.Fleet}}</h1>
+<p class="small">Signed in as {{.Admin}}. Policy in force {{short .Policy}}.
+<form method="post" action="/admin/logout"><button type="submit">Sign out (ends every session)</button></form></p>
+{{if .Notice}}<p class="note">{{.Notice}}</p>{{end}}
+{{if .Problem}}<p class="bad">{{.Problem}}</p>{{end}}
+
+<h2>Waiting for you, and on their way</h2>
+{{if .Waiting}}<table><tr><th>Machine</th><th>Guard</th><th>Where it stands</th><th>File</th></tr>
+{{range .Waiting}}<tr><td>{{.Host}}</td><td>{{.Name}}</td><td{{if .Ask}} class="bad"{{end}}>{{.Why}}</td>
+<td><a href="/admin/guard/{{.Hash}}">guard {{short .Hash}}</a></td></tr>{{end}}</table>
+{{else}}<p class="small">Nothing on its way.</p>{{end}}
+
+<h2>Machines</h2>
+<table><tr><th>Machine</th><th>Last report</th><th>Guards on</th><th>Notes</th></tr>
+{{range .Machines}}<tr><td>{{.Host}}</td>
+<td{{if .Silent}} class="bad"{{end}}>{{ago .Seen}}{{if .Silent}}, SILENT{{end}}{{if .Error}}<br><span class="small">{{.Error}}</span>{{end}}</td>
+<td>{{if .Guards}}<ul>{{range .Guards}}<li>{{.}}</li>{{end}}</ul>{{else}}<span class="small">none</span>{{end}}</td>
+<td>{{if .Policy}}<span class="bad">runs policy {{short .Policy}}</span><br>{{end}}
+{{if .Pending}}<span class="bad">policy {{short .Pending}} PENDING: if you didn't sign it, cancel it</span><br>{{end}}
+{{if .Held}}<span class="bad">{{.Held}}</span><br>{{end}}
+{{range .Failing}}<span class="bad">failing: {{.}}</span><br>{{end}}
+{{if .Wants}}<span class="small">waits for a canary on {{.Wants}}</span>{{end}}</td></tr>{{end}}
+</table>
+
+<h2>Sign on your own machine</h2>
+<p>Download <a href="/admin/reports.tar">the machines' signed reports</a> and <a href="/admin/policy.json">the policy</a>,
+and the guard above. Run autopatch-sign with them; it writes the memo itself and checks what it signs.
+Then upload the file it wrote. The page offers files, never commands.</p>
+<form method="post" action="/admin/upload" enctype="multipart/form-data">
+<input type="file" name="file" accept=".json,application/json" required> <button type="submit">Upload</button></form>
+</body></html>

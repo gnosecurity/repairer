@@ -518,10 +518,16 @@ func TestFundWaits(cur realm, t *testing.T) {
 	if _, r, _ := State(id); r != 1004 {
 		t.Fatalf("the new round is %d", r)
 	}
+	testing.SetRealm(u(owners[7]))
+	Unstake(cross(cur), 7) // while the panel's round waits: pending until it is drawn
+	testing.SetRealm(u(anyone))
 	SubmitBeacon(cross(cur), 1004, sig1004)
 	DrawPanel(cross(cur), id)
 	if st, _, _ := State(id); st != Panelled || FundBalance() != 0 || roundsWait() {
 		t.Fatalf("after the draw: %s, fund %d, a round waits: %v", st, FundBalance(), roundsWait())
+	}
+	if _, _, _, parked := below(nTickets); len(pending) != 0 || parked != MinTicket {
+		t.Errorf("the panel's draw left %d pending, %d parked", len(pending), parked)
 	}
 }
 

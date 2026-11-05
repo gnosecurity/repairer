@@ -196,7 +196,7 @@ func TestLiarCantStallThePool(cur realm, t *testing.T) {
 				} else {
 					ySeats[p] += seats[p]
 				}
-				if party[p] || p == objector {
+				if party[p] { // a checker of the filing: never drawn to sit before round 11
 					partySeats += seats[p]
 				}
 				testing.SetRealm(u(p))
@@ -234,7 +234,7 @@ func TestLiarCantStallThePool(cur realm, t *testing.T) {
 		t.Fatalf("the dispute never reached the pool: %s", st)
 	}
 	if partySeats == 0 {
-		t.Error("no party sat on any panel: seats aren't drawn from every ticket")
+		t.Error("no checker of the filing sat on any panel: seats aren't drawn from every ticket")
 	}
 	testing.SetRealm(u(anyone))
 	OpenPool(cross(cur), id)
@@ -922,5 +922,31 @@ func TestShowerCountedOnce(cur realm, t *testing.T) {
 		if got := bal(a) - before[a]; got != want[a] {
 			t.Errorf("%s: got %d, want %d", a, got, want[a])
 		}
+	}
+}
+
+// A ticket that started leaving while a round waited, withdrawn once none
+// waits, takes its weight out of the tree at once, and the withdrawal parks
+// another such ticket on its way (round 11, new major 2).
+func TestWithdrawPendingWhenNoneWaits(cur realm, t *testing.T) {
+	reset()
+	for _, w := range []address{alice, bob, carol, dave, eve} {
+		testing.SetRealm(u(w))
+		stakeOne(t, cur)
+	}
+	testing.SkipHeights(MinTicketAge)
+	testing.SetRealm(u(worker))
+	file(t, cur, ok, 1001) // its round waits while dave and eve leave
+	testing.SetRealm(u(dave))
+	Unstake(cross(cur), 3)
+	testing.SetRealm(u(eve))
+	Unstake(cross(cur), 4)
+	if len(pending) != 2 {
+		t.Fatalf("%d pending", len(pending))
+	}
+	testing.SkipHeights(UnbondBlocks) // the round lapses; nobody compacts
+	Withdraw(cross(cur), 4)
+	if sum, left, gone, parked := below(nTickets); sum != 3*MinTicket || left != 0 || gone != 0 || parked != MinTicket || len(pending) != 0 {
+		t.Fatalf("after the withdrawal: %d, %d leaving, %d withdrawn, %d parked; %d pending", sum, left, gone, parked, len(pending))
 	}
 }

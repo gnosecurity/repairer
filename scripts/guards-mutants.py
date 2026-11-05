@@ -147,7 +147,7 @@ M = [
     ("abandon doesn't let go of its round", G, "func abandon(cur realm, f *filing, id int, refund bool) string {\n\tunwait(f, id)", "func abandon(cur realm, f *filing, id int, refund bool) string {"),
     ("withdrawn while waiting comes out at once", T, "case roundsWait(): // marked; out once no round waits", "case false: // marked; out once no round waits"),
     ("compact while rounds wait", T, "\tif roundsWait() {\n\t\treturn len(pending)\n\t}", "\tif false {\n\t\treturn len(pending)\n\t}"),
-    ("lapsed rounds still wait", T, "wait = now() <= fixed+DrawDeadline", "wait = true"),
+    ("lapsed rounds still wait", T, "wait = now() <= fixed+DrawDeadline", "wait = fixed >= 0"),
     ("compact leaves weight marked", T, "addPath(t.id, -t.weight, -t.weight, -t.weight, 0)", "addPath(t.id, -t.weight, -t.weight, 0, 0)"),
     ("a withdrawal marks no weight", T, "\t\taddPath(t.id, 0, 0, t.weight, 0)\n\tdefault:", "\t\taddPath(t.id, 0, 0, 0, 0)\n\tdefault:"),
     ("empty paths kept", T, "if next.sum == 0 && next.parked == 0 { // nothing below", "if false { // nothing below"),

@@ -5,8 +5,9 @@
 //	go run ./scripts/e2e verify REPORT KEYHEX   check a signed report and print a summary
 //	go run ./scripts/e2e genreboot DIR MODE WINDOW KERNEL NOTAFTER
 //	                                            B3's VM test: a policy whose tier reboots by MODE
-//	                                            (window or yes), and the owner's signed Reboot of
-//	                                            vm1 into KERNEL (Unix seconds NOTAFTER), sequence 1
+//	                                            (window or yes), and the owner's signed Reboots of
+//	                                            vm1 into KERNEL (Unix seconds NOTAFTER), sequences
+//	                                            1 and 2 (reboot-1.json, reboot-2.json)
 package main
 
 import (
@@ -205,8 +206,10 @@ func verify(path, key string) error {
 
 // genReboot makes B3's VM test inputs: the owner's key is a test key from a
 // fixed seed (public: this is test tooling), the policy's one tier holds
-// vm1 and reboots by mode, and reboot-1.json is a bundle carrying the
-// owner's signed Reboot of vm1 into kernel, as gnokey would sign it.
+// vm1 and reboots by mode, and reboot-1.json and reboot-2.json are bundles
+// carrying the owner's signed Reboots of vm1 into kernel, sequences 1 and
+// 2, as gnokey would sign them (the second for when the system asks for a
+// reboot once the kernel runs).
 func genReboot(dir, mode, window, kernel, notAfter string) error {
 	seed := sha256.Sum256([]byte("autopatch e2e owner"))
 	owner := secp256k1.PrivKeyFromBytes(seed[:])
@@ -233,32 +236,37 @@ func genReboot(dir, mode, window, kernel, notAfter string) error {
 	}
 	const caller = "g1ss6w8xfy7vnp595yely63jqa8553k03mjcglen"
 	chain := approve.ChainID(pub, p.Fleet)
-	msg, err := approve.SignBytes(chain, 1, approve.Call{Caller: caller, Func: "Reboot", Args: r.Args()}, memo, false)
-	if err != nil {
-		return err
-	}
-	h := sha256.Sum256(msg)
-	tx, err := json.Marshal(map[string]any{
-		"msg": []any{map[string]any{"@type": "/vm.m_call", "caller": caller, "send": "", "max_deposit": "",
-			"pkg_path": approve.Realm, "func": "Reboot", "args": r.Args()}},
-		"fee":        map[string]any{"gas_wanted": "0", "gas_fee": "0ugnot"},
-		"signatures": []any{map[string]any{"pub_key": map[string]any{"@type": "/tm.PubKeySecp256k1", "value": pub}, "signature": ecdsa.SignCompact(owner, h[:], true)[1:]}},
-		"memo":       memo,
-	})
-	if err != nil {
-		return err
-	}
-	if _, err := approve.VerifyReboot(tx, chain, 1, pub); err != nil {
-		return fmt.Errorf("the Reboot doesn't verify: %w", err)
-	}
-	bun, err := json.Marshal(agent.Bundle{Messages: []agent.Message{{Seq: 1, Tx: tx}}})
-	if err != nil {
-		return err
+	bundles := map[string][]byte{}
+	for _, seq := range []uint64{1, 2} {
+		msg, err := approve.SignBytes(chain, seq, approve.Call{Caller: caller, Func: "Reboot", Args: r.Args()}, memo, false)
+		if err != nil {
+			return err
+		}
+		h := sha256.Sum256(msg)
+		tx, err := json.Marshal(map[string]any{
+			"msg": []any{map[string]any{"@type": "/vm.m_call", "caller": caller, "send": "", "max_deposit": "",
+				"pkg_path": approve.Realm, "func": "Reboot", "args": r.Args()}},
+			"fee":        map[string]any{"gas_wanted": "0", "gas_fee": "0ugnot"},
+			"signatures": []any{map[string]any{"pub_key": map[string]any{"@type": "/tm.PubKeySecp256k1", "value": pub}, "signature": ecdsa.SignCompact(owner, h[:], true)[1:]}},
+			"memo":       memo,
+		})
+		if err != nil {
+			return err
+		}
+		if _, err := approve.VerifyReboot(tx, chain, seq, pub); err != nil {
+			return fmt.Errorf("the Reboot doesn't verify: %w", err)
+		}
+		bun, err := json.Marshal(agent.Bundle{Messages: []agent.Message{{Seq: seq, Tx: tx}}})
+		if err != nil {
+			return err
+		}
+		bundles[fmt.Sprintf("reboot-%d.json", seq)] = bun
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	for name, data := range map[string][]byte{"policy.json": p.Canonical(), "reboot-1.json": bun} {
+	bundles["policy.json"] = p.Canonical()
+	for name, data := range bundles {
 		if err := os.WriteFile(filepath.Join(dir, name), data, 0o644); err != nil {
 			return err
 		}

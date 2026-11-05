@@ -5,6 +5,7 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -112,15 +113,16 @@ func TestHitForeignModules(t *testing.T) {
 	a, sys, _ := newAgent(t)
 	rel := "6.8.0-142-generic"
 	sys.files["/proc/sys/kernel/osrelease"] = rel + "\n"
-	sys.files["/proc/modules"] = "nf_tables 368640 1 - Live 0x0\nrootkit 16384 0 - Live 0x0\nnvidia 54001664 0 - Live 0x0\n"
+	sys.files["/proc/modules"] = "nf_tables 368640 1 - Live 0x0\nrootkit 16384 0 - Live 0x0\nnvidia 54001664 0 - Live 0x0\n-b/tmp 4096 0 - Live 0x0\n"
 	nf := "/lib/modules/" + rel + "/kernel/net/netfilter/nf_tables.ko.zst"
 	rk := "/lib/modules/" + rel + "/extra/rootkit.ko"
 	nv := "/lib/modules/" + rel + "/updates/dkms/nvidia.ko.zst"
-	sys.runOut["modinfo -n nf_tables rootkit nvidia"] = nf + "\n" + rk + "\n" + nv + "\n"
-	sys.runOut["dpkg -S "+nf+" "+rk+" "+nv] = "linux-modules-" + rel + ": " + nf + "\n"
+	sys.runOut["modinfo -n -- nf_tables rootkit nvidia"] = nf + "\n" + rk + "\n" + nv + "\n"
+	sys.runOut["dpkg -S -- "+nf+" "+rk+" "+nv] = "linux-modules-" + rel + ": " + nf + "\n"
 	sys.runOut["dkms status"] = "nvidia/550.120, " + rel + ", x86_64: installed\n"
 	r := a.runCheck(ctx, mkCheck(t, check.ForeignModules, check.Args{}))
-	if !r.Flag || r.Count != 1 || r.Paths[0] != rk {
+	// A module named like an option is a sign, and never an argument.
+	if !r.Flag || r.Count != 2 || r.Paths[0] != "/proc/modules: -b/tmp" || r.Paths[1] != rk {
 		t.Fatalf("%+v", r)
 	}
 }
@@ -139,7 +141,7 @@ func TestHitLogMatch(t *testing.T) {
 	if !r.Flag || r.Count != 2 || len(r.Paths) != 0 || r.Error != "" {
 		t.Fatalf("auth: %+v", r)
 	}
-	sys.runOut["journalctl --no-pager -q -o cat -u ssh.service --since @"+since] = "Accepted publickey for root\nother\nAccepted publickey for jae\n"
+	sys.runOut["journalctl --no-pager -q -o cat -n 100000 -u ssh.service --since @"+since] = "Accepted publickey for root\nother\nAccepted publickey for jae\n"
 	r = a.runCheck(ctx, mkCheck(t, check.LogMatch, check.Args{Source: "unit:ssh.service", Pattern: "Accepted publickey", Since: since}))
 	if r.Count != 2 {
 		t.Fatalf("a unit's journal: %+v", r)
@@ -284,5 +286,25 @@ func TestCheckOnYourWord(t *testing.T) {
 	f, _ := a.loadFleet()
 	if n := len(f.Skipped); n == 0 || !strings.Contains(f.Skipped[n-1].Why, "its memo isn't what this agent writes") {
 		t.Fatalf("skipped: %+v", f.Skipped)
+	}
+}
+
+// A find that couldn't read part of its places never reads as clean; a
+// find over /proc that only met processes ending during its walk does; a
+// path is cut to its length and made printable.
+func TestHitPartialAndClipped(t *testing.T) {
+	a, sys, _ := newAgent(t)
+	sys.files["/tmp"] = ""
+	sys.failOn = "find /tmp"
+	r := a.runCheck(ctx, mkCheck(t, check.NewSince, check.Args{What: "setuid", Since: since}))
+	if r.Error == "" || r.Flag && r.Error == "" {
+		t.Fatalf("an unread place read as clean: %+v", r)
+	}
+	if !onlyVanished(errors.New("find /proc: exit status 1: find: '/proc/4242/exe': No such file or directory")) ||
+		onlyVanished(errors.New("find /proc: exit status 1: find: '/proc/1/exe': Permission denied")) {
+		t.Fatal("onlyVanished")
+	}
+	if got := clip("/tmp/a\nb"+strings.Repeat("x", 300), maxHitPath); len(got) != maxHitPath || strings.ContainsRune(got, '\n') {
+		t.Fatalf("clip: %q", got)
 	}
 }

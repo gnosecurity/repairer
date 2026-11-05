@@ -12,7 +12,9 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,8 +34,19 @@ var (
 	HitBytes = int64(64 << 20)
 )
 
-// maxHitPaths is how many paths a result carries.
-const maxHitPaths = 100
+// What a result carries: up to maxHitPaths paths of at most maxHitPath
+// bytes each, printable, and an error of at most maxHitError bytes; the
+// journal is read to at most maxJournal lines.
+const (
+	maxHitPaths = 100
+	maxHitPath  = 256
+	maxHitError = 300
+	maxJournal  = 100000
+)
+
+// plainModule is a kernel module's name as the kernel's own modules are
+// named; a loaded module named otherwise is a sign by itself.
+var plainModule = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 // HitResult is what a check found here.
 type HitResult struct {
@@ -51,8 +64,23 @@ type HitResult struct {
 func (r *HitResult) add(path string) {
 	r.Count++
 	if len(r.Paths) < maxHitPaths {
-		r.Paths = append(r.Paths, path)
+		r.Paths = append(r.Paths, clip(path, maxHitPath))
 	}
+}
+
+// clip makes s printable and at most n bytes, so a file named to mislead
+// can't fill or garble a report.
+func clip(s string, n int) string {
+	b := []byte(s)
+	for i, c := range b {
+		if c < 0x20 || c > 0x7e {
+			b[i] = '?'
+		}
+	}
+	if len(b) > n {
+		return string(b[:n-3]) + "..."
+	}
+	return string(b)
 }
 
 // runCheck answers a check here.
@@ -79,7 +107,7 @@ func (a *Agent) runCheck(ctx context.Context, c *check.Check) *HitResult {
 		r.Capped = "time"
 	}
 	if err != nil && r.Capped == "" {
-		r.Error = err.Error()
+		r.Error = clip(err.Error(), maxHitError)
 	}
 	r.Flag = r.Count > 0
 	return r
@@ -137,8 +165,8 @@ func (a *Agent) hitPackageFiles(ctx context.Context, pkg string, r *HitResult) e
 func (a *Agent) hitDeletedExe(ctx context.Context, r *HitResult) error {
 	out, err := a.Sys.Run(ctx, nil, "find", "/proc", "-mindepth", "2", "-maxdepth", "2", "-path", "/proc/[0-9]*/exe",
 		"-lname", "* (deleted)", "-printf", `%l\n`)
-	if err != nil && len(out) == 0 {
-		return err
+	if err != nil && !onlyVanished(err) {
+		return err // what it found still counts, and the result says it couldn't read all
 	}
 	seen := map[string]bool{}
 	for _, l := range lines(out) {
@@ -163,6 +191,7 @@ var newSinceRoots = map[string][]string{
 // after since (the inode's change time, which touch can't set back).
 func (a *Agent) hitNewSince(ctx context.Context, what string, since int64, r *HitResult) error {
 	var paths []string
+	var firstErr error
 	for _, root := range newSinceRoots[what] {
 		if _, err := a.Sys.Stat(root); err != nil {
 			continue
@@ -178,10 +207,10 @@ func (a *Agent) hitNewSince(ctx context.Context, what string, since int64, r *Hi
 		}
 		args = append(args, "-newerct", fmt.Sprintf("@%d", since), "-print")
 		out, err := a.Sys.Run(ctx, nil, "find", args...)
-		if err != nil && len(out) == 0 && ctx.Err() == nil {
-			return fmt.Errorf("find %s: %w", root, err)
-		}
 		paths = append(paths, lines(out)...)
+		if err != nil && ctx.Err() == nil && firstErr == nil {
+			firstErr = fmt.Errorf("find %s: %w", root, err) // part unread: never a clean answer
+		}
 		if len(paths) > HitFiles {
 			r.Capped = "files"
 			break
@@ -194,7 +223,14 @@ func (a *Agent) hitNewSince(ctx context.Context, what string, since int64, r *Hi
 	for _, p := range paths {
 		r.add(p)
 	}
-	return nil
+	return firstErr
+}
+
+// onlyVanished says whether find's failure was only processes that ended
+// while it walked /proc.
+func onlyVanished(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "No such file or directory") && !strings.Contains(msg, "Permission denied")
 }
 
 // hitForeignModules lists loaded kernel modules whose file no installed
@@ -206,8 +242,13 @@ func (a *Agent) hitForeignModules(ctx context.Context, r *HitResult) error {
 	}
 	var names []string
 	for _, l := range lines(mods) {
-		if f := strings.Fields(l); len(f) > 0 {
+		f := strings.Fields(l)
+		switch {
+		case len(f) == 0:
+		case plainModule.MatchString(f[0]):
 			names = append(names, f[0])
+		default: // a name no kernel module has: a sign by itself, never an argument
+			r.add("/proc/modules: " + f[0])
 		}
 	}
 	if len(names) == 0 {
@@ -216,7 +257,7 @@ func (a *Agent) hitForeignModules(ctx context.Context, r *HitResult) error {
 	if len(names) > HitFiles {
 		names, r.Capped = names[:HitFiles], "files"
 	}
-	out, err := a.Sys.Run(ctx, nil, "modinfo", append([]string{"-n"}, names...)...)
+	out, err := a.Sys.Run(ctx, nil, "modinfo", append([]string{"-n", "--"}, names...)...)
 	if err != nil && len(out) == 0 {
 		return fmt.Errorf("modinfo: %w", err)
 	}
@@ -230,7 +271,7 @@ func (a *Agent) hitForeignModules(ctx context.Context, r *HitResult) error {
 		return nil
 	}
 	owned := map[string]bool{}
-	dout, _ := a.Sys.Run(ctx, nil, "dpkg", append([]string{"-S"}, files...)...) // exits 1 when some path is no package's
+	dout, _ := a.Sys.Run(ctx, nil, "dpkg", append([]string{"-S", "--"}, files...)...) // exits 1 when some path is no package's
 	for _, l := range lines(dout) {
 		if _, p, ok := strings.Cut(l, ": "); ok {
 			for _, q := range strings.Split(p, ", ") {
@@ -263,12 +304,15 @@ func (a *Agent) hitForeignModules(ctx context.Context, r *HitResult) error {
 // log (its file and first rotation), or a unit's journal.
 func (a *Agent) hitLogMatch(ctx context.Context, source, pattern string, since int64, r *HitResult) error {
 	if unit, ok := strings.CutPrefix(source, "unit:"); ok {
-		out, err := a.Sys.Run(ctx, nil, "journalctl", "--no-pager", "-q", "-o", "cat", "-u", unit, "--since", fmt.Sprintf("@%d", since))
+		out, err := a.Sys.Run(ctx, nil, "journalctl", "--no-pager", "-q", "-o", "cat", "-n", strconv.Itoa(maxJournal), "-u", unit, "--since", fmt.Sprintf("@%d", since))
 		if err != nil && len(out) == 0 {
 			return fmt.Errorf("journalctl: %w", err)
 		}
 		if int64(len(out)) > HitBytes {
 			out, r.Capped = out[:HitBytes], "bytes"
+		}
+		if ls := lines(out); len(ls) >= maxJournal {
+			r.Capped = "lines" // the newest maxJournal lines since since: not every line
 		}
 		for _, l := range lines(out) {
 			if strings.Contains(l, pattern) {

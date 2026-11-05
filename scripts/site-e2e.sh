@@ -45,11 +45,11 @@ addr, path = sys.argv[1], sys.argv[2]
 c = lambda kind, payload, salt: hashlib.sha256((addr + "\0" + kind + "\0" + payload + "\0" + salt).encode()).hexdigest()
 gh = hashlib.sha256(open(path, "rb").read().rstrip(b"\n")).hexdigest()
 tc = c("transcript", "a" * 64 + " pass", "t")
-print(tc, c("guard", gh + "\0" + tc, "s"))
+print(tc, c("guard", gh + "\0" + "ubuntu 24.04" + "\0" + tc, "s"))
 PY
 )
 call -func Commit -args "$commit" -send 1000000ugnot
-call -func Reveal -args 0 -args "$guard" -args "$tc" -args s
+call -func Reveal -args 0 -args "$guard" -args "ubuntu 24.04" -args "$tc" -args s
 cd "$repo" && go run ./cmd/autopatch-site -rpc http://127.0.0.1:36657 -out "$D/site"
 fail() { echo "FAIL: $1"; exit 1; }
 grep -q '<a href="filing/0.html">filing 0</a>: revealed' "$D/site/index.html" || fail "the index: $(cat "$D/site/index.html")"

@@ -66,9 +66,11 @@ type bootGroup struct {
 	// that held has passed since the boot.
 	Windowed []string `json:"windowed,omitempty"`
 	Observed []string `json:"observed,omitempty"`
-	// ObservedNew are the observed guards at their first boot: only they
-	// make the window shared, so one that never boots doesn't make every
-	// later boot shared (round 9, minor 8).
+	// ObservedNew are the observed guards that make the window shared: at
+	// their first boot, or at a later one where a check recorded against
+	// them held just before, since they may break it again (round 10, minor
+	// 7). One whose check never came back doesn't make every later boot
+	// shared (round 9, minor 8).
 	ObservedNew []string `json:"observed_new,omitempty"`
 	// Cut are windows after an earlier boot that this boot cut short;
 	// CutShared says whether that group had more than one guard.
@@ -115,19 +117,36 @@ func (a *Agent) openBootGroup(windowed, observed, observedNew, cut []string, cut
 				}
 			}
 		}
-		return a.saveBootGroup(&g)
+	} else {
+		// No fresh samples: a check counts only if it held in the baseline
+		// of every windowed guard that has one.
+		for _, h := range windowed {
+			ev, err := a.loadEvidence(h)
+			if err != nil || ev.Trial == nil {
+				continue
+			}
+			g.Sampled = true
+			for k, n := range ev.Trial.Before {
+				if old, seen := g.Before[k]; !seen || old == 0 {
+					g.Before[k] = n
+				}
+			}
+		}
 	}
-	// No fresh samples: a check counts only if it held in the baseline of
-	// every windowed guard that has one.
-	for _, h := range windowed {
-		ev, err := a.loadEvidence(h)
-		if err != nil || ev.Trial == nil {
+	// A watched guard past its first boot makes this one shared when a check
+	// recorded against it held just before (or nothing was sampled): it may
+	// break that check again, so a guard booting beside it isn't judged
+	// alone for it (round 10, minor 7).
+	for _, h := range observed {
+		if containsHash(g.ObservedNew, h) {
 			continue
 		}
-		g.Sampled = true
-		for k, n := range ev.Trial.Before {
-			if old, seen := g.Before[k]; !seen || old == 0 {
-				g.Before[k] = n
+		if ev, err := a.loadEvidence(h); err == nil {
+			for k := range ev.Broke {
+				if n, seen := g.Before[k]; !g.Sampled || (seen && n == 0) {
+					g.ObservedNew = append(g.ObservedNew, h)
+					break
+				}
 			}
 		}
 	}

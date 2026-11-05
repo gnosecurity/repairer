@@ -28,6 +28,12 @@ const (
 
 const guardText = `{"flaw":"CVE-2026-98432","drop":{"ip_options":true}}` + "\n"
 
+// sys is the system the tests' transcripts are for.
+const sys = "ubuntu 24.04"
+
+// lvl is the tests' guard's level on sys.
+func lvl() string { return Level(GuardHash(guardText), sys) }
+
 var (
 	worker = testutils.TestAddress("worker")
 	alice  = testutils.TestAddress("alice")
@@ -46,13 +52,14 @@ var (
 func reset() {
 	tickets, nTickets, filings, nFilings = avl.NewTree(), 0, avl.NewTree(), 0
 	levels, records, beacon, burned, fund = avl.NewTree(), avl.NewTree(), avl.NewTree(), 0, 0
-	sumRoot = &sumNode{}
-	votes, allVotes = map[int]*poolVote{}, nil
+	sumRoot, active = nil, 0
+	votes, allVotes, openVotes = map[int]*poolVote{}, nil, nil
 	texts, byGuard = avl.NewTree(), avl.NewTree()
 	MinTicketAge, RevealWindow, CheckWindow, DrawDeadline, UnbondBlocks, DrawDelay = 10, 5, 20, 30, 60, 3
 	ObjectionWindow, AppealWindow, LevelFloor = 5, 5, 1
 	Reruns, PanelSizes = 2, []int{4, 7}
-	PoolCommitWindow, PoolRevealWindow, PoolFee = 5, 5, 1_000_000
+	PoolCommitWindow, PoolRevealWindow, PoolFee, PoolClaimWindow = 5, 5, 1_000_000, 50
+	AppealBond, RerunFee, MaxSettle = 1_000_000, 500_000, 64
 }
 
 func u(a address) runtime.Realm { return testing.NewUserRealm(a) }
@@ -106,16 +113,22 @@ func stakeOne(t *testing.T, rlm realm) {
 	send(0)
 }
 
+// filingCommit is the commitment of the worker's filing of guard on sys with the
+// transcript commitment tc.
+func filingCommit(guard, tc string) string {
+	return Commitment(worker, "guard", GuardHash(guard)+"\x00"+sys+"\x00"+tc, "s")
+}
+
 // file commits and reveals the worker's filing of guardText with transcript
 // tr, to be drawn from beacon round r. The test sets the worker first.
 func file(t *testing.T, rlm realm, tr string, r uint64) int {
 	tc := Commitment(worker, "transcript", tr, "t")
 	send(FilingBond)
-	id := Commit(cross(rlm), Commitment(worker, "guard", GuardHash(guardText)+"\x00"+tc, "s"))
+	id := Commit(cross(rlm), filingCommit(guardText, tc))
 	send(0)
 	testing.SkipHeights(1)
 	aim(r)
-	Reveal(cross(rlm), id, guardText, tc, "s")
+	Reveal(cross(rlm), id, guardText, sys, tc, "s")
 	return id
 }
 
@@ -222,15 +235,15 @@ func TestHonest(cur realm, t *testing.T) {
 		RevealCheck(cross(cur), id, ok, salt(c))
 	}
 	testing.SetRealm(u(anyone))
-	if s := Settle(cross(cur), id); s != Agreed || Level(GuardHash(guardText)) != "" {
-		t.Fatalf("agreed: %s, level %q", s, Level(GuardHash(guardText)))
+	if s := Settle(cross(cur), id); s != Agreed || lvl() != "" {
+		t.Fatalf("agreed: %s, level %q", s, lvl())
 	}
 	refuses(t, "no agreement to finalize", func() { Finalize(cross(cur), id) })
 	if bal(worker) != before[worker] {
 		t.Fatal("paid before the objection window passed")
 	}
-	if s := finalize(t, cur, id); s != Tested || Level(GuardHash(guardText)) != Tested {
-		t.Fatalf("finalized %s, level %q", s, Level(GuardHash(guardText)))
+	if s := finalize(t, cur, id); s != Tested || lvl() != Tested {
+		t.Fatalf("finalized %s, level %q", s, lvl())
 	}
 	refuses(t, "nothing to settle", func() { Settle(cross(cur), id) })
 	for _, c := range drawn {
@@ -400,7 +413,7 @@ func TestLiar(cur realm, t *testing.T) {
 		RevealCheck(cross(cur), id, or(says[c], ok), salt(c))
 	}
 	testing.SetRealm(u(anyone))
-	if s := Settle(cross(cur), id); s != Rerun || Level(GuardHash(guardText)) != "" {
+	if s := Settle(cross(cur), id); s != Rerun || lvl() != "" {
 		t.Fatalf("with a liar: %s", s)
 	}
 	for _, a := range append([]address{worker}, owners...) {
@@ -522,7 +535,7 @@ func TestSilentWorker(cur realm, t *testing.T) {
 func TestCopierAndFlood(cur realm, t *testing.T) {
 	reset()
 	tr := Commitment(worker, "transcript", ok, "t")
-	commit := Commitment(worker, "guard", GuardHash(guardText)+"\x00"+tr, "s")
+	commit := filingCommit(guardText, tr)
 	testing.SetRealm(u(eve))
 	send(FilingBond)
 	copied := Commit(cross(cur), commit) // eve saw it in the mempool
@@ -536,19 +549,21 @@ func TestCopierAndFlood(cur realm, t *testing.T) {
 	}
 	send(0)
 	refuses(t, "nothing to forfeit", func() { Forfeit(cross(cur), copied) })
-	refuses(t, "that isn't what was committed", func() { Reveal(cross(cur), copied, guardText, tr, "s") })
-	refuses(t, "only the filer reveals", func() { Reveal(cross(cur), id, guardText, tr, "s") })
+	refuses(t, "that isn't what was committed", func() { Reveal(cross(cur), copied, guardText, sys, tr, "s") })
+	refuses(t, "only the filer reveals", func() { Reveal(cross(cur), id, guardText, sys, tr, "s") })
 	testing.SetRealm(u(worker))
 	big := strings.Repeat("x", MaxGuard+1)
 	send(FilingBond)
-	bigID := Commit(cross(cur), Commitment(worker, "guard", GuardHash(big)+"\x00"+tr, "s"))
+	bigID := Commit(cross(cur), filingCommit(big, tr))
 	send(0)
-	refuses(t, "a guard is at most", func() { Reveal(cross(cur), bigID, big, tr, "s") })
-	refuses(t, "that isn't what was committed", func() { Reveal(cross(cur), id, guardText+" ", tr, "s") })
-	Reveal(cross(cur), id, guardText, tr, "s")
+	refuses(t, "a guard is at most", func() { Reveal(cross(cur), bigID, big, sys, tr, "s") })
+	refuses(t, "that isn't what was committed", func() { Reveal(cross(cur), id, guardText+" ", sys, tr, "s") })
+	refuses(t, "that isn't what was committed", func() { Reveal(cross(cur), id, guardText, "debian 12", tr, "s") })
+	refuses(t, "a system is its os-release ID and VERSION_ID", func() { Reveal(cross(cur), id, guardText, "Ubuntu", tr, "s") })
+	Reveal(cross(cur), id, guardText, sys, tr, "s")
 	testing.SkipHeights(RevealWindow + 1)
 	testing.SetRealm(u(eve))
-	refuses(t, "the reveal window has passed", func() { Reveal(cross(cur), copied, guardText, tr, "s") })
+	refuses(t, "the reveal window has passed", func() { Reveal(cross(cur), copied, guardText, sys, tr, "s") })
 	for f := 0; f < nFilings; f++ {
 		if f == id {
 			refuses(t, "nothing to forfeit", func() { Forfeit(cross(cur), f) })
@@ -584,7 +599,7 @@ func TestYoungTickets(cur realm, t *testing.T) {
 	tc := Commitment(worker, "transcript", ok, "t")
 	testing.SetRealm(u(worker))
 	send(FilingBond)
-	id := Commit(cross(cur), Commitment(worker, "guard", GuardHash(guardText)+"\x00"+tc, "s"))
+	id := Commit(cross(cur), filingCommit(guardText, tc))
 	send(0)
 	for _, w := range []address{eve, anyone} { // staked for the attack, after the filing
 		testing.SetRealm(u(w))
@@ -592,7 +607,7 @@ func TestYoungTickets(cur realm, t *testing.T) {
 	}
 	aim(1001)
 	testing.SetRealm(u(worker))
-	Reveal(cross(cur), id, guardText, tc, "s")
+	Reveal(cross(cur), id, guardText, sys, tc, "s")
 	testing.SetRealm(u(anyone))
 	SubmitBeacon(cross(cur), 1001, sig1001)
 	refuses(t, "too few staked checkers", func() { Draw(cross(cur), id) })
@@ -632,7 +647,7 @@ func TestNobodyAnswers(cur realm, t *testing.T) {
 	RevealCheck(cross(cur), id, ok, salt(worker))
 	testing.SkipHeights(RevealWindow + 1)
 	testing.SetRealm(u(anyone))
-	if s := Settle(cross(cur), id); s != Abandoned || Level(GuardHash(guardText)) != "" {
+	if s := Settle(cross(cur), id); s != Abandoned || lvl() != "" {
 		t.Fatalf("checked by nobody: %s", s)
 	}
 	if got := bal(worker) - before; got != FilingBond-FundFee || Burned() != 3*NoShowFine {
@@ -673,8 +688,8 @@ func TestEveryoneSaysItFails(cur realm, t *testing.T) {
 	refuses(t, "no agreement to object to", func() { Object(cross(cur), id, ok) })
 	send(0)
 	testing.SetRealm(u(anyone))
-	if s := Finalize(cross(cur), id); s != Failed || Level(GuardHash(guardText)) != "" {
-		t.Fatalf("settled %s, level %q", s, Level(GuardHash(guardText)))
+	if s := Finalize(cross(cur), id); s != Failed || lvl() != "" {
+		t.Fatalf("settled %s, level %q", s, lvl())
 	}
 	for _, c := range drawn {
 		if got := bal(c) - before[c]; got != CheckFee {
@@ -772,14 +787,24 @@ func TestManyTickets(cur realm, t *testing.T) {
 }
 
 // A passing guard decided while the live stake is under the floor is
-// tested, but no level is written for light clients (round 9, new major 7).
+// tested, but no level is written for light clients (round 9, new major 7);
+// stake that is leaving doesn't count.
 func TestFloor(cur realm, t *testing.T) {
 	reset()
-	for _, w := range []address{alice, bob, carol, dave} {
+	for _, w := range []address{alice, bob, carol, dave, eve, anyone} {
 		testing.SetRealm(u(w))
 		stakeOne(t, cur)
 	}
 	LevelFloor = 5 * MinTicket
+	// Two of the six leave: stake that is leaving, and can't be drawn,
+	// doesn't count toward the floor (round 10, minor 5).
+	testing.SetRealm(u(eve))
+	Unstake(cross(cur), 4)
+	testing.SetRealm(u(anyone))
+	Unstake(cross(cur), 5)
+	if LiveStake() != 4*MinTicket {
+		t.Fatalf("live stake %d", LiveStake())
+	}
 	testing.SkipHeights(MinTicketAge)
 	testing.SetRealm(u(worker))
 	id := file(t, cur, ok, 1001)
@@ -795,7 +820,106 @@ func TestFloor(cur realm, t *testing.T) {
 	}
 	testing.SetRealm(u(anyone))
 	Settle(cross(cur), id)
-	if s := finalize(t, cur, id); s != Tested || Level(GuardHash(guardText)) != "" {
-		t.Fatalf("under the floor: %s, level %q", s, Level(GuardHash(guardText)))
+	if s := finalize(t, cur, id); s != Tested || lvl() != "" {
+		t.Fatalf("under the floor: %s, level %q", s, lvl())
+	}
+}
+
+// The draw reads the version of the tree its round was fixed on:
+// withdrawing tickets unstaked long before, after the beacon is out,
+// changes no pick (round 10, new major 1).
+func TestWithdrawMovesNoDraw(cur realm, t *testing.T) {
+	owners := []address{alice, bob, carol, dave, eve, anyone}
+	spares := []address{testutils.TestAddress("s1"), testutils.TestAddress("s2"), testutils.TestAddress("s3")}
+	var first []address
+	for pass := 0; pass < 2; pass++ {
+		reset()
+		for _, w := range owners {
+			testing.SetRealm(u(w))
+			stakeOne(t, cur)
+		}
+		for i, w := range spares { // staked and unstaked at once: never drawn, but in the tree until withdrawn
+			testing.SetRealm(u(w))
+			send(MinTicket + int64(i+1))
+			StakeTicket(cross(cur))
+			send(0)
+			Unstake(cross(cur), len(owners)+i)
+		}
+		testing.SkipHeights(UnbondBlocks)
+		testing.SetRealm(u(worker))
+		id := file(t, cur, ok, 1001)
+		if pass == 1 {
+			for i, w := range spares { // after the round is fixed, before the draw
+				testing.SetRealm(u(w))
+				Withdraw(cross(cur), len(owners)+i)
+			}
+			if sumBelow(sumRoot, nTickets) != 6*MinTicket || sumBelow(get(id).pool, nTickets) != 9*MinTicket+6 {
+				t.Fatalf("the newest tree weighs %d, the round's %d", sumBelow(sumRoot, nTickets), sumBelow(get(id).pool, nTickets))
+			}
+		}
+		testing.SetRealm(u(anyone))
+		drawn := draw(t, cur, id, 1001, sig1001)
+		if pass == 0 {
+			first = drawn
+			continue
+		}
+		for i := range drawn {
+			if drawn[i] != first[i] {
+				t.Fatalf("withdrawing after the round was fixed moved the draw: %v, then %v", first, drawn)
+			}
+		}
+	}
+}
+
+// A ticket's vote charges are settled a bounded number at a time, so no
+// call walks every vote ever opened: with more than MaxSettle to settle,
+// Withdraw asks for SettleVotes first (round 10, minor 6).
+func TestSettleVotesInSteps(cur realm, t *testing.T) {
+	reset()
+	Reruns, PanelSizes, MaxSettle = 0, nil, 1
+	owners := []address{alice, bob, carol, dave}
+	for _, w := range owners {
+		testing.SetRealm(u(w))
+		stakeOne(t, cur)
+	}
+	testing.SetRealm(u(anyone))
+	send(2 * PoolFee)
+	Fund(cross(cur))
+	send(0)
+	testing.SkipHeights(MinTicketAge)
+	sigs := []string{sig1001, sig1002}
+	for i := 0; i < 2; i++ { // two filings, each to the pool, where nobody votes
+		testing.SetRealm(u(worker))
+		id := file(t, cur, ok, uint64(1001+i))
+		testing.SetRealm(u(anyone))
+		drawn := draw(t, cur, id, uint64(1001+i), sigs[i])
+		for _, c := range drawn {
+			testing.SetRealm(u(c))
+			CommitCheck(cross(cur), id, Commitment(c, "check", lie, salt(c)))
+		}
+		for _, c := range append([]address{worker}, drawn...) {
+			testing.SetRealm(u(c))
+			RevealCheck(cross(cur), id, or(map[address]string{worker: ok}[c], lie), salt(c))
+		}
+		testing.SetRealm(u(anyone))
+		Settle(cross(cur), id)
+		OpenPool(cross(cur), id)
+		testing.SkipHeights(PoolCommitWindow + PoolRevealWindow + 1)
+		if s := Tally(cross(cur), id); s != Undecided {
+			t.Fatalf("filing %d: %s", i, s)
+		}
+	}
+	testing.SetRealm(u(alice))
+	Unstake(cross(cur), 0)
+	testing.SkipHeights(UnbondBlocks)
+	refuses(t, "more than 1 votes to settle; call SettleVotes first", func() { Withdraw(cross(cur), 0) })
+	if left := SettleVotes(cross(cur), 0); left != 1 {
+		t.Fatalf("%d votes left to settle", left)
+	}
+	a := bal(alice)
+	Withdraw(cross(cur), 0)
+	abstained := MinTicket * AbstainShare / 100
+	if got := bal(alice) - a; got != MinTicket-abstained-(MinTicket-abstained)*AbstainShare/100 {
+		t.Errorf("alice withdrew %d after abstaining twice", got)
 	}
 }

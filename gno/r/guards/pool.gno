@@ -24,14 +24,17 @@ import (
 // didn't vote (decided or not: a stall is the abstainers'), WrongShare
 // percent, and at least the voter's share of Slash, for one that voted what
 // wasn't decided (round 9, minor 11). A ticket can't leave while a vote it
-// may vote in is open. A vote that never reaches two thirds decides
-// nothing: no level, nobody paid, every bond back.
+// may vote in is open. A vote that never reaches two thirds decides no
+// level; the money is then settled by the last panel's word, and only a
+// dispute no panel ever decided gives every bond back (round 10, new major
+// 3). What winners leave unclaimed for PoolClaimWindow goes to the fund.
 var (
 	PoolCommitWindow int64 = 10000      // blocks (about 10 hours)
 	PoolRevealWindow int64 = 5000       // blocks
 	PoolFee          int64 = 10_000_000 // ugnot, shared by weight among the winning voters
 	AbstainShare     int64 = 1          // percent of a ticket's stake for not voting
 	WrongShare       int64 = 2          // percent of a ticket's stake for voting what wasn't decided
+	PoolClaimWindow  int64 = 49000      // blocks after a vote closes for winners to claim; then the rest goes to the fund
 )
 
 type voter struct {
@@ -56,14 +59,16 @@ type poolVote struct {
 	voters    map[address]*voter
 	voted     *avl.Tree // key(ticket) → true
 	closed    bool
+	closedAt  int64
 	decided   string // the winning transcript, or "" when undecided
 	winners   int64  // the winning weight
 	pot       int64  // PoolFee, set aside from the fund
 }
 
 var (
-	votes    = map[int]*poolVote{} // filing → its vote
-	allVotes []*poolVote           // every vote, in the order opened
+	votes     = map[int]*poolVote{} // filing → its vote
+	allVotes  []*poolVote           // every vote, in the order opened
+	openVotes []int                 // the votes not yet closed, by their place in allVotes: a short list
 )
 
 // OpenPool opens the pool's vote on a filing that reached the pool. The
@@ -75,7 +80,7 @@ func OpenPool(cur realm, id int) string {
 	if f.state != Pool {
 		panic("guards: not waiting for the pool")
 	}
-	total := sumBelow(f.oldBelow)
+	total := sumBelow(sumRoot, f.oldBelow) // tickets withdrawn by now can't vote
 	if total <= 0 {
 		return undecided(cur, f, id) // round 9, minor 10
 	}
@@ -87,6 +92,7 @@ func OpenPool(cur realm, id int) string {
 	v := &poolVote{filing: id, open: now(), oldBelow: f.oldBelow, total: total, by: map[string]int64{},
 		voters: map[address]*voter{}, voted: avl.NewTree(), pot: PoolFee}
 	votes[id] = v
+	openVotes = append(openVotes, len(allVotes))
 	allVotes = append(allVotes, v)
 	f.state = Voting
 	chain.Emit("GuardPoolOpen", "filing", strconv.Itoa(id), "stake", strconv.FormatInt(total, 10))
@@ -175,11 +181,26 @@ func Tally(cur realm, id int) string {
 	if !done {
 		panic("guards: the vote is still open")
 	}
-	v.closed = true
+	v.closed, v.closedAt = true, h
+	for i, n := range openVotes {
+		if allVotes[n] == v {
+			openVotes = append(openVotes[:i], openVotes[i+1:]...)
+			break
+		}
+	}
 	if v.revealed*3 <= v.total*2 {
 		fund += v.pot
+		f.panelCost -= v.pot // the vote cost the fund nothing in the end
 		v.pot = 0
-		return undecided(cur, f, id)
+		if f.lastWord == "" {
+			return undecided(cur, f, id)
+		}
+		// No last word from the pool: the last panel's word settles the
+		// money, and no level is written or pulled (round 10, new major 3).
+		settle(cur, f, f.lastWord)
+		f.state = Undecided
+		chain.Emit("GuardUndecided", "filing", strconv.Itoa(id), "hash", f.guardHash, "settled_by", "panel")
+		return f.state
 	}
 	best := ""
 	for _, t := range v.order {
@@ -210,8 +231,24 @@ func ClaimVote(cur realm, id int) int64 {
 	return n
 }
 
-// undecided ends a dispute with no last word: no level, nobody paid or
-// charged for the dispute, every bond back and every ticket let go.
+// SweepVote moves what a decided vote's winners left unclaimed, and the
+// rounding, into the fund, once PoolClaimWindow has passed since it closed
+// (round 10, minor 6). Anyone may call it.
+func SweepVote(cur realm, id int) int64 {
+	caller(cur)
+	v := votes[id]
+	if v == nil || !v.closed || now() <= v.closedAt+PoolClaimWindow {
+		panic("guards: winners may still claim from this vote")
+	}
+	n := v.pot
+	fund += n
+	v.pot = 0
+	return n
+}
+
+// undecided ends a dispute that no panel ever decided and no vote could:
+// no level, nobody paid or charged for the dispute, every bond back and
+// every ticket let go.
 func undecided(cur realm, f *filing, id int) string {
 	fund += f.reserve
 	f.reserve = 0
@@ -233,7 +270,7 @@ func undecided(cur realm, f *filing, id int) string {
 		pay(cur, f.objector.owner, f.objBond)
 		f.objBond = 0
 	}
-	f.state = Undecided
+	f.state, f.pool = Undecided, nil
 	chain.Emit("GuardUndecided", "filing", strconv.Itoa(id), "hash", f.guardHash)
 	return f.state
 }
@@ -249,22 +286,28 @@ func openVote(id int) *poolVote {
 
 // inOpenVote says whether a ticket may still vote in a vote not yet closed.
 func inOpenVote(t *ticket) bool {
-	for i := t.votes; i < len(allVotes); i++ {
-		if v := allVotes[i]; !v.closed && t.id < v.oldBelow {
+	for _, i := range openVotes {
+		if i >= t.votes && t.id < allVotes[i].oldBelow {
 			return true
 		}
 	}
 	return false
 }
 
-// settleVotes charges a ticket, as it leaves, for each closed vote it had a
-// vote in: AbstainShare percent when it didn't vote, WrongShare percent (and
-// at least its share of Slash) when it voted what wasn't decided.
-func settleVotes(t *ticket) {
-	for ; t.votes < len(allVotes); t.votes++ {
+// settleVotes charges a ticket, as it leaves, for up to max closed votes it
+// had a vote in, in order: AbstainShare percent when it didn't vote,
+// WrongShare percent (and at least its share of Slash) when it voted what
+// wasn't decided. It stops at a vote still open that the ticket may vote
+// in.
+func settleVotes(t *ticket, max int) {
+	for ; max > 0 && t.votes < len(allVotes); t.votes++ {
+		max--
 		v := allVotes[t.votes]
 		if t.id >= v.oldBelow {
 			continue
+		}
+		if !v.closed {
+			return
 		}
 		vt := v.voters[t.owner]
 		voted := v.voted.Has(key(uint64(t.id))) && vt != nil && vt.revealed

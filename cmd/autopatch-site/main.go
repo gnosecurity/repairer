@@ -176,7 +176,7 @@ func write(path string, b []byte) error {
 
 const verifyMD = "# Verify a guard's level yourself\n\n" +
 	"A level here is a copy. What counts is what the chain proves, and you can check it without trusting this site or the node that answers.\n\n" +
-	"- The Guards realm keeps one param per guard: `lvl_<hash>`, stored at `/pv/vm:gno.land/r/autopatch/guards:lvl_<hash>` in the chain's main store.\n" +
+	"- The Guards realm keeps one param per guard and system: `lvl_<hash>_<system>` (such as `lvl_<hash>_ubuntu-24.04`), stored at `/pv/vm:gno.land/r/autopatch/guards:lvl_<hash>_<system>` in the chain's main store.\n" +
 	"- Ask a node you run for that key at height H, with `abci_query` on `.store/main/key` and prove=true.\n" +
 	"- Check the proof against the app hash of header H+1, and that more than two thirds of the validators you trust signed that header.\n" +
 	"- The header must be recent, never dated ahead of your clock, and never older than one you already accepted.\n" +

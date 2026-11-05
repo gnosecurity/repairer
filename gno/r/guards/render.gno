@@ -77,11 +77,12 @@ func renderFiling(id int) string {
 	b.WriteString("- Filed by " + link(f.filer) + " at height " + strconv.FormatInt(f.committed, 10) + "\n")
 	if f.guardHash != "" {
 		b.WriteString("- Guard: `" + f.guardHash + "`\n")
-		lvl := Level(f.guardHash)
+		b.WriteString("- System: " + f.system + "\n")
+		lvl := Level(f.guardHash, f.system)
 		if lvl == "" {
 			lvl = "none"
 		}
-		b.WriteString("- Level, as the param lvl_" + f.guardHash[:16] + "… proves: " + lvl + "\n")
+		b.WriteString("- Level on " + f.system + ", as the param " + levelKey(f.guardHash[:16]+"…", f.system) + " proves: " + lvl + "\n")
 	}
 	if f.round != 0 {
 		b.WriteString("- Beacon round: " + strconv.FormatUint(f.round, 10) + " (drand evmnet)\n")
@@ -112,6 +113,12 @@ func renderFiling(id int) string {
 	if f.floor {
 		b.WriteString("- Decided passing while the live stake was under the floor: no level written\n")
 	}
+	if f.pulled {
+		b.WriteString("- Decided passing after its level was pulled: the pull stands; a fixed guard is filed as a new version\n")
+	}
+	if f.state == Undecided && f.lastWord != "" {
+		b.WriteString("- The pool's vote didn't reach two thirds: the last panel's word, `" + f.lastWord + "`, settled the money, and no level was written or pulled\n")
+	}
 	if o := f.objector; o != nil {
 		b.WriteString("- Objected to by " + link(o.owner) + ": `" + o.transcript + "`\n")
 	}
@@ -120,9 +127,20 @@ func renderFiling(id int) string {
 	}
 	for i, p := range f.panels {
 		size := PanelSizes[least2(i, len(PanelSizes)-1)]
-		b.WriteString("\n## Panel " + strconv.Itoa(i+1) + " (of " + strconv.Itoa(size) + ")\n\n")
+		b.WriteString("\n## Panel " + strconv.Itoa(i+1) + " (of " + strconv.Itoa(size) + " seats)\n\n")
+		seats, order := map[address]int{}, []*check{}
 		for _, c := range p {
-			b.WriteString("- " + link(c.owner) + ": " + shown(c) + "\n")
+			if seats[c.owner] == 0 {
+				order = append(order, c)
+			}
+			seats[c.owner]++
+		}
+		for _, c := range order {
+			n := ""
+			if seats[c.owner] > 1 {
+				n = " (" + strconv.Itoa(seats[c.owner]) + " seats)"
+			}
+			b.WriteString("- " + link(c.owner) + n + ": " + shown(c) + "\n")
 		}
 	}
 	if v := votes[id]; v != nil {

@@ -105,7 +105,9 @@ func (ev *Evidence) noteBroke(broke map[string]string, at time.Time, atBoot bool
 		ev.Broke = map[string]Broken{}
 	}
 	for k, why := range broke {
-		ev.Broke[k] = Broken{Why: why, At: at.UTC(), AtBoot: atBoot}
+		// What a boot broke stays a boot's: a later window failing on the
+		// same check doesn't let it clear before a boot shows it back.
+		ev.Broke[k] = Broken{Why: why, At: at.UTC(), AtBoot: atBoot || ev.Broke[k].AtBoot}
 	}
 }
 

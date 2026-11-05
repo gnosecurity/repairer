@@ -295,6 +295,11 @@ func TestSignedStatements(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	noImage := st
+	noImage.Image = ""
+	if _, err := approve.SignStatement(k["a"], noImage); err == nil {
+		t.Error("signed a Tested that names no system")
+	}
 	b := []byte(`{"statement":{"v":"autopatch/1","kind":"Tested","chain":"autopatch:vet","guard":"` + st.Guard + `","rig":"` + st.Rig + `","image":"ubuntu 24.04"},"key":"` + s.Key + `","sig":"` + s.Sig + `"}`)
 	if _, key, err := approve.ParseSigned(b); err != nil || hex.EncodeToString(key) != s.Key {
 		t.Fatalf("round trip: %v", err)

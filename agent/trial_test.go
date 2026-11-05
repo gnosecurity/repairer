@@ -1204,16 +1204,21 @@ func TestStripBrokeAtBootNeverBooted(t *testing.T) {
 	if err := tr.a.Boot(ctx); err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 90; i++ {
+	for i := 0; i < 30; i++ {
 		tr.step(time.Minute)
 		if e := tr.entry(s); e.Booted {
 			t.Fatalf("booted at minute %d of the next boot, with its unit still failed", i+1)
 		}
 	}
-	delete(tr.fail, site) // fixed by hand, with the strip on: not yet
-	tr.step(time.Minute)
-	if e := tr.entry(s); e.Booted {
-		t.Fatal("booted without a boot")
+	// Fixed by hand half an hour after the boot, the boot's window still
+	// open: the check didn't come back through the boot by itself, so not
+	// booted yet.
+	delete(tr.fail, site)
+	for i := 0; i < 60; i++ {
+		tr.step(time.Minute)
+		if e := tr.entry(s); e.Booted {
+			t.Fatalf("booted %d minutes after a fix by hand, without a boot", i+1)
+		}
 	}
 	if err := tr.a.Boot(ctx); err != nil {
 		t.Fatal(err)
@@ -1255,6 +1260,59 @@ func TestModuleBlockBrokeAtBootReachesAsk(t *testing.T) {
 	}
 	if ev := tr.evidence(w); !ev.Ask || ev.Tries != len(retries)+1 {
 		t.Fatalf("never reached the ask: ask %v, tries %d", ev.Ask, ev.Tries)
+	}
+	// The owner looks, fixes the unit, and says yes again (what a Yes does
+	// to the evidence): the block goes on, and at a boot the check comes
+	// back by itself, so the record clears.
+	ev := tr.evidence(w)
+	ev.Ask, ev.Tries, ev.RetryAt = false, 0, time.Time{}
+	if err := tr.a.saveEvidence(w.Hash(), ev); err != nil {
+		t.Fatal(err)
+	}
+	delete(tr.fail, site)
+	tr.onAndConfirmedWhenReady(t, w)
+	// The retries' failed windows didn't turn the boot's record into a
+	// window's, so the running confirm didn't clear it.
+	if b, ok := tr.evidence(w).Broke["tcp "+site+" "]; !ok || !b.AtBoot {
+		t.Fatalf("what the boot broke, after the retries and a running confirm: %+v", tr.evidence(w).Broke)
+	}
+	tr.step(time.Minute)
+	if err := tr.a.Boot(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 12; i++ {
+		tr.step(time.Minute)
+	}
+	if e := tr.entry(w); e == nil || !e.Booted || len(tr.evidence(w).Broke) != 0 {
+		t.Fatalf("after a boot the check came back through: %+v, broke %+v", e, tr.evidence(w).Broke)
+	}
+}
+
+// A guard that bites now breaks a check in its window, and the check stays
+// failed after the undo: its retry counts the check, though its baseline
+// has it failing, and doesn't confirm (round 8, new major 1).
+func TestWindowRecordCountsOnRetry(t *testing.T) {
+	tr := newTrial(t, "backup", "")
+	g := ipoptGuard(t)
+	tr.tested(g)
+	tr.tick()
+	tr.clock = tr.clock.Add(-time.Minute)
+	tr.putOn(g)
+	tr.fail[site] = "broken by the guard, and stays broken"
+	for i := 0; i < 3; i++ {
+		tr.step(time.Minute)
+	}
+	if ev := tr.evidence(g); tr.entry(g) != nil || ev.Tries != 1 || len(ev.Broke) != 1 {
+		t.Fatalf("after its window: on %v, tries %d, broke %+v", tr.entry(g) != nil, ev.Tries, ev.Broke)
+	}
+	for i := 0; i < 90; i++ {
+		tr.step(time.Minute)
+		if e := tr.entry(g); e != nil && e.Status == Confirmed {
+			t.Fatalf("confirmed at minute %d with the check it broke failing", i+1)
+		}
+	}
+	if ev := tr.evidence(g); ev.Tries < 2 {
+		t.Fatalf("the retry didn't count the check: tries %d", ev.Tries)
 	}
 }
 

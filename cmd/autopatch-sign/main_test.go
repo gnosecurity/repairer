@@ -178,26 +178,27 @@ func TestStanding(t *testing.T) {
 		m, _ := json.Marshal(map[string]any{"seq": seq, "tx": json.RawMessage(tx)})
 		os.WriteFile(filepath.Join(kept, strconv.Itoa(seq)+".json"), m, 0o600)
 	}
-	write(1, "Yes", g1, "A,B", unix(laterT), "undo")
-	write(2, "Yes", g1, "A", unix(laterT), "keep+nocanary")
-	write(3, "Yes", g2, "A", unix(time.Now().Add(-time.Hour)), "undo")
-	write(4, "Off", g1, "mail")
+	// Numbers whose files sort apart from their order: 10.json before 9.json.
+	write(9, "Yes", g1, "A,B", unix(laterT), "undo")
+	write(10, "Yes", g1, "A", unix(laterT), "keep+nocanary")
+	write(11, "Yes", g2, "A", unix(time.Now().Add(-time.Hour)), "undo")
+	write(12, "Off", g1, "mail")
 	var out bytes.Buffer
 	if err := run(context.Background(), "standing", []string{"-policy", pfile, "-config", filepath.Join(dir, "config")}, &out); err != nil {
 		t.Fatal(err)
 	}
 	got := out.String()
 	for _, want := range []string{
-		"statement 1, guard aaaaaaaaaaaaaaaa, tiers B,",
+		"statement 9, guard aaaaaaaaaaaaaaaa, tiers B,",
 		"-tiers B -until " + later + " -mode undo GUARD.json",
-		"statement 2, guard aaaaaaaaaaaaaaaa, tiers A,",
+		"statement 10, guard aaaaaaaaaaaaaaaa, tiers A,",
 		"-tiers A -until " + later + " -mode keep -nocanary GUARD.json",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in:\n%s", want, got)
 		}
 	}
-	if strings.Contains(got, "bbbbbbbbbbbbbbbb") || strings.Contains(got, "statement 4") {
+	if strings.Contains(got, "bbbbbbbbbbbbbbbb") || strings.Contains(got, "statement 12") {
 		t.Errorf("an ended Yes or an Off listed:\n%s", got)
 	}
 }

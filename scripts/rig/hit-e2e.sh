@@ -2,10 +2,13 @@
 # hit-e2e.sh RUN: W1's was-I-hit test in a fresh Ubuntu 24.04 VM on this
 # machine (KVM, no internet). The agent goes in; the owner's signed Check of
 # new setuid files finds none; then a setuid copy of bash is planted, a
-# copied program is started and deleted, and a file of base-files is
-# changed; the next Checks find each of them, by path, and every report
-# verifies against the agent's key. A result never carries a file's
-# contents.
+# copied program is started and deleted, a file of base-files is changed,
+# another made a FIFO, and one of its conffiles edited; the next Checks find
+# each of them, by path, the conffile apart, without waiting on the FIFO.
+# Then the other kinds, on the real machine: its loaded modules all come
+# from packages, and the logins as rig show in the auth log and in ssh's
+# journal, with history reaching back. Every report verifies against the
+# agent's key. A result never carries a file's contents.
 #
 # Needs: RIG (images/, seed.iso, rig_ed25519), SRC (the autopatch source).
 # Touches nothing outside $RIG/runs.
@@ -57,18 +60,26 @@ ask() {
 }
 clean=$(ask 1 new-since 1 ""); log "before planting: $clean"
 pkgfile=$("${S[@]}" "grep -m1 -E '  usr/share/' /var/lib/dpkg/info/base-files.md5sums | cut -c35-")
+fifo=$("${S[@]}" "grep -E '  usr/share/' /var/lib/dpkg/info/base-files.md5sums | sed -n 2p | cut -c35-")
 "${S[@]}" "sudo bash -s" >> "$w/log.txt" 2>&1 <<SH
 set -e
 cp /bin/bash /var/tmp/.s && chmod u+s /var/tmp/.s
 cp /bin/sleep /var/tmp/sl && (setsid /var/tmp/sl 900 >/dev/null 2>&1 < /dev/null &) && sleep 1 && rm /var/tmp/sl
 echo "#" >> "/$pkgfile"
+rm "/$fifo" && mkfifo "/$fifo"
+echo "#" >> /etc/issue.net
 SH
-log "planted: /var/tmp/.s (setuid bash), /var/tmp/sl (running, deleted), /$pkgfile (changed)"
+log "planted: /var/tmp/.s (setuid bash), /var/tmp/sl (running, deleted), /$pkgfile (changed), /$fifo (a FIFO), /etc/issue.net (a conffile, changed)"
 setuid=$(ask 2 new-since 1 "$clean"); log "setuid: $setuid"
 deleted=$(ask 3 deleted-exe 2 ""); log "deleted: $deleted"
 files=$(ask 4 package-files 3 ""); log "package files: $files"
+mods=$(ask 5 foreign-modules 4 ""); log "modules: $mods"
+auth=$(ask 6 log-auth 5 ""); log "auth log: $auth"
+unit=$(ask 7 log-unit 6 ""); log "ssh's journal: $unit"
 ok=no
 [[ $clean == *"flag=false count=0"* ]] && [[ $setuid == *"flag=true"*"/var/tmp/.s"* ]] && [[ $deleted == *"flag=true"*"/var/tmp/sl"* ]] &&
-  [[ $files == *"flag=true"*"/$pkgfile"* ]] && ok=yes
+  [[ $files == *"flag=true count=2 "*"conf=1 "*"/$pkgfile"* ]] && [[ $files == *"/$fifo"* ]] && [[ $files == *"conf_paths=/etc/issue.net"* ]] &&
+  [[ $mods == *'flag=false count=0 '*'capped="" error=""'* ]] &&
+  [[ $auth == *'flag=true '*'capped="" error=""'* ]] && [[ $unit == *'flag=true '*'capped="" error=""'* ]] && ok=yes
 log "hit e2e run $run took ${SECONDS}s; ok=$ok"
 [ "$ok" = yes ]

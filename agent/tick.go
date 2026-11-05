@@ -280,6 +280,14 @@ func (a *Agent) Tick(ctx context.Context) (*TickResult, error) {
 	if rerr != nil {
 		res.Refused = append(res.Refused, "reboot: "+rerr.Error())
 	}
+	// One queued Check a tick, after the guards' step; none before a reboot.
+	if !reboot {
+		if name, err := a.runQueued(ctx, f); err != nil {
+			res.Refused = append(res.Refused, "a check: "+err.Error())
+		} else if name != "" {
+			res.Hits = append(res.Hits, name)
+		}
+	}
 	werr := a.writeReport(ctx, f, p, res)
 	if reboot {
 		// Last, once the report and the fleet file are written; the reboot's
@@ -1234,10 +1242,12 @@ func (a *Agent) ownerMessage(ctx context.Context, f *Fleet, p *policy.Policy, bu
 		if !c.ForSystem(info.OS, info.Release) {
 			return what + " (not for " + info.OS + " " + info.Release + ")", "", nil
 		}
-		if err := a.keepHit(a.runCheck(ctx, c)); err != nil {
-			return "", "", err // a disk that won't write: try again next tick
+		// Queued, saved with the statement's sequence; it runs at a tick,
+		// after the guards' step (round 15, new major 4).
+		if len(f.Checks) >= maxChecks {
+			return what, fmt.Sprintf("%d checks wait to run here already", maxChecks), nil
 		}
-		res.Hits = append(res.Hits, c.Name())
+		f.Checks = append(f.Checks, QueuedCheck{Seq: m.Seq, File: file})
 		return what, "", nil
 	case "Reboot":
 		// A Reboot lets one host reboot into one kernel, once, before its

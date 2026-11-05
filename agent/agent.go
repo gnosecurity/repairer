@@ -36,6 +36,9 @@ type Agent struct {
 	Now      func() time.Time
 	// Health runs a policy health check; nil means LiveHealth.
 	Health HealthChecker
+	// Zone is the machine's time zone, for syslog's traditional times; nil
+	// means time.Local.
+	Zone *time.Location
 }
 
 func (a *Agent) now() time.Time {

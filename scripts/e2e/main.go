@@ -204,8 +204,8 @@ func verify(path, key string) error {
 		fmt.Printf("  reboot: %s\n", r.Tick.Reboot)
 	}
 	for _, h := range r.Hits {
-		fmt.Printf("  hit: %s ran=%s flag=%v count=%d gone=%d capped=%q error=%q paths=%s\n", h.Name, h.Ran.Format("15:04:05"),
-			h.Flag, h.Count, h.Gone, h.Capped, h.Error, strings.Join(h.Paths, ","))
+		fmt.Printf("  hit: %s ran=%s flag=%v count=%d gone=%d conf=%d untimed=%d capped=%q error=%q paths=%s conf_paths=%s\n", h.Name, h.Ran.Format("15:04:05"),
+			h.Flag, h.Count, h.Gone, h.Conf, h.Untimed, h.Capped, h.Error, strings.Join(h.Paths, ","), strings.Join(h.ConfPaths, ","))
 	}
 	for _, sk := range r.Skipped {
 		fmt.Printf("  skipped: %d %s: %s\n", sk.Seq, sk.What, sk.Why)
@@ -300,11 +300,12 @@ func genCheck(dir, since, pkg string) error {
 	if err != nil {
 		return err
 	}
-	mk := func(kind string, args check.Args, flag string) (*check.Check, error) {
-		c := &check.Check{ID: "e2e/" + kind, Version: 1, Flaws: []string{"CVE-2026-98432"},
+	mkID := func(id, kind string, args check.Args, flag string) (*check.Check, error) {
+		c := &check.Check{ID: id, Version: 1, Flaws: []string{"CVE-2026-98432"},
 			For: []guard.Target{{OS: "ubuntu", Releases: []string{"24.04"}}}, Kind: kind, Args: args, Flag: flag}
 		return c, c.Validate()
 	}
+	mk := func(kind string, args check.Args, flag string) (*check.Check, error) { return mkID("e2e/"+kind, kind, args, flag) }
 	setuid, err := mk(check.NewSince, check.Args{What: "setuid", Since: since}, "a setuid or setgid file is new")
 	if err != nil {
 		return err
@@ -317,10 +318,30 @@ func genCheck(dir, since, pkg string) error {
 	if err != nil {
 		return err
 	}
+	// Every kind (round 15, minor 5): the loaded modules, and the logins as
+	// rig in the auth log and in ssh's journal, since three minutes after
+	// SINCE, when the VM is up and its logs began.
+	mods, err := mk(check.ForeignModules, check.Args{}, "a loaded module no package owns")
+	if err != nil {
+		return err
+	}
+	n, err := strconv.ParseInt(since, 10, 64)
+	if err != nil {
+		return err
+	}
+	later := strconv.FormatInt(n+180, 10)
+	auth, err := mkID("e2e/log-auth", check.LogMatch, check.Args{Source: "auth", Pattern: "Accepted publickey for rig", Since: later}, "a login as rig")
+	if err != nil {
+		return err
+	}
+	unit, err := mkID("e2e/log-unit", check.LogMatch, check.Args{Source: "unit:ssh.service", Pattern: "Accepted publickey for rig", Since: later}, "a login as rig")
+	if err != nil {
+		return err
+	}
 	const caller = "g1ss6w8xfy7vnp595yely63jqa8553k03mjcglen"
 	chain := approve.ChainID(pub, p.Fleet)
 	out := map[string][]byte{"policy.json": p.Canonical()}
-	for i, c := range []*check.Check{setuid, setuid, deleted, files} {
+	for i, c := range []*check.Check{setuid, setuid, deleted, files, mods, auth, unit} {
 		seq := uint64(i + 1)
 		memo, err := approve.MemoCheck(c)
 		if err != nil {

@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/netip"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/jaekwon/autopatch/guard"
@@ -27,6 +29,14 @@ type System interface {
 	// Run runs a program, without a shell, and returns its standard output.
 	Run(ctx context.Context, stdin []byte, prog string, args ...string) ([]byte, error)
 	ReadFile(name string) ([]byte, error)
+	// OpenFile opens a regular file to read, never through a link at its
+	// last component and never waiting on a FIFO or a device: anything but
+	// a regular file is refused with ErrNotRegular (W1, round 15).
+	OpenFile(name string) (io.ReadCloser, error)
+	// RunCapped runs a program as Run does, keeping at most limit bytes of
+	// what it prints: past them it kills the program and says so. What it
+	// prints on stderr comes back whole, to maxStderr bytes (W1, round 15).
+	RunCapped(ctx context.Context, limit int64, prog string, args ...string) (Output, error)
 	// WriteFile replaces a file: temp file, sync, rename.
 	WriteFile(name string, data []byte, perm fs.FileMode) error
 	// Remove removes a file; a file already gone is not an error.
@@ -99,19 +109,23 @@ func (l Linux) path(name string) string {
 	return filepath.Join(l.Root, name)
 }
 
-func (l Linux) Run(ctx context.Context, stdin []byte, prog string, args ...string) ([]byte, error) {
+// progPath finds a program in progDirs.
+func progPath(prog string) (string, error) {
 	if strings.ContainsRune(prog, '/') {
-		return nil, fmt.Errorf("run %s: give a program name, not a path", prog)
+		return "", fmt.Errorf("run %s: give a program name, not a path", prog)
 	}
-	var path string
 	for _, d := range progDirs {
 		if fi, err := os.Stat(filepath.Join(d, prog)); err == nil && fi.Mode().IsRegular() {
-			path = filepath.Join(d, prog)
-			break
+			return filepath.Join(d, prog), nil
 		}
 	}
-	if path == "" {
-		return nil, fmt.Errorf("run %s: not found in %s", prog, strings.Join(progDirs, ", "))
+	return "", fmt.Errorf("run %s: not found in %s", prog, strings.Join(progDirs, ", "))
+}
+
+func (l Linux) Run(ctx context.Context, stdin []byte, prog string, args ...string) ([]byte, error) {
+	path, err := progPath(prog)
+	if err != nil {
+		return nil, err
 	}
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
@@ -132,7 +146,82 @@ func (l Linux) Run(ctx context.Context, stdin []byte, prog string, args ...strin
 	return out.Bytes(), nil
 }
 
+// Output is what a program RunCapped ran printed.
+type Output struct {
+	Out       []byte // stdout, to the limit
+	Err       []byte // stderr, to maxStderr
+	OutCapped bool   // stdout reached the limit: the program was killed there
+	ErrCapped bool   // stderr went past maxStderr: the rest is dropped
+}
+
+// maxStderr is how much of a program's stderr RunCapped keeps.
+const maxStderr = 64 << 10
+
+// capWriter keeps what is written to it up to its limit, and calls stop
+// once, at the first byte past it.
+type capWriter struct {
+	buf    bytes.Buffer
+	limit  int64
+	capped bool
+	stop   func()
+}
+
+func (w *capWriter) Write(p []byte) (int, error) {
+	if left := w.limit - int64(w.buf.Len()); int64(len(p)) > left {
+		w.buf.Write(p[:max(left, 0)])
+		if !w.capped && w.stop != nil {
+			w.stop()
+		}
+		w.capped = true
+		return len(p), nil
+	}
+	return w.buf.Write(p)
+}
+
+func (l Linux) RunCapped(ctx context.Context, limit int64, prog string, args ...string) (Output, error) {
+	path, err := progPath(prog)
+	if err != nil {
+		return Output{}, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, path, args...)
+	cmd.Env = []string{"PATH=" + strings.Join(progDirs, ":"), "LC_ALL=C"}
+	cmd.WaitDelay = time.Second // a child left holding the pipes can't hold the agent
+	out, errw := &capWriter{limit: limit, stop: cancel}, &capWriter{limit: maxStderr}
+	cmd.Stdout, cmd.Stderr = out, errw
+	err = cmd.Run()
+	o := Output{Out: out.buf.Bytes(), Err: errw.buf.Bytes(), OutCapped: out.capped, ErrCapped: errw.capped}
+	if err != nil {
+		return o, fmt.Errorf("%s: %w", prog, err)
+	}
+	return o, nil
+}
+
 func (l Linux) ReadFile(name string) ([]byte, error) { return os.ReadFile(l.path(name)) }
+
+// ErrNotRegular is OpenFile's refusal of anything but a regular file.
+var ErrNotRegular = errors.New("not a regular file")
+
+func (l Linux) OpenFile(name string) (io.ReadCloser, error) {
+	p := l.path(name)
+	fi, err := os.Lstat(p)
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s: %w (%v)", name, ErrNotRegular, fi.Mode().Type())
+	}
+	f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() { // swapped since the Lstat
+		f.Close()
+		return nil, fmt.Errorf("%s: %w", name, ErrNotRegular)
+	}
+	return f, nil
+}
 
 func (l Linux) WriteFile(name string, data []byte, perm fs.FileMode) error {
 	return writeAtomic(l.path(name), data, perm)

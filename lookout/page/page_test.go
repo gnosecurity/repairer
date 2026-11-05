@@ -347,3 +347,26 @@ func TestDashboardShowsNewKernelFlaws(t *testing.T) {
 		}
 	}
 }
+
+// A was-I-hit result's line says what it found, what went unread, a log
+// history that doesn't reach back, untimed lines and changed config files
+// (round 15).
+func TestHitLine(t *testing.T) {
+	ran := time.Date(2026, 11, 5, 19, 51, 45, 0, time.UTC)
+	for _, c := range []struct {
+		h    agent.HitResult
+		want string
+	}{
+		{agent.HitResult{Name: "x v1", Ran: ran, Error: "no md5sums for package y"}, "x v1 (2026-11-05 19:51 UTC): couldn't run: no md5sums for package y"},
+		{agent.HitResult{Name: "x v1", Ran: ran, Count: 1, Paths: []string{"/var/tmp/sl"}, Error: "find /proc: denied"},
+			"x v1 (2026-11-05 19:51 UTC): FLAGGED, 1 found, and part couldn't be read (find /proc: denied): /var/tmp/sl"},
+		{agent.HitResult{Name: "x v1", Ran: ran, Count: 2, Untimed: 1, Capped: "history"},
+			"x v1 (2026-11-05 19:51 UTC): 2 found, but the logs here don't reach back to its start, so not a clean answer (1 of them at a time it couldn't read, counted)"},
+		{agent.HitResult{Name: "x v1", Ran: ran, Conf: 1, ConfPaths: []string{"/etc/pam.d/sshd"}},
+			"x v1 (2026-11-05 19:51 UTC): nothing found; 1 of its config files changed since the package put them (yours look the same): /etc/pam.d/sshd"},
+	} {
+		if got := hitLine(c.h); got != c.want {
+			t.Errorf("got  %q\nwant %q", got, c.want)
+		}
+	}
+}

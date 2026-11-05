@@ -302,23 +302,55 @@ func guardLine(g agent.GuardState) string {
 func hitLine(h agent.HitResult) string {
 	when := h.Ran.UTC().Format("2006-01-02 15:04 UTC")
 	switch {
-	case h.Error != "":
+	case h.Error != "" && h.Count == 0:
 		return fmt.Sprintf("%s (%s): couldn't run: %s", h.Name, when, h.Error)
+	case h.Error != "": // what it found, and that part went unread
+		s := fmt.Sprintf("%s (%s): FLAGGED, %d found, and part couldn't be read (%s)", h.Name, when, h.Count, h.Error)
+		if len(h.Paths) > 0 {
+			s += ": " + strings.Join(h.Paths, ", ")
+			if h.Count > len(h.Paths) {
+				s += fmt.Sprintf(" and %d more", h.Count-len(h.Paths))
+			}
+		}
+		return s + confLine(h)
 	case h.Count == 0 && h.Capped == "":
 		s := fmt.Sprintf("%s (%s): nothing found", h.Name, when)
 		if h.Gone > 0 {
 			s += fmt.Sprintf(" (%d listed files gone)", h.Gone)
 		}
-		return s
+		return s + confLine(h)
 	}
 	s := fmt.Sprintf("%s (%s): FLAGGED, %d found", h.Name, when, h.Count)
-	if h.Capped != "" {
+	switch h.Capped {
+	case "":
+	case "history":
+		s = fmt.Sprintf("%s (%s): %d found, but the logs here don't reach back to its start, so not a clean answer", h.Name, when, h.Count)
+	default:
 		s = fmt.Sprintf("%s (%s): stopped at its %s cap with %d found, so not a clean answer", h.Name, when, h.Capped, h.Count)
+	}
+	if h.Untimed > 0 {
+		s += fmt.Sprintf(" (%d of them at a time it couldn't read, counted)", h.Untimed)
 	}
 	if len(h.Paths) > 0 {
 		s += ": " + strings.Join(h.Paths, ", ")
 		if h.Count > len(h.Paths) {
 			s += fmt.Sprintf(" and %d more", h.Count-len(h.Paths))
+		}
+	}
+	return s + confLine(h)
+}
+
+// confLine says which of a package's config files changed since it put
+// them: apart, as the owner's own edits look the same.
+func confLine(h agent.HitResult) string {
+	if h.Conf == 0 {
+		return ""
+	}
+	s := fmt.Sprintf("; %d of its config files changed since the package put them (yours look the same)", h.Conf)
+	if len(h.ConfPaths) > 0 {
+		s += ": " + strings.Join(h.ConfPaths, ", ")
+		if h.Conf > len(h.ConfPaths) {
+			s += fmt.Sprintf(" and %d more", h.Conf-len(h.ConfPaths))
 		}
 	}
 	return s

@@ -2,10 +2,10 @@ package agent
 
 import (
 	"bytes"
+	"compress/gzip"
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -107,23 +107,58 @@ func TestHitNewSince(t *testing.T) {
 	}
 }
 
-// foreign-modules lists loaded modules no package owns, leaving out those
-// DKMS built for the running kernel.
+// foreign-modules asks modinfo of each loaded module alone: one it can't
+// find is foreign; one loaded unsigned is foreign unless DKMS built it here
+// and its file is DKMS's; one loaded out of tree whose file is in tree
+// isn't that file; the rest are foreign unless a package owns their file
+// (round 15, new major 5).
 func TestHitForeignModules(t *testing.T) {
 	a, sys, _ := newAgent(t)
 	rel := "6.8.0-142-generic"
 	sys.files["/proc/sys/kernel/osrelease"] = rel + "\n"
-	sys.files["/proc/modules"] = "nf_tables 368640 1 - Live 0x0\nrootkit 16384 0 - Live 0x0\nnvidia 54001664 0 - Live 0x0\n-b/tmp 4096 0 - Live 0x0\n"
-	nf := "/lib/modules/" + rel + "/kernel/net/netfilter/nf_tables.ko.zst"
-	rk := "/lib/modules/" + rel + "/extra/rootkit.ko"
-	nv := "/lib/modules/" + rel + "/updates/dkms/nvidia.ko.zst"
-	sys.runOut["modinfo -n -- nf_tables rootkit nvidia"] = nf + "\n" + rk + "\n" + nv + "\n"
-	sys.runOut["dpkg -S -- "+nf+" "+rk+" "+nv] = "linux-modules-" + rel + ": " + nf + "\n"
+	sys.files["/proc/modules"] = "nf_tables 368640 1 - Live 0x0\n" +
+		"rootkit 16384 0 - Live 0x0 (OE)\n" + // insmod'ed from /dev/shm: modinfo doesn't know it
+		"nvidia 54001664 0 - Live 0x0 (POE)\n" + // DKMS's, unsigned
+		"floppy 16384 0 - Live 0x0 (OE)\n" + // an in-tree name, loaded unsigned
+		"nf_x 16384 0 - Live 0x0 (O)\n" + // signed, out of tree, under an in-tree module's name
+		"zfs 6000000 0 - Live 0x0 (PO)\n" + // packaged, out of tree
+		"extra 16384 0 - Live 0x0\n" + // a file no package owns
+		"-b/tmp 4096 0 - Live 0x0\n"
+	mod := func(name, file, intree string) {
+		sys.runOut["modinfo -- "+name] = "filename:       " + file + "\nintree:         " + intree + "\nname:           " + name + "\n"
+	}
+	k := "/lib/modules/" + rel + "/kernel/"
+	mod("nf_tables", k+"net/netfilter/nf_tables.ko.zst", "Y")
+	sys.runErr["modinfo -- rootkit"] = "modinfo: ERROR: Module rootkit not found.\n"
+	mod("nvidia", "/lib/modules/"+rel+"/updates/dkms/nvidia.ko.zst", "")
+	mod("floppy", k+"drivers/block/floppy.ko.zst", "Y")
+	mod("nf_x", k+"net/netfilter/nf_x.ko.zst", "Y")
+	mod("zfs", k+"zfs/zfs.ko.zst", "")
+	mod("extra", "/lib/modules/"+rel+"/extra/extra.ko", "")
+	sys.runOut["dpkg -S -- "+k+"net/netfilter/nf_tables.ko.zst "+k+"zfs/zfs.ko.zst /lib/modules/"+rel+"/extra/extra.ko"] =
+		"linux-modules-" + rel + ": " + k + "net/netfilter/nf_tables.ko.zst\nlinux-modules-" + rel + ": " + k + "zfs/zfs.ko.zst\n"
 	sys.runOut["dkms status"] = "nvidia/550.120, " + rel + ", x86_64: installed\n"
 	r := a.runCheck(ctx, mkCheck(t, check.ForeignModules, check.Args{}))
-	// A module named like an option is a sign, and never an argument.
-	if !r.Flag || r.Count != 2 || r.Paths[0] != "/proc/modules: -b/tmp" || r.Paths[1] != rk {
+	want := []string{
+		"/proc/modules: rootkit (no module file)",
+		k + "drivers/block/floppy.ko.zst (floppy loaded unsigned)",
+		k + "net/netfilter/nf_x.ko.zst (nf_x loaded out of tree; this file is in tree)",
+		"/proc/modules: -b/tmp", // a module named like an option is a sign, and never an argument
+		"/lib/modules/" + rel + "/extra/extra.ko",
+	}
+	if !r.Flag || r.Count != len(want) || strings.Join(r.Paths, "|") != strings.Join(want, "|") || r.Error != "" {
 		t.Fatalf("%+v", r)
+	}
+	// DKMS's name, its file elsewhere: not DKMS's.
+	mod("nvidia", k+"drivers/video/nvidia.ko.zst", "")
+	if r := a.runCheck(ctx, mkCheck(t, check.ForeignModules, check.Args{})); !strings.Contains(strings.Join(r.Paths, "|"), "nvidia.ko.zst (nvidia loaded unsigned)") {
+		t.Fatalf("DKMS's name, not its file: %+v", r)
+	}
+	// modinfo failing otherwise is no clean answer.
+	sys.runErr["modinfo -- nf_tables"] = "modinfo: ERROR: could not open modules.dep\n"
+	delete(sys.runOut, "modinfo -- nf_tables")
+	if r := a.runCheck(ctx, mkCheck(t, check.ForeignModules, check.Args{})); r.Error == "" {
+		t.Fatalf("modinfo failing: %+v", r)
 	}
 }
 
@@ -133,6 +168,7 @@ func TestHitForeignModules(t *testing.T) {
 func TestHitLogMatch(t *testing.T) {
 	a, sys, _ := newAgent(t)
 	a.Now = func() time.Time { return time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC) }
+	a.Zone = time.UTC
 	sys.files["/var/log/auth.log.1"] = "Nov  5 23:59:59 web sshd[1]: Accepted publickey for root\n" +
 		"Nov  6 00:00:01 web sshd[2]: Accepted publickey for jae\n"
 	sys.files["/var/log/auth.log"] = "2026-11-06T09:00:00.123456+00:00 web sshd[3]: Accepted publickey for root\n" +
@@ -142,8 +178,9 @@ func TestHitLogMatch(t *testing.T) {
 		t.Fatalf("auth: %+v", r)
 	}
 	sys.runOut["journalctl --no-pager -q -o cat -n 100000 -u ssh.service --since @"+since] = "Accepted publickey for root\nother\nAccepted publickey for jae\n"
+	sys.runOut[journalOldest] = "1791855437.087344 web kernel: Linux version 6.8.0-142-generic\n"
 	r = a.runCheck(ctx, mkCheck(t, check.LogMatch, check.Args{Source: "unit:ssh.service", Pattern: "Accepted publickey", Since: since}))
-	if r.Count != 2 {
+	if r.Count != 2 || r.Capped != "" {
 		t.Fatalf("a unit's journal: %+v", r)
 	}
 	delete(sys.files, "/var/log/auth.log")
@@ -157,16 +194,26 @@ func TestHitLogMatch(t *testing.T) {
 // is last year's.
 func TestLogTime(t *testing.T) {
 	now := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
-	if got, ok := logTime("Dec 31 23:00:00 host x", now); !ok || got.Year() != 2025 {
+	if got, ok := logTime("Dec 31 23:00:00 host x", now, time.UTC); !ok || got.Year() != 2025 {
 		t.Fatalf("%v %v", got, ok)
 	}
-	if got, ok := logTime("2026-01-01T10:00:00+00:00 host x", now); !ok || got.Hour() != 10 {
+	if got, ok := logTime("2026-01-01T10:00:00+00:00 host x", now, time.UTC); !ok || got.Hour() != 10 {
 		t.Fatalf("%v %v", got, ok)
 	}
-	if _, ok := logTime("garbage", now); ok {
+	if _, ok := logTime("garbage", now, time.UTC); ok {
 		t.Fatal("garbage read as a time")
 	}
+	// A traditional time is the machine's own: 20:00 at UTC-7 is 03:00 UTC
+	// the next day (round 15, new major 6).
+	pdt := time.FixedZone("PDT", -7*3600)
+	if got, ok := logTime("Oct  9 20:00:00 db sshd[1]: x", time.Date(2026, 11, 6, 0, 0, 0, 0, time.UTC), pdt); !ok ||
+		!got.Equal(time.Date(2026, 10, 10, 3, 0, 0, 0, time.UTC)) {
+		t.Fatalf("at UTC-7: %v %v", got, ok)
+	}
 }
+
+// journalOldest is the call that finds the journal's oldest entry.
+const journalOldest = "journalctl --no-pager -q -o short-unix"
 
 // checkAgent is a machine "web" of a fleet whose owner key is ownerKey,
 // with a way to tick it (a bundle of statements and check files first) and
@@ -300,9 +347,24 @@ func TestHitPartialAndClipped(t *testing.T) {
 	if r.Error == "" || r.Flag && r.Error == "" {
 		t.Fatalf("an unread place read as clean: %+v", r)
 	}
-	if !onlyVanished(errors.New("find /proc: exit status 1: find: '/proc/4242/exe': No such file or directory")) ||
-		onlyVanished(errors.New("find /proc: exit status 1: find: '/proc/1/exe': Permission denied")) {
-		t.Fatal("onlyVanished")
+	vanished := "find: '/proc/4242/exe': No such file or directory\n"
+	denied := "find: '/proc/1/exe': Permission denied\n"
+	for _, c := range []struct {
+		o    Output
+		want bool
+	}{
+		{Output{Err: []byte(vanished + vanished)}, true},
+		{Output{Err: []byte("/usr/bin/find: '/proc/2/exe': No such file or directory\n")}, true}, // find names itself by its path (seen in hit-e2e run 3)
+		{Output{Err: []byte("/usr/bin/find: '/home/x': No such file or directory\n")}, false},
+		{Output{Err: []byte("/usr/bin/sh: '/proc/2/exe': No such file or directory\n")}, false},
+		{Output{Err: []byte(denied)}, false},
+		{Output{Err: []byte(strings.Repeat(vanished, 500) + denied)}, false}, // read whole: an error after many others counts
+		{Output{Err: []byte(vanished), ErrCapped: true}, false},              // what was cut off could be anything
+		{Output{}, false},
+	} {
+		if onlyVanished(c.o) != c.want {
+			t.Fatalf("onlyVanished(%.60q...) = %v", c.o.Err, !c.want)
+		}
 	}
 	if got := clip("/tmp/a\nb"+strings.Repeat("x", 300), maxHitPath); len(got) != maxHitPath || strings.ContainsRune(got, '\n') {
 		t.Fatalf("clip: %q", got)
@@ -313,18 +375,211 @@ func TestHitPartialAndClipped(t *testing.T) {
 		t.Fatalf("a result's path wasn't clipped: %d bytes", len(hr.Paths[0]))
 	}
 	// processes that ended while find walked /proc aren't a failure
-	sys.failOn, sys.failWith = "find /proc", ": find: '/proc/4242/exe': No such file or directory"
+	sys.failOn = ""
+	key := strings.Join([]string{"find", "/proc", "-mindepth", "2", "-maxdepth", "2", "-path", "/proc/[0-9]*/exe", "-lname", "* (deleted)", "-printf", `%l\n`}, " ")
+	sys.runErr[key] = vanished
 	if r := a.runCheck(ctx, mkCheck(t, check.DeletedExe, check.Args{})); r.Error != "" || r.Flag {
 		t.Fatalf("vanished processes: %+v", r)
 	}
-	sys.failWith = ": find: '/proc/1/exe': Permission denied"
+	sys.runErr[key] = vanished + denied
 	if r := a.runCheck(ctx, mkCheck(t, check.DeletedExe, check.Args{})); r.Error == "" {
 		t.Fatalf("an unreadable /proc read as clean: %+v", r)
 	}
 	// a journal read to its cap says so
-	sys.failOn = ""
 	sys.runOut["journalctl --no-pager -q -o cat -n 100000 -u ssh.service --since @"+since] = strings.Repeat("line\n", maxJournal)
 	if r := a.runCheck(ctx, mkCheck(t, check.LogMatch, check.Args{Source: "unit:ssh.service", Pattern: "x", Since: since})); r.Capped != "lines" {
 		t.Fatalf("a journal at its cap: %+v", r)
+	}
+}
+
+// A check's caps hold while it reads, not after: a file is hashed as it
+// streams and stops at the bytes left; a FIFO or link where a package put a
+// file is a change, never opened; a program's output stops at the bytes left
+// (round 15, new major 4).
+func TestHitReadsBounded(t *testing.T) {
+	a, sys, _ := newAgent(t)
+	sys.files["/var/lib/dpkg/info/openssh-server.md5sums"] = md5hex("sshd") + "  usr/sbin/sshd\n" + md5hex("big") + "  usr/lib/big\n" +
+		md5hex("helper") + "  usr/lib/openssh/sftp-server\n"
+	sys.files["/usr/sbin/sshd"] = "sshd"
+	sys.files["/usr/lib/big"] = strings.Repeat("x", 4000)
+	sys.special["/usr/lib/openssh/sftp-server"] = "fifo"
+	old := HitBytes
+	defer func() { HitBytes = old }()
+	HitBytes = 1000
+	r := a.runCheck(ctx, mkCheck(t, check.PackageFiles, check.Args{Package: "openssh-server"}))
+	if r.Capped != "bytes" || r.Count != 0 || sys.read["/usr/lib/big"] > 1000 {
+		t.Fatalf("a file past the bytes left: %+v, %d bytes of it read", r, sys.read["/usr/lib/big"])
+	}
+	HitBytes = 1 << 20
+	if r := a.runCheck(ctx, mkCheck(t, check.PackageFiles, check.Args{Package: "openssh-server"})); r.Capped != "" || r.Count != 2 ||
+		strings.Join(r.Paths, ",") != "/usr/lib/big,/usr/lib/openssh/sftp-server" {
+		t.Fatalf("a FIFO where a file was: %+v", r)
+	}
+	// The auth log as a FIFO: not clean, and never waited on.
+	sys.special["/var/log/auth.log"] = "fifo"
+	sys.files["/var/log/auth.log.1"] = "2026-11-05T00:00:00+00:00 web sshd[1]: x\n"
+	if r := a.runCheck(ctx, mkCheck(t, check.LogMatch, check.Args{Source: "auth", Pattern: "x", Since: since})); r.Error == "" {
+		t.Fatalf("a FIFO for the auth log: %+v", r)
+	}
+	// A journal printing past the bytes left is killed there.
+	HitBytes = 100
+	sys.runOut["journalctl --no-pager -q -o cat -n 100000 -u ssh.service --since @"+since] = strings.Repeat("Accepted publickey\n", 20)
+	if r := a.runCheck(ctx, mkCheck(t, check.LogMatch, check.Args{Source: "unit:ssh.service", Pattern: "Accepted", Since: since})); r.Capped != "bytes" || r.Count != 5 {
+		t.Fatalf("a journal past the bytes left: %+v", r)
+	}
+}
+
+// package-files also hashes the package's conffiles, which dpkg's md5sums
+// leave out, and counts the changed ones apart: they don't flag, as the
+// owner's own edits look the same (round 15, minor 5).
+func TestHitConffiles(t *testing.T) {
+	a, sys, _ := newAgent(t)
+	sys.files["/var/lib/dpkg/info/openssh-server.md5sums"] = md5hex("sshd") + "  usr/sbin/sshd\n"
+	sys.files["/usr/sbin/sshd"] = "sshd"
+	sys.runOut["dpkg-query -W -f ${Conffiles}\n -- openssh-server"] = " /etc/pam.d/sshd " + md5hex("@include common-auth") + "\n" +
+		" /etc/ssh/moduli " + md5hex("moduli") + "\n /etc/init.d/ssh " + md5hex("init") + "\n /etc/old " + md5hex("old") + " obsolete\n"
+	sys.files["/etc/pam.d/sshd"] = "auth sufficient pam_permit.so"
+	sys.files["/etc/ssh/moduli"] = "moduli"
+	r := a.runCheck(ctx, mkCheck(t, check.PackageFiles, check.Args{Package: "openssh-server"}))
+	if r.Flag || r.Count != 0 || r.Conf != 2 || strings.Join(r.ConfPaths, ",") != "/etc/pam.d/sshd,/etc/init.d/ssh (gone)" || r.Error != "" {
+		t.Fatalf("%+v", r)
+	}
+}
+
+// log-match reads the auth log's rotations, gunzipped, to the first that
+// begins before since; when they don't reach back to since, the result says
+// so ("history"); a matching line whose time can't be read is counted, and
+// said (round 15, new major 6).
+func TestHitLogHistory(t *testing.T) {
+	a, sys, _ := newAgent(t)
+	a.Now = func() time.Time { return time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC) }
+	a.Zone = time.UTC
+	gz := func(s string) string {
+		var b bytes.Buffer
+		z := gzip.NewWriter(&b)
+		z.Write([]byte(s))
+		z.Close()
+		return b.String()
+	}
+	const sinceOct = "1791590400" // 2026-10-10 00:00 UTC
+	sys.files["/var/log/auth.log"] = "Nov  2 00:00:00 web sshd[9]: Accepted publickey for root\n"
+	sys.files["/var/log/auth.log.1"] = "Oct 26 00:00:00 web sshd[8]: Failed password for root\n"
+	sys.files["/var/log/auth.log.2.gz"] = gz("Oct 19 00:00:00 web sshd[7]: Failed password for root\n")
+	sys.files["/var/log/auth.log.3.gz"] = gz("Oct 12 00:00:00 web sshd[6]: x\nOct 14 03:00:00 web sshd[6]: Accepted publickey for root\n")
+	args := check.Args{Source: "auth", Pattern: "Accepted publickey for root", Since: sinceOct}
+	r := a.runCheck(ctx, mkCheck(t, check.LogMatch, args))
+	if r.Count != 2 || r.Capped != "history" || r.Error != "" {
+		t.Fatalf("since before the oldest rotation: %+v", r)
+	}
+	sys.files["/var/log/auth.log.4.gz"] = gz("Oct  5 00:00:00 web sshd[5]: x\nAccepted publickey for root, at no time it can read\n")
+	r = a.runCheck(ctx, mkCheck(t, check.LogMatch, args))
+	if r.Count != 3 || r.Untimed != 1 || r.Capped != "" || r.Error != "" {
+		t.Fatalf("back to since: %+v", r)
+	}
+	// Older than since: not read.
+	sys.files["/var/log/auth.log.5.gz"] = "not gzip at all"
+	if r := a.runCheck(ctx, mkCheck(t, check.LogMatch, args)); r.Count != 3 || r.Error != "" {
+		t.Fatalf("read past since: %+v", r)
+	}
+	// The journal doesn't reach back to since.
+	sys.runOut["journalctl --no-pager -q -o cat -n 100000 -u ssh.service --since @"+sinceOct] = "Accepted publickey for root\n"
+	sys.runOut[journalOldest] = "1793000000.000001 web kernel: Linux version\n" // 2026-10-26
+	if r := a.runCheck(ctx, mkCheck(t, check.LogMatch, check.Args{Source: "unit:ssh.service", Pattern: "Accepted", Since: sinceOct})); r.Capped != "history" || r.Count != 1 {
+		t.Fatalf("a journal that starts after since: %+v", r)
+	}
+	// journalctl's error is reported, what it printed counted (round 15, minor 4).
+	sys.runErr["journalctl --no-pager -q -o cat -n 100000 -u ssh.service --since @"+sinceOct] = "Failed to open journal file: Bad message\n"
+	if r := a.runCheck(ctx, mkCheck(t, check.LogMatch, check.Args{Source: "unit:ssh.service", Pattern: "Accepted", Since: sinceOct})); r.Error == "" || r.Count != 1 {
+		t.Fatalf("journalctl's error: %+v", r)
+	}
+}
+
+// A line longer than any log line caps the result: what follows it is
+// unread (round 15, minor 4).
+func TestHitLongLine(t *testing.T) {
+	a, sys, _ := newAgent(t)
+	a.Now = func() time.Time { return time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC) }
+	a.Zone = time.UTC
+	sys.files["/var/log/auth.log"] = "2026-11-06T09:00:00+00:00 web x\n" + strings.Repeat("y", maxLine+1) + "\n2026-11-06T09:00:01+00:00 web Accepted\n"
+	if r := a.runCheck(ctx, mkCheck(t, check.LogMatch, check.Args{Source: "auth", Pattern: "Accepted", Since: since})); r.Capped != "line length" {
+		t.Fatalf("%+v", r)
+	}
+	key := strings.Join([]string{"find", "/proc", "-mindepth", "2", "-maxdepth", "2", "-path", "/proc/[0-9]*/exe", "-lname", "* (deleted)", "-printf", `%l\n`}, " ")
+	sys.runOut[key] = "/tmp/a (deleted)\n" + strings.Repeat("z", maxLine+1) + "\n/tmp/b (deleted)\n"
+	if r := a.runCheck(ctx, mkCheck(t, check.DeletedExe, check.Args{})); r.Capped != "line length" {
+		t.Fatalf("a program's line: %+v", r)
+	}
+}
+
+// The owner's Checks are queued as taken, saved with the statement's
+// sequence, and run one a tick, after the guards' step, oldest first; one
+// the agent stopped in is reported unfinished and never runs again; past
+// maxChecks waiting, a Check is skipped (round 15, new major 4, minor 3).
+func TestCheckQueue(t *testing.T) {
+	a, sys, tick, sign := checkAgent(t)
+	key := strings.Join([]string{"find", "/proc", "-mindepth", "2", "-maxdepth", "2", "-path", "/proc/[0-9]*/exe", "-lname", "* (deleted)", "-printf", `%l\n`}, " ")
+	sys.files["/root/.ssh"] = ""
+	c1 := mkCheck(t, check.DeletedExe, check.Args{})
+	c2 := mkCheck(t, check.NewSince, check.Args{What: "keys", Since: since})
+	c3 := mkCheck(t, check.NewSince, check.Args{What: "units", Since: since})
+	sys.files["/etc/systemd/system"] = ""
+	res := tick([]Message{sign(c1, ""), sign(c2, ""), sign(c3, "")}, c1, c2, c3)
+	if len(res.Accepted) != 3 || strings.Join(res.Hits, ",") != c1.Name() {
+		t.Fatalf("first tick: %+v", res)
+	}
+	if f, _ := a.loadFleet(); len(f.Checks) != 2 || f.LastSeq != 3 {
+		t.Fatalf("the queue: %+v", f.Checks)
+	}
+	started := false // the queue on disk says c2 started while it runs
+	sys.onRun = func(line string) {
+		if strings.HasPrefix(line, "find /root/.ssh") {
+			f, _ := a.loadFleet()
+			started = len(f.Checks) > 0 && !f.Checks[0].Started.IsZero()
+		}
+	}
+	if res := tick(nil); strings.Join(res.Hits, ",") != c2.Name() || !started {
+		t.Fatalf("second tick: %+v, marked started %v", res, started)
+	}
+	sys.onRun = nil
+	// The agent stops while c3 runs: the queue says it started.
+	f, _ := a.loadFleet()
+	f.Checks[0].Started = a.now().UTC()
+	if err := a.saveFleet(f); err != nil {
+		t.Fatal(err)
+	}
+	sys.log = nil
+	if res := tick(nil); strings.Join(res.Hits, ",") != c3.Name() || len(ran(sys, "find /etc/systemd/system")) != 0 {
+		t.Fatalf("a check the agent stopped in ran again: %+v %q", res, sys.log)
+	}
+	hits, _ := a.loadHits()
+	if hits[0].Check != c3.Hash() || !strings.Contains(hits[0].Error, "didn't finish") {
+		t.Fatalf("unfinished: %+v", hits[0])
+	}
+	if f, _ := a.loadFleet(); len(f.Checks) != 0 {
+		t.Fatalf("left queued: %+v", f.Checks)
+	}
+	// A result kept before the agent stopped stands.
+	f, _ = a.loadFleet()
+	f.Checks = []QueuedCheck{{Seq: 9, File: c1.Canonical(), Started: a.now().UTC().Add(-time.Second)}}
+	if err := a.saveFleet(f); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.keepHit(&HitResult{Check: c1.Hash(), Name: c1.Name(), Ran: a.now().UTC(), Count: 1, Flag: true}); err != nil {
+		t.Fatal(err)
+	}
+	tick(nil)
+	if hits, _ := a.loadHits(); hits[0].Check != c1.Hash() || hits[0].Error != "" || !hits[0].Flag {
+		t.Fatalf("a kept result replaced: %+v", hits[0])
+	}
+	// Past maxChecks waiting, skipped.
+	sys.runOut[key] = ""
+	var msgs []Message
+	for i := 0; i < maxChecks+1; i++ {
+		msgs = append(msgs, sign(c1, ""))
+	}
+	tick(msgs, c1)
+	f, _ = a.loadFleet()
+	if len(f.Checks) != maxChecks-1 || !strings.Contains(f.Skipped[len(f.Skipped)-1].Why, "checks wait to run here already") {
+		t.Fatalf("the queue's cap: %d queued, %+v", len(f.Checks), f.Skipped)
 	}
 }

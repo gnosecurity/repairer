@@ -56,7 +56,22 @@ type Fleet struct {
 	// (B3), oldest first: each lets it reboot into one kernel, once, before
 	// its deadline, whatever its tier says.
 	Reboots []RebootOrder `json:"reboots,omitempty"`
+	// Checks are the owner's Checks taken and not yet run here, oldest
+	// first (W1): one runs a tick, after the guards' step, marked Started
+	// before it runs, so one the agent stopped in is reported unfinished
+	// and never runs again (round 15, new major 4 and minor 3).
+	Checks []QueuedCheck `json:"checks,omitempty"`
 }
+
+// QueuedCheck is an owner's Check waiting to run here.
+type QueuedCheck struct {
+	Seq     uint64    `json:"seq"`
+	File    []byte    `json:"file"` // the check file, canonical
+	Started time.Time `json:"started,omitzero"`
+}
+
+// maxChecks is how many Checks may wait to run here.
+const maxChecks = 8
 
 // RebootOrder is the owner's signed Reboot for this host.
 type RebootOrder struct {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"regexp"
 	"strings"
@@ -26,6 +27,9 @@ type fakeSys struct {
 	sshPorts []int
 	listen   []Listen
 	runOut   map[string]string // output for a program and its args, joined by spaces
+	runErr   map[string]string // stderr for a program and its args, which then exits 1 (RunCapped)
+	special  map[string]string // a path that is a "fifo" or a "link" (OpenFile)
+	read     map[string]int    // bytes read through OpenFile, by path
 	ephLo    int
 	ephHi    int
 	log      []string
@@ -90,6 +94,8 @@ func newFakeSys() *fakeSys {
 		units:    map[string]*fakeUnit{},
 		inUse:    map[string]string{},
 		runOut:   map[string]string{},
+		runErr:   map[string]string{},
+		special:  map[string]string{},
 		modules:  map[string]string{"ksmbd": "loadable", "sctp": "loadable", "ext4": "builtin"},
 		sshPorts: []int{22},
 		ephLo:    32768,
@@ -211,6 +217,55 @@ func (f *fakeSys) Run(_ context.Context, stdin []byte, prog string, args ...stri
 		return []byte(out), nil
 	}
 	return nil, f.record(line)
+}
+
+// RunCapped answers from runOut and runErr, keeping limit bytes of the
+// output; every call is recorded.
+func (f *fakeSys) RunCapped(_ context.Context, limit int64, prog string, args ...string) (Output, error) {
+	line := prog + " " + strings.Join(args, " ")
+	if err := f.record(line); err != nil {
+		return Output{}, err
+	}
+	o := Output{Out: []byte(f.runOut[line])}
+	if int64(len(o.Out)) > limit {
+		o.Out, o.OutCapped = o.Out[:max(limit, 0)], true
+		return o, fmt.Errorf("%s: signal: killed", prog)
+	}
+	if e, ok := f.runErr[line]; ok {
+		o.Err = []byte(e)
+		if len(o.Err) > maxStderr {
+			o.Err, o.ErrCapped = o.Err[:maxStderr], true
+		}
+		return o, fmt.Errorf("%s: exit status 1", prog)
+	}
+	return o, nil
+}
+
+func (f *fakeSys) OpenFile(name string) (io.ReadCloser, error) {
+	if k := f.special[name]; k != "" {
+		return nil, fmt.Errorf("%s: %w (%s)", name, ErrNotRegular, k)
+	}
+	s, ok := f.files[name]
+	if !ok {
+		return nil, fs.ErrNotExist
+	}
+	return io.NopCloser(&fakeReader{f: f, name: name, r: strings.NewReader(s)}), nil
+}
+
+// fakeReader counts what is read of a fake file.
+type fakeReader struct {
+	f    *fakeSys
+	name string
+	r    io.Reader
+}
+
+func (r *fakeReader) Read(p []byte) (int, error) {
+	n, err := r.r.Read(p)
+	if r.f.read == nil {
+		r.f.read = map[string]int{}
+	}
+	r.f.read[r.name] += n
+	return n, err
 }
 
 func (f *fakeSys) ReadFile(name string) ([]byte, error) {

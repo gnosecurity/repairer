@@ -960,3 +960,15 @@ func TestRebootUnpackagedFallback(t *testing.T) {
 		t.Fatalf("back: %q", m)
 	}
 }
+
+// A fallback must have its kernel and initrd: a running kernel no package
+// owns, without its initrd (which the gates don't look at, as no package
+// lists it), is nothing to fall back on.
+func TestRebootFallbackWithoutInitrd(t *testing.T) {
+	a, sys, f, p, _ := rebootAgent(t, `,"reboot":"window","reboot_window":"03:00-04:00"`)
+	sys.runOut[dpkgQuery] = "linux-image-" + newRel + " 6.8.0-149.149 ii \n"
+	delete(sys.files, "/boot/initrd.img-"+oldRel)
+	if m := rstep(t, a, f, p, nil); m != "a reboot into "+newRel+" is owed; the kernel to fall back on, "+oldRel+", is gone (/boot/initrd.img-"+oldRel+"): there is nothing to fall back on" {
+		t.Fatalf("%q", m)
+	}
+}

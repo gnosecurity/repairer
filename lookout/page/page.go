@@ -84,6 +84,8 @@ func New(dir string, admins []string, p *policy.Policy, col *lookout.Collector, 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/admin", http.StatusSeeOther) })
+	// No icon, said plainly: a browser asks for one on every page, and a 404 is an error in its console.
+	mux.HandleFunc("GET /favicon.ico", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
 	mux.HandleFunc("GET /admin", s.dashboard)
 	mux.HandleFunc("GET /admin/admin.js", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
@@ -108,7 +110,10 @@ func headers(h http.Handler) http.Handler {
 		w.Header().Set("X-Robots-Tag", "noindex, nofollow")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'; form-action 'self'")
-		w.Header().Set("Referrer-Policy", "no-referrer")
+		// same-origin, not no-referrer: under no-referrer a browser sends
+		// "Origin: null" with a form's POST, and the same-origin check then
+		// refuses this page's own sign-out and upload forms.
+		w.Header().Set("Referrer-Policy", "same-origin")
 		h.ServeHTTP(w, r)
 	})
 }
@@ -203,6 +208,22 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 		}
 		v.Machines = append(v.Machines, row)
 	}
+	// A machine in a tier whose agent key isn't in the policy can't report:
+	// listed so it isn't forgotten.
+	keyed := map[string]bool{}
+	for _, k := range s.Policy.Signers.Agents {
+		keyed[k.Host] = true
+	}
+	for _, t := range s.Policy.Tiers {
+		for _, h := range t.Hosts {
+			if !keyed[h] {
+				keyed[h] = true
+				v.Machines = append(v.Machines, machineRow{Host: h, Silent: true,
+					Error: "no agent key in the policy yet (autopatch-agent init prints it)"})
+			}
+		}
+	}
+	sort.SliceStable(v.Machines, func(i, j int) bool { return v.Machines[i].Host < v.Machines[j].Host })
 	sort.SliceStable(v.Waiting, func(i, j int) bool { return v.Waiting[i].Ask && !v.Waiting[j].Ask })
 	if s.Feeds != nil {
 		if fs, err := s.Feeds.Findings(); err == nil {

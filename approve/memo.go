@@ -350,6 +350,17 @@ func tierLines(p *policy.Policy) []string {
 		if t.SpacingSeconds > 0 {
 			line += fmt.Sprintf(" spacing %ds", t.SpacingSeconds)
 		}
+		switch t.Reboot { // the default, "yes", says nothing, as before reboots were in the policy
+		case "window":
+			line += " reboots itself " + t.RebootWindow + " UTC"
+		case "yes":
+			line += " reboots on your Reboot"
+		case "never":
+			line += " never reboots"
+		}
+		if t.RebootAfter != "" {
+			line += " after " + t.RebootAfter
+		}
 		out = append(out, line)
 	}
 	return out

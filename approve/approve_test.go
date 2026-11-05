@@ -325,3 +325,25 @@ func TestMemoPolicyRigs(t *testing.T) {
 		t.Fatalf("memo %q, %v", m, err)
 	}
 }
+
+// A tier's reboot mode, window and order show in the memo of the policy
+// change, so the owner reads on the Ledger that machines will now reboot
+// themselves, when, and after whom (B3).
+func TestMemoPolicyReboots(t *testing.T) {
+	old, _ := fixturePolicies(t)
+	nw := *old
+	nw.Replaces = old.Hash()
+	nw.Tiers = append([]policy.Tier(nil), old.Tiers...)
+	nw.Tiers[0].Reboot, nw.Tiers[0].RebootWindow = "window", "03:00-04:00"
+	m, err := MemoPolicy(old, &nw)
+	if err != nil || !strings.Contains(m, "reboots itself 03:00-04:00 UTC") {
+		t.Fatalf("memo %q, %v", m, err)
+	}
+	after := nw
+	after.Replaces = nw.Hash()
+	after.Tiers = append(append([]policy.Tier(nil), nw.Tiers...),
+		policy.Tier{Name: "B", Hosts: []string{"web"}, Admit: []string{"me"}, Reboot: "yes", RebootAfter: nw.Tiers[0].Hosts[0]})
+	if m, err := MemoPolicy(&nw, &after); err != nil || !strings.Contains(m, "B hosts web admit me reboots on your Reboot after "+nw.Tiers[0].Hosts[0]) {
+		t.Fatalf("memo %q, %v", m, err)
+	}
+}

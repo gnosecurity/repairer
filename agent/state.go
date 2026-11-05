@@ -34,6 +34,10 @@ type Entry struct {
 	AppliedAt time.Time    `json:"applied_at"`
 	ConfirmBy time.Time    `json:"confirm_by,omitzero"`
 	Unprobed  bool         `json:"unprobed,omitempty"` // a drop the agent has no probe for
+	// Failed holds why the last attempt to take the guard off failed. The
+	// entry stays, as Applying with every step counted, until a later undo
+	// or boot takes it off.
+	Failed string `json:"failed,omitempty"`
 }
 
 // UnitState is a unit's state before the first guard masked it.
@@ -42,11 +46,20 @@ type UnitState struct {
 	Active  bool   `json:"active"`
 }
 
+// SavedMode is a stripped file's mode before the first guard changed it,
+// with the file's identity, so that the mode goes back only onto that same
+// file and never onto whatever has since taken its path.
+type SavedMode struct {
+	Mode uint32 `json:"mode"` // an fs.FileMode
+	Dev  uint64 `json:"dev"`
+	Ino  uint64 `json:"ino"`
+}
+
 // Originals holds what a resource was before the first guard changed it,
 // so the last guard to let go of it can put it back.
 type Originals struct {
 	Settings map[string]string    `json:"settings,omitempty"`
-	Modes    map[string]uint32    `json:"modes,omitempty"`
+	Modes    map[string]SavedMode `json:"modes,omitempty"`
 	Units    map[string]UnitState `json:"units,omitempty"`
 }
 

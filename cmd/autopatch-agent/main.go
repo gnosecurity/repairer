@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/jaekwon/autopatch/agent"
@@ -59,9 +60,22 @@ func run(ctx context.Context, cmd string, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	// The undo timer runs later, from /, so every path it gets is absolute.
+	var err error
+	if *stateDir, err = filepath.Abs(*stateDir); err != nil {
+		return err
+	}
+	if *root != "" {
+		if *root, err = filepath.Abs(*root); err != nil {
+			return err
+		}
+	}
 	sys := agent.Linux{Root: *root}
 	self, err := os.Executable()
 	if err != nil {
+		return err
+	}
+	if self, err = filepath.EvalSymlinks(self); err != nil {
 		return err
 	}
 	a := &agent.Agent{
@@ -99,7 +113,7 @@ func run(ctx context.Context, cmd string, args []string) error {
 		}
 		fmt.Printf("%s is on (%s), hash %s\n", g.Name(), e.Status, e.Hash)
 		if e.Unprobed {
-			fmt.Println("  no probe: the agent has no probe for this guard's drops yet")
+			fmt.Println("  not every drop was probed: the agent has no probe for some of them yet")
 		}
 		if e.Status == agent.Pending {
 			fmt.Printf("  it comes off at %s unless you run: autopatch-agent confirm %s\n",
@@ -140,9 +154,15 @@ func run(ctx context.Context, cmd string, args []string) error {
 			if n := hits[e.Hash]; n >= 0 {
 				fmt.Printf("  stopped %d packets", n)
 			} else {
-				fmt.Print("  table unreadable")
+				fmt.Print("  a table is unreadable")
+			}
+			if e.Unprobed {
+				fmt.Print("  (a drop has no probe)")
 			}
 			fmt.Println()
+			if e.Failed != "" {
+				fmt.Println("  taking it off failed; undo or boot will try again: " + e.Failed)
+			}
 		}
 		return nil
 	case "check":
@@ -155,8 +175,10 @@ func run(ctx context.Context, cmd string, args []string) error {
 			switch {
 			case d.Repaired:
 				line += " (put back)"
+			case d.TakenOff:
+				line += " (taken off)"
 			case d.Err != nil:
-				line += " (putting it back failed: " + d.Err.Error() + ")"
+				line += " (repair failed: " + d.Err.Error() + ")"
 			}
 			fmt.Println(line)
 		}
@@ -196,8 +218,8 @@ func printPlan(a *agent.Agent, g *guard.Guard) error {
 		fmt.Println("  " + s)
 	}
 	fmt.Println("  breaks: " + g.Breaks)
-	if !p.Probed {
-		fmt.Println("  no probe: the agent has no probe for this guard's drops yet")
+	if p.Unprobed {
+		fmt.Println("  not every drop can be probed: the agent has no probe for some of them yet")
 	}
 	for _, u := range p.InUse {
 		fmt.Println("  in use: " + u)

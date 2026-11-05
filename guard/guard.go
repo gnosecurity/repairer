@@ -111,8 +111,10 @@ const (
 	maxTargets = 16
 	maxBlocks  = 16
 	maxPorts   = 32
-	maxUntil   = 32
-	maxBreaks  = 300
+	// maxPortsCovered caps how many ports one drop may cover in all.
+	maxPortsCovered = 1024
+	maxUntil        = 32
+	maxBreaks       = 300
 )
 
 var (
@@ -318,6 +320,13 @@ func (d *Drop) validate() error {
 	if err != nil {
 		return err
 	}
+	covered := 0
+	for _, r := range ranges {
+		covered += r[1] - r[0] + 1
+	}
+	if covered > maxPortsCovered {
+		return fmt.Errorf("drop: covers %d ports; at most %d", covered, maxPortsCovered)
+	}
 	if d.SYN && d.Protocol != "tcp" {
 		return errors.New("drop: syn needs protocol tcp")
 	}
@@ -395,6 +404,9 @@ func (m *Module) validate() error {
 	}
 	if neverBlock(m.Name) {
 		return fmt.Errorf("module: %s is never blocked (firewall, storage, network, virtualization or graphics)", m.Name)
+	}
+	if looksLikeAlias(m.Name) {
+		return fmt.Errorf("module: %q looks like a module alias; name the module itself", m.Name)
 	}
 	return nil
 }

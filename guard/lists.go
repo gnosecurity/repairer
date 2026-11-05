@@ -27,7 +27,8 @@ type settingRule struct {
 	Value  string
 	Effect Effect
 	// InUse names the check that refuses the setting while something uses
-	// the feature: "userns" or "io_uring".
+	// the feature, or while it can't reach everything: "userns", "io_uring"
+	// or "netns".
 	InUse string
 }
 
@@ -36,9 +37,11 @@ type settingRule struct {
 // reboot (no panic_on_* settings).
 var settings = map[string]settingRule{
 	// CVE-2026-98432: the published exploit goes through MPTCP listeners.
-	"net.mptcp.enabled": {Value: "0", Effect: NewSockets},
+	// net.* settings live in each network namespace; the netns check
+	// refuses them while containers have namespaces of their own.
+	"net.mptcp.enabled": {Value: "0", Effect: NewSockets, InUse: "netns"},
 	// CVE-2019-11477 (SACK Panic): the stopgap was SACK off.
-	"net.ipv4.tcp_sack": {Value: "0", Effect: Now},
+	"net.ipv4.tcp_sack": {Value: "0", Effect: Now, InUse: "netns"},
 	// User namespaces: the door for many local root exploits.
 	"kernel.unprivileged_userns_clone": {Value: "0", Effect: NewProcesses, InUse: "userns"},
 	"user.max_user_namespaces":         {Value: "0", Effect: NewProcesses, InUse: "userns"},
@@ -76,6 +79,30 @@ var neverBlockPrefixes = []string{
 	"hv_", "xen", "tun", "tap", "veth", "wireguard", "bonding", "8021q", "kvm", "vfio",
 	"amdgpu", "nvidia", "i915", "drm", "ttm", "ib_", "rdma", "nbd", "ceph", "rbd", "fuse",
 	"af_packet", "unix", "ipv6", "tls", "crypto", "sha", "aes", "efivarfs", "autofs",
+	"ip_set", "ipt_", "ip6t_", "arp_", "arptable", "ip_vs", "ipip", "ip_tunnel", "ip6_tunnel",
+	"sit", "gre", "ip_gre", "ip6_gre", "vxlan", "geneve", "macvlan", "ipvlan", "dummy",
+}
+
+// aliasPrefixes are how module aliases begin, other than those with a ':'
+// (pci:, usb:, platform:), which the name pattern already refuses. A guard
+// names a module itself, never an alias: an alias such as
+// net-pf-16-proto-12 stands for a module the never list protects
+// (nfnetlink), and modprobe runs an install line for the alias before it
+// looks the alias up. The agent also refuses any name the running kernel
+// has no module by.
+var aliasPrefixes = []string{
+	"net_pf_", "fs_", "char_major_", "block_major_", "binfmt_", "tty_ldisc_", "rtnl_",
+	"netdev_",
+}
+
+func looksLikeAlias(name string) bool {
+	n := strings.ReplaceAll(name, "-", "_")
+	for _, p := range aliasPrefixes {
+		if strings.HasPrefix(n, p) {
+			return true
+		}
+	}
+	return false
 }
 
 func neverBlock(name string) bool {
@@ -112,12 +139,24 @@ var neverStopPrefixes = []string{
 	"wpa_supplicant", "resolvconf", "cloud-", "droplet-agent", "do-agent", "qemu-guest-agent",
 	"google-", "amazon-", "waagent", "walinuxagent", "getty", "serial-getty", "console-",
 	"multipathd", "lvm2", "mdmonitor", "udisks2", "autopatch", "tmkms",
+	"ua-", "ubuntu-advantage", "esm-cache", "fwupd", "dropbear", "tailscale", "sssd",
+	"canonical-livepatch", "amazon-ssm-agent", "ssm-agent", "wg-quick", "openvpn",
+	"teleport", "cloudflared", "cockpit", "zerotier", "netbird",
 }
 
+// neverStop reports whether a unit is on the never-touch list. A snap's
+// units are named snap.<snap>.<app>, so the snap's name is checked too.
 func neverStop(unit string) bool {
-	for _, p := range neverStopPrefixes {
-		if strings.HasPrefix(unit, p) {
-			return true
+	names := []string{unit}
+	if rest, ok := strings.CutPrefix(unit, "snap."); ok {
+		snap, _, _ := strings.Cut(rest, ".")
+		names = append(names, snap)
+	}
+	for _, n := range names {
+		for _, p := range neverStopPrefixes {
+			if strings.HasPrefix(n, p) {
+				return true
+			}
 		}
 	}
 	return false
@@ -128,6 +167,18 @@ var neverStripPaths = map[string]bool{
 	"/usr/bin/sudo": true, "/usr/bin/sudoedit": true, "/usr/bin/su": true, "/bin/su": true,
 	"/usr/bin/doas": true, "/usr/bin/passwd": true, "/bin/sudo": true,
 	"/usr/lib/openssh/ssh-keysign": true, "/usr/libexec/openssh/ssh-keysign": true,
+	"/usr/lib/cargo/bin/sudo": true, "/usr/lib/cargo/bin/su": true, "/usr/bin/sudo.ws": true,
+	"/usr/bin/sudo-rs": true, "/usr/bin/su-rs": true, "/bin/doas": true, "/bin/passwd": true,
+}
+
+// NeverStripPaths lists the programs a guard never strips. The agent also
+// refuses any path that is the same file as one of these.
+func NeverStripPaths() []string {
+	out := make([]string, 0, len(neverStripPaths))
+	for p := range neverStripPaths {
+		out = append(out, p)
+	}
+	return out
 }
 
 func neverStrip(p string) bool { return neverStripPaths[p] }

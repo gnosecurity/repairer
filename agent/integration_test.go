@@ -49,7 +49,9 @@ func TestIntegrationGuardOne(t *testing.T) {
 		t.Fatalf("before the guard, the probe should get through: %v", err)
 	}
 
-	e, err := a.Apply(ctx, g, ApplyOptions{ConfirmWithin: 10 * time.Minute})
+	// Force: inside the test's own network namespace, every other process
+	// on the host is in "another" one, which the netns check reports.
+	e, err := a.Apply(ctx, g, ApplyOptions{ConfirmWithin: 10 * time.Minute, Force: true})
 	if err != nil {
 		t.Fatal(err)
 	}

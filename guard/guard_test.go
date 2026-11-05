@@ -110,6 +110,17 @@ func TestRefusals(t *testing.T) {
 		{"bad release", `"releases": ["12", "13"]`, `"releases": ["bookworm"]`, "release"},
 		{"no breaks", `"breaks": "IP Record Route and Timestamp on TCP; nothing common uses them"`, `"breaks": ""`, "breaks"},
 		{"control character", `nothing common uses them"`, `nothing\u0007 common uses them"`, "breaks"},
+		{"module alias", drop, `{"module": {"name": "net-pf-16-proto-12"}}`, "alias"},
+		{"filesystem alias", drop, `{"module": {"name": "fs-ext4"}}`, "alias"},
+		{"ip_set never blocked", drop, `{"module": {"name": "ip_set"}}`, "never blocked"},
+		{"snap certbot never stopped", drop, `{"service": {"unit": "snap.certbot.renew.timer"}}`, "never-touch"},
+		{"livepatch never stopped", drop, `{"service": {"unit": "snap.canonical-livepatch.canonical-livepatchd.service"}}`, "never-touch"},
+		{"dropbear never stopped", drop, `{"service": {"unit": "dropbear.service"}}`, "never-touch"},
+		{"pro updates never stopped", drop, `{"service": {"unit": "ua-timer.timer"}}`, "never-touch"},
+		{"strip sudo-rs", drop, `{"strip": {"path": "/usr/lib/cargo/bin/sudo"}}`, "never-touch"},
+		{"strip doas via /bin", drop, `{"strip": {"path": "/bin/doas"}}`, "never-touch"},
+		{"too many ports", drop, `{"drop": {"family": "ipv4", "protocol": "udp", "ports": ["1000-3000"]}}`, "at most 1024"},
+		{"every port but ssh", drop, `{"drop": {"family": "ipv4", "protocol": "tcp", "ports": ["1-21", "23-65535"]}}`, "at most 1024"},
 		{"same block twice", `{"setting": {"name": "net.mptcp.enabled", "value": "0"}}`, `{"setting": {"name": "net.mptcp.enabled", "value": "0"}}, {"setting": {"name": "net.mptcp.enabled", "value": "0"}}`, "twice"},
 	}
 	for _, c := range cases {

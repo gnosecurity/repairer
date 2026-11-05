@@ -28,19 +28,44 @@ type System interface {
 	WriteFile(name string, data []byte, perm fs.FileMode) error
 	// Remove removes a file; a file already gone is not an error.
 	Remove(name string) error
-	Lstat(name string) (fs.FileInfo, error)
-	Chmod(name string, mode fs.FileMode) error
-	// ReadSetting and WriteSetting read and write a kernel setting live.
+	// ReadSetting and WriteSetting read and write a kernel setting live, in
+	// the agent's own network namespace for net.* settings.
 	ReadSetting(name string) (string, error)
 	WriteSetting(name, value string) error
 	// InUse says what uses a feature, or "" if nothing does. what is
-	// "userns", "io_uring" or "module:<name>".
+	// "userns", "io_uring", "netns" or "module:<name>".
 	InUse(what string) (string, error)
 	// ProbeIPOptions checks on loopback that plain TCP connects and that a
 	// TCP connection request carrying IPv4 options does not.
 	ProbeIPOptions(ctx context.Context) error
 	// Info describes the running system.
 	Info() (guard.System, error)
+	// Module reports whether the running kernel has a loadable module by
+	// exactly this name, or has one built in. Aliases are not names.
+	Module(name string) (loadable, builtin bool, err error)
+	// RemoteAccessPorts are the TCP ports sshd or dropbear listen on.
+	RemoteAccessPorts() ([]int, error)
+	// EphemeralPorts is the range the machine's own connections use.
+	EphemeralPorts() (lo, hi int, err error)
+	// FileID describes a file through a handle opened without following
+	// symlinks. A path that goes through a symlink anywhere is an error.
+	FileID(path string) (FileID, error)
+	// ChmodIf sets a file's mode through a handle opened without following
+	// symlinks, only if it is still the root-owned regular file want
+	// names. It reports whether it changed the mode.
+	ChmodIf(path string, want FileID, mode fs.FileMode) (bool, error)
+	// SameFile reports whether two paths, following symlinks, are the same
+	// file. A path that doesn't exist is the same as nothing.
+	SameFile(a, b string) (bool, error)
+}
+
+// FileID is what the agent knows of a file it strips.
+type FileID struct {
+	Mode    fs.FileMode // permission and setuid, setgid, sticky bits
+	Regular bool
+	UID     uint32
+	Dev     uint64
+	Ino     uint64
 }
 
 // Linux is the System of a real Linux machine.
@@ -107,10 +132,6 @@ func (l Linux) Remove(name string) error {
 	return nil
 }
 
-func (l Linux) Lstat(name string) (fs.FileInfo, error) { return os.Lstat(l.path(name)) }
-
-func (l Linux) Chmod(name string, mode fs.FileMode) error { return os.Chmod(l.path(name), mode) }
-
 func settingPath(name string) string {
 	return "/proc/sys/" + strings.ReplaceAll(name, ".", "/")
 }
@@ -138,7 +159,12 @@ func (l Linux) WriteSetting(name, value string) error {
 func (l Linux) InUse(what string) (string, error) {
 	switch {
 	case what == "userns":
-		return userNamespacesInUse()
+		// The setting is global: anyone in a user namespace uses it.
+		return otherNamespace("/proc/1/ns/user", "user", "uses a user namespace")
+	case what == "netns":
+		// net.* settings live in each network namespace: the agent's write
+		// reaches only its own.
+		return otherNamespace("/proc/self/ns/net", "net", "lives in another network namespace, which keeps its own net.* settings; the guard's setting covers only the agent's")
 	case what == "io_uring":
 		return ioUringInUse()
 	case strings.HasPrefix(what, "module:"):
@@ -147,17 +173,17 @@ func (l Linux) InUse(what string) (string, error) {
 	return "", fmt.Errorf("no in-use check named %q", what)
 }
 
-// userNamespacesInUse names a process living in a user namespace other than
-// the first process's.
-func userNamespacesInUse() (string, error) {
-	initNS, err := os.Readlink("/proc/1/ns/user")
+// otherNamespace names a process in a namespace of the given kind other
+// than the one at ref.
+func otherNamespace(ref, kind, says string) (string, error) {
+	refNS, err := os.Readlink(ref)
 	if err != nil {
 		return "", err
 	}
 	return scanProcs(func(pid string) string {
-		ns, err := os.Readlink("/proc/" + pid + "/ns/user")
-		if err == nil && ns != initNS {
-			return "process " + pid + " (" + comm(pid) + ") uses a user namespace"
+		ns, err := os.Readlink("/proc/" + pid + "/ns/" + kind)
+		if err == nil && ns != refNS {
+			return "process " + pid + " (" + comm(pid) + ") " + says
 		}
 		return ""
 	})
@@ -205,7 +231,7 @@ func moduleInUse(name string) (string, error) {
 	dir := "/sys/module/" + strings.ReplaceAll(name, "-", "_")
 	b, err := os.ReadFile(dir + "/refcnt")
 	if errors.Is(err, fs.ErrNotExist) {
-		return "", nil // not loaded, or built in without a count
+		return "", nil // not loaded
 	}
 	if err != nil {
 		return "", err
@@ -214,6 +240,155 @@ func moduleInUse(name string) (string, error) {
 		return fmt.Sprintf("module %s is loaded and used %d times", name, n), nil
 	}
 	return "", nil
+}
+
+// Module looks the name up in the running kernel's modules.dep and
+// modules.builtin, which list modules by file, never by alias.
+func (l Linux) Module(name string) (loadable, builtin bool, err error) {
+	rel, err := os.ReadFile("/proc/sys/kernel/osrelease")
+	if err != nil {
+		return false, false, err
+	}
+	dir := "/lib/modules/" + strings.TrimSpace(string(rel))
+	want := strings.ReplaceAll(name, "-", "_")
+	dep, err := l.ReadFile(dir + "/modules.dep")
+	if err != nil {
+		return false, false, fmt.Errorf("reading the kernel's module list: %w", err)
+	}
+	if listsModule(dep, want, true) {
+		return true, false, nil
+	}
+	if b, err := l.ReadFile(dir + "/modules.builtin"); err == nil && listsModule(b, want, false) {
+		return false, true, nil
+	}
+	return false, false, nil
+}
+
+// listsModule reports whether a modules.dep (path, a colon, dependencies)
+// or modules.builtin (one path a line) lists a module file by this name.
+func listsModule(list []byte, want string, dep bool) bool {
+	sc := bufio.NewScanner(bytes.NewReader(list))
+	sc.Buffer(make([]byte, 0, 64<<10), 1<<20)
+	for sc.Scan() {
+		p := sc.Text()
+		if dep {
+			p, _, _ = strings.Cut(p, ":")
+		}
+		if moduleName(p) == want {
+			return true
+		}
+	}
+	return false
+}
+
+// moduleName is a module file's name as modprobe knows it:
+// kernel/fs/smb/server/ksmbd.ko.zst is ksmbd.
+func moduleName(path string) string {
+	b := filepath.Base(strings.TrimSpace(path))
+	for _, ext := range []string{".zst", ".xz", ".gz"} {
+		b = strings.TrimSuffix(b, ext)
+	}
+	return strings.ReplaceAll(strings.TrimSuffix(b, ".ko"), "-", "_")
+}
+
+// RemoteAccessPorts reads the listening TCP sockets and returns the ports
+// whose socket belongs to sshd or dropbear.
+func (l Linux) RemoteAccessPorts() ([]int, error) {
+	listening := map[string]int{} // socket inode to port
+	for _, f := range []string{"/proc/net/tcp", "/proc/net/tcp6"} {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			return nil, err
+		}
+		for inode, port := range listeningSockets(b) {
+			listening[inode] = port
+		}
+	}
+	seen := map[int]bool{}
+	var ports []int
+	_, err := scanProcs(func(pid string) string {
+		c := comm(pid)
+		if c != "sshd" && c != "dropbear" && !strings.HasPrefix(c, "sshd-") {
+			return ""
+		}
+		fds, err := os.ReadDir("/proc/" + pid + "/fd")
+		if err != nil {
+			return ""
+		}
+		for _, fd := range fds {
+			t, err := os.Readlink("/proc/" + pid + "/fd/" + fd.Name())
+			if err != nil || !strings.HasPrefix(t, "socket:[") {
+				continue
+			}
+			if p, ok := listening[strings.TrimSuffix(strings.TrimPrefix(t, "socket:["), "]")]; ok && !seen[p] {
+				seen[p] = true
+				ports = append(ports, p)
+			}
+		}
+		return ""
+	})
+	return ports, err
+}
+
+// listeningSockets reads /proc/net/tcp or tcp6 and returns each listening
+// socket's inode with its port.
+func listeningSockets(b []byte) map[string]int {
+	out := map[string]int{}
+	sc := bufio.NewScanner(bytes.NewReader(b))
+	for sc.Scan() {
+		f := strings.Fields(sc.Text())
+		if len(f) < 10 || f[3] != "0A" { // 0A: TCP_LISTEN
+			continue
+		}
+		_, hexPort, ok := strings.Cut(f[1], ":")
+		if !ok {
+			continue
+		}
+		port, err := strconv.ParseUint(hexPort, 16, 16)
+		if err != nil {
+			continue
+		}
+		out[f[9]] = int(port)
+	}
+	return out
+}
+
+func (l Linux) EphemeralPorts() (lo, hi int, err error) {
+	v, err := l.ReadSetting("net.ipv4.ip_local_port_range")
+	if err != nil {
+		return 0, 0, err
+	}
+	f := strings.Fields(v)
+	if len(f) != 2 {
+		return 0, 0, fmt.Errorf("ip_local_port_range %q", v)
+	}
+	lo, err1 := strconv.Atoi(f[0])
+	hi, err2 := strconv.Atoi(f[1])
+	if err1 != nil || err2 != nil {
+		return 0, 0, fmt.Errorf("ip_local_port_range %q", v)
+	}
+	return lo, hi, nil
+}
+
+func (l Linux) SameFile(a, b string) (bool, error) {
+	fa, err := os.Stat(l.path(a))
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	fb, err := os.Stat(l.path(b))
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return os.SameFile(fa, fb), nil
 }
 
 func (l Linux) Info() (guard.System, error) {

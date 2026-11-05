@@ -17,38 +17,88 @@ import (
 type fakeSys struct {
 	info     guard.System
 	files    map[string]string
-	modes    map[string]fs.FileMode
+	strips   map[string]*fakeFile
 	settings map[string]string
 	tables   map[string]*fakeTable // "ip autopatch_…"
 	units    map[string]*fakeUnit
 	inUse    map[string]string
+	modules  map[string]string // name: "loadable" or "builtin"
+	sshPorts []int
+	ephLo    int
+	ephHi    int
 	log      []string
 	failOn   string // a log line prefix whose call fails
 	probeErr error
+	// noise counts a packet on this rule of every table during a probe,
+	// as other traffic would.
+	noise int
+	// stoppedElsewhere makes the probe's packet stopped by something other
+	// than any guard rule.
+	stoppedElsewhere bool
+	nextIno          uint64
 }
 
 type fakeTable struct {
-	rules   []string // comments
-	options bool     // has a drop of IPv4 options
+	rules []fakeRule
+}
+
+type fakeRule struct {
+	comment string
+	text    string
 	packets uint64
 }
 
+// fakeUnit keeps systemd's two masks apart: a lasting one in /etc and a
+// runtime one in /run. Each mask or unmask call changes only its own.
 type fakeUnit struct {
-	enabled string // "enabled", "disabled", "masked", "masked-runtime"
+	enabled string // "enabled" or "disabled" when not masked
+	etcMask bool
+	runMask bool
 	active  bool
-	runtime bool // masked at runtime only
+}
+
+func (u *fakeUnit) state() string {
+	switch {
+	case u.etcMask:
+		return "masked"
+	case u.runMask:
+		return "masked-runtime"
+	}
+	return u.enabled
+}
+
+// fakeFile is a file a strip may touch.
+type fakeFile struct {
+	mode    fs.FileMode
+	uid     uint32
+	ino     uint64
+	viaLink bool   // the path goes through a symlink
+	sameAs  string // the never-strip path it is, by another name
 }
 
 func newFakeSys() *fakeSys {
 	return &fakeSys{
 		info:     guard.System{OS: "ubuntu", Release: "24.04", Kernel: "6.8.0-142.142", Flavour: "generic"},
 		files:    map[string]string{},
-		modes:    map[string]fs.FileMode{},
+		strips:   map[string]*fakeFile{},
 		settings: map[string]string{"net.mptcp.enabled": "1", "kernel.io_uring_disabled": "0"},
 		tables:   map[string]*fakeTable{},
 		units:    map[string]*fakeUnit{},
 		inUse:    map[string]string{},
+		modules:  map[string]string{"ksmbd": "loadable", "sctp": "loadable", "ext4": "builtin"},
+		sshPorts: []int{22},
+		ephLo:    32768,
+		ephHi:    60999,
+		noise:    -1,
+		nextIno:  100,
 	}
+}
+
+func (f *fakeSys) addFile(path string, mode fs.FileMode) *fakeFile {
+	f.nextIno++
+	ff := &fakeFile{mode: mode, ino: f.nextIno}
+	f.strips[path] = ff
+	return ff
 }
 
 func (f *fakeSys) record(line string) error {
@@ -62,7 +112,7 @@ func (f *fakeSys) record(line string) error {
 var (
 	tableOpenRe = regexp.MustCompile(`(?m)^table (ip6?) (\S+) \{$`)
 	deleteRe    = regexp.MustCompile(`(?m)^delete table (ip6?) (\S+)$`)
-	commentRe   = regexp.MustCompile(`comment "([^"]*)"`)
+	ruleRe      = regexp.MustCompile(`(?m)^\t\t(.*) comment "([^"]*)"$`)
 )
 
 func (f *fakeSys) Run(_ context.Context, stdin []byte, prog string, args ...string) ([]byte, error) {
@@ -82,9 +132,9 @@ func (f *fakeSys) Run(_ context.Context, stdin []byte, prog string, args ...stri
 			delete(f.tables, m[1]+" "+m[2])
 		}
 		if m := tableOpenRe.FindStringSubmatch(script); m != nil {
-			t := &fakeTable{options: strings.Contains(script, "hdrlength gt 5")}
-			for _, c := range commentRe.FindAllStringSubmatch(script, -1) {
-				t.rules = append(t.rules, c[1])
+			t := &fakeTable{}
+			for _, r := range ruleRe.FindAllStringSubmatch(script, -1) {
+				t.rules = append(t.rules, fakeRule{text: r[1], comment: r[2]})
 			}
 			f.tables[m[1]+" "+m[2]] = t
 		}
@@ -98,22 +148,23 @@ func (f *fakeSys) Run(_ context.Context, stdin []byte, prog string, args ...stri
 		items := []any{
 			map[string]any{"chain": map[string]any{"table": args[4], "name": "in", "hook": "prerouting", "prio": -300}},
 		}
-		for _, c := range t.rules {
+		for _, r := range t.rules {
 			items = append(items, map[string]any{"rule": map[string]any{
-				"table": args[4], "chain": "in", "comment": c,
-				"expr": []any{map[string]any{"counter": map[string]any{"packets": t.packets}}},
+				"table": args[4], "chain": "in", "comment": r.comment,
+				"expr": []any{map[string]any{"counter": map[string]any{"packets": r.packets}}},
 			}})
 		}
 		return json.Marshal(map[string]any{"nftables": items})
 	}
 	if prog == "systemctl" {
-		u := f.units[args[len(args)-1]]
+		unit := args[len(args)-1]
+		u := f.units[unit]
 		switch args[0] {
 		case "is-enabled":
 			if u == nil {
 				return []byte("not-found\n"), fmt.Errorf("not found")
 			}
-			return []byte(u.enabled + "\n"), nil
+			return []byte(u.state() + "\n"), nil
 		case "is-active":
 			if u != nil && u.active {
 				return []byte("active\n"), nil
@@ -126,25 +177,25 @@ func (f *fakeSys) Run(_ context.Context, stdin []byte, prog string, args ...stri
 		if u == nil {
 			return nil, nil
 		}
-		switch strings.Join(args[:len(args)-1], " ") {
+		verb := strings.Join(args[:len(args)-1], " ")
+		switch verb {
 		case "stop":
 			u.active = false
 		case "start":
+			if u.etcMask || u.runMask {
+				return nil, fmt.Errorf("Unit %s is masked.", unit)
+			}
 			u.active = true
-		case "mask --runtime":
-			if u.enabled != "masked" {
-				u.runtime, u.enabled = true, "masked-runtime"
-			}
-		case "mask":
-			u.runtime, u.enabled = false, "masked"
+		case "mask --runtime --now":
+			u.runMask, u.active = true, false
+		case "mask --now":
+			u.etcMask, u.active = true, false
 		case "unmask --runtime":
-			if u.runtime {
-				u.runtime, u.enabled = false, "enabled"
-			}
+			u.runMask = false
 		case "unmask":
-			if u.enabled == "masked" || u.enabled == "masked-runtime" {
-				u.runtime, u.enabled = false, "enabled"
-			}
+			u.etcMask = false
+		default:
+			return nil, fmt.Errorf("fake systemctl: no %q", verb)
 		}
 		return nil, nil
 	}
@@ -178,31 +229,6 @@ func (f *fakeSys) Remove(name string) error {
 	return nil
 }
 
-type fakeInfo struct{ mode fs.FileMode }
-
-func (i fakeInfo) Name() string       { return "" }
-func (i fakeInfo) Size() int64        { return 0 }
-func (i fakeInfo) Mode() fs.FileMode  { return i.mode }
-func (i fakeInfo) ModTime() time.Time { return time.Time{} }
-func (i fakeInfo) IsDir() bool        { return false }
-func (i fakeInfo) Sys() any           { return nil }
-
-func (f *fakeSys) Lstat(name string) (fs.FileInfo, error) {
-	m, ok := f.modes[name]
-	if !ok {
-		return nil, fs.ErrNotExist
-	}
-	return fakeInfo{m}, nil
-}
-
-func (f *fakeSys) Chmod(name string, mode fs.FileMode) error {
-	if err := f.record(fmt.Sprintf("chmod %s %v", name, mode)); err != nil {
-		return err
-	}
-	f.modes[name] = mode
-	return nil
-}
-
 func (f *fakeSys) ReadSetting(name string) (string, error) {
 	v, ok := f.settings[name]
 	if !ok {
@@ -225,19 +251,74 @@ func (f *fakeSys) ProbeIPOptions(context.Context) error {
 	if err := f.record("probe"); err != nil {
 		return err
 	}
+	for _, t := range f.tables {
+		if f.noise >= 0 && f.noise < len(t.rules) {
+			t.rules[f.noise].packets++
+		}
+	}
 	if f.probeErr != nil {
 		return f.probeErr
 	}
+	if f.stoppedElsewhere {
+		return nil
+	}
 	for k, t := range f.tables {
-		if strings.HasPrefix(k, "ip ") && t.options {
-			t.packets++
-			return nil
+		if !strings.HasPrefix(k, "ip ") {
+			continue
+		}
+		for i, r := range t.rules {
+			if strings.Contains(r.text, "ip protocol tcp ip hdrlength gt 5") {
+				t.rules[i].packets++
+				return nil
+			}
 		}
 	}
 	return fmt.Errorf("probe: a TCP connection request carrying IPv4 options got through")
 }
 
 func (f *fakeSys) Info() (guard.System, error) { return f.info, nil }
+
+func (f *fakeSys) Module(name string) (bool, bool, error) {
+	switch f.modules[strings.ReplaceAll(name, "-", "_")] {
+	case "loadable":
+		return true, false, nil
+	case "builtin":
+		return false, true, nil
+	}
+	return false, false, nil
+}
+
+func (f *fakeSys) RemoteAccessPorts() ([]int, error) { return f.sshPorts, nil }
+
+func (f *fakeSys) EphemeralPorts() (int, int, error) { return f.ephLo, f.ephHi, nil }
+
+func (f *fakeSys) FileID(path string) (FileID, error) {
+	ff, ok := f.strips[path]
+	if !ok {
+		return FileID{}, fs.ErrNotExist
+	}
+	if ff.viaLink {
+		return FileID{}, fmt.Errorf("%s goes through a symlink", path)
+	}
+	return FileID{Mode: ff.mode, Regular: true, UID: ff.uid, Dev: 1, Ino: ff.ino}, nil
+}
+
+func (f *fakeSys) ChmodIf(path string, want FileID, mode fs.FileMode) (bool, error) {
+	ff, ok := f.strips[path]
+	if !ok || ff.viaLink || ff.uid != 0 || ff.ino != want.Ino {
+		return false, nil
+	}
+	if err := f.record(fmt.Sprintf("chmod %s %v", path, mode)); err != nil {
+		return false, err
+	}
+	ff.mode = mode
+	return true, nil
+}
+
+func (f *fakeSys) SameFile(a, b string) (bool, error) {
+	ff, ok := f.strips[a]
+	return ok && ff.sameAs == b, nil
+}
 
 // fakeTimer records arming and disarming in the machine's log, so tests can
 // check that the undo is armed before the first change.

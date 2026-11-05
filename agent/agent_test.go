@@ -4,6 +4,7 @@ import (
 	"context"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -27,18 +28,30 @@ func guardOne(t *testing.T) *guard.Guard {
 	return g
 }
 
-// otherGuard blocks a module and also turns MPTCP off, so it shares a
-// setting with guard number one.
-func otherGuard(t *testing.T) *guard.Guard {
+func parse(t *testing.T, js string) *guard.Guard {
 	t.Helper()
-	g, err := guard.Parse([]byte(`{"id": "test/ksmbd", "version": 1, "flaws": ["CVE-2099-1"],
-		"for": [{"os": "ubuntu", "releases": ["24.04"]}],
-		"blocks": [{"module": {"name": "ksmbd"}}, {"setting": {"name": "net.mptcp.enabled", "value": "0"}}],
-		"breaks": "the in-kernel SMB server"}`))
+	g, err := guard.Parse([]byte(js))
 	if err != nil {
 		t.Fatal(err)
 	}
 	return g
+}
+
+// otherGuard blocks a module and also turns MPTCP off, so it shares a
+// setting with guard number one.
+func otherGuard(t *testing.T) *guard.Guard {
+	return parse(t, `{"id": "test/ksmbd", "version": 1, "flaws": ["CVE-2099-1"],
+		"for": [{"os": "ubuntu", "releases": ["24.04"]}],
+		"blocks": [{"module": {"name": "ksmbd"}}, {"setting": {"name": "net.mptcp.enabled", "value": "0"}}],
+		"breaks": "the in-kernel SMB server"}`)
+}
+
+// cupsGuard stops a service and strips a program.
+func cupsGuard(t *testing.T, id string) *guard.Guard {
+	return parse(t, `{"id": "`+id+`", "version": 1, "flaws": ["CVE-2024-47176", "CVE-2021-4034"],
+		"for": [{"os": "ubuntu", "releases": ["24.04"]}],
+		"blocks": [{"service": {"unit": "cups-browsed.service"}}, {"strip": {"path": "/usr/bin/pkexec"}}],
+		"breaks": "printer discovery; pkexec"}`)
 }
 
 func newAgent(t *testing.T) (*Agent, *fakeSys, *fakeTimer) {
@@ -68,11 +81,14 @@ func index(log []string, prefix string) int {
 	return -1
 }
 
+func table(sys *fakeSys, g *guard.Guard) *fakeTable {
+	return sys.tables["ip "+nft.TableName(g.Hash())]
+}
+
 func TestApplyConfirmUndoGuardOne(t *testing.T) {
 	a, sys, timer := newAgent(t)
 	g := guardOne(t)
 	h := g.Hash()
-	table := "ip " + nft.TableName(h)
 
 	e, err := a.Apply(ctx, g, ApplyOptions{ConfirmWithin: 10 * time.Minute})
 	if err != nil {
@@ -83,15 +99,18 @@ func TestApplyConfirmUndoGuardOne(t *testing.T) {
 	}
 	// The undo is armed before the first change, and the drop goes on
 	// before the setting.
-	arm, load_, set, probe := index(sys.log, "arm "), index(sys.log, "nft load ip"), index(sys.log, "setting net.mptcp.enabled=0"), index(sys.log, "probe")
-	if !(arm >= 0 && arm < load_ && load_ < set && set < probe) {
-		t.Fatalf("order arm %d, load %d, setting %d, probe %d in %q", arm, load_, set, probe, sys.log)
+	arm, ld, set, probe := index(sys.log, "arm "), index(sys.log, "nft load ip"), index(sys.log, "setting net.mptcp.enabled=0"), index(sys.log, "probe")
+	if !(arm >= 0 && arm < ld && ld < set && set < probe) {
+		t.Fatalf("order arm %d, load %d, setting %d, probe %d in %q", arm, ld, set, probe, sys.log)
 	}
 	if timer.armed[h] != 10*time.Minute {
 		t.Fatalf("armed for %v", timer.armed[h])
 	}
-	if sys.tables[table] == nil || sys.tables[table].packets != 1 || sys.settings["net.mptcp.enabled"] != "0" {
-		t.Fatalf("live: table %+v, mptcp %s", sys.tables[table], sys.settings["net.mptcp.enabled"])
+	if tb := table(sys, g); tb == nil || tb.rules[0].packets != 1 || sys.settings["net.mptcp.enabled"] != "0" {
+		t.Fatalf("live: table %+v, mptcp %s", tb, sys.settings["net.mptcp.enabled"])
+	}
+	if len(nft.TableName(h)) != len("autopatch_")+64 {
+		t.Fatal("the table isn't named by the whole hash")
 	}
 	if _, ok := sys.files[SysctlFile]; ok {
 		t.Fatal("a pending guard wrote a lasting setting")
@@ -116,8 +135,8 @@ func TestApplyConfirmUndoGuardOne(t *testing.T) {
 	if _, err := a.Undo(ctx, g.ID, false); err != nil {
 		t.Fatal(err)
 	}
-	if sys.tables[table] != nil || sys.settings["net.mptcp.enabled"] != "1" {
-		t.Fatalf("after undo: table %v, mptcp %s", sys.tables[table], sys.settings["net.mptcp.enabled"])
+	if table(sys, g) != nil || sys.settings["net.mptcp.enabled"] != "1" {
+		t.Fatalf("after undo: table %v, mptcp %s", table(sys, g), sys.settings["net.mptcp.enabled"])
 	}
 	if _, ok := sys.files[SysctlFile]; ok {
 		t.Fatal("sysctl file left behind")
@@ -162,24 +181,34 @@ func TestApplyFailureTakesItAllOff(t *testing.T) {
 	}
 }
 
-func TestProbeNotCountedByTheRuleFails(t *testing.T) {
+// The probe must be counted by the guard's own rule, not by another rule
+// of the same table that other traffic happens to hit.
+func TestProbeCountsOnlyItsRule(t *testing.T) {
 	a, sys, _ := newAgent(t)
-	// The probe is stopped, but the guard's counter doesn't move: something
-	// other than the guard stopped it.
-	g := guardOne(t)
-	a.Sys = &noCountProbe{sys}
+	g := parse(t, `{"id": "test/two-drops", "version": 1, "flaws": ["CVE-2099-3"],
+		"for": [{"os": "ubuntu", "releases": ["24.04"]}],
+		"blocks": [{"drop": {"family": "ipv4", "protocol": "tcp", "ip_options": true}},
+		           {"drop": {"family": "ipv4", "protocol": "udp", "ports": ["5353"]}}],
+		"breaks": "IP options on TCP; mDNS"}`)
+	sys.stoppedElsewhere = true
+	sys.noise = 1 // mDNS traffic hits the udp rule meanwhile
 	if _, err := a.Apply(ctx, g, ApplyOptions{ConfirmWithin: time.Minute}); err == nil || !strings.Contains(err.Error(), "not by") {
 		t.Fatalf("err %v", err)
 	}
 	if len(sys.tables) != 0 {
 		t.Fatal("table left on")
 	}
+	// Probed properly, the guard is still marked unprobed: its udp drop has
+	// no probe.
+	sys.stoppedElsewhere = false
+	e, err := a.Apply(ctx, g, ApplyOptions{ConfirmWithin: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !e.Unprobed {
+		t.Fatal("a guard with an unprobed drop isn't marked unprobed")
+	}
 }
-
-// noCountProbe stops the probe without the guard's rule counting it.
-type noCountProbe struct{ *fakeSys }
-
-func (n *noCountProbe) ProbeIPOptions(context.Context) error { return nil }
 
 func TestArmFailureChangesNothing(t *testing.T) {
 	a, sys, _ := newAgent(t)
@@ -197,20 +226,19 @@ func TestArmFailureChangesNothing(t *testing.T) {
 func TestBootUndoesAGuardHalfOn(t *testing.T) {
 	a, sys, _ := newAgent(t)
 	g := guardOne(t)
-	// Write the state a crash would leave: the table on, the setting
-	// captured and written, but the step not yet counted.
+	// The state a crash would leave: the table on, the setting captured and
+	// written, but that step not yet counted.
 	s, st, err := a.open()
 	if err != nil {
 		t.Fatal(err)
 	}
-	e := &Entry{Hash: g.Hash(), Guard: g, Status: Applying, Applied: 1}
-	st.Guards = append(st.Guards, e)
+	st.Guards = append(st.Guards, &Entry{Hash: g.Hash(), Guard: g, Status: Applying, Applied: 1})
 	st.Originals.Settings = map[string]string{"net.mptcp.enabled": "1"}
 	if err := s.save(st); err != nil {
 		t.Fatal(err)
 	}
 	s.close()
-	sys.tables["ip "+nft.TableName(g.Hash())] = &fakeTable{rules: []string{g.Name()}, options: true}
+	sys.tables["ip "+nft.TableName(g.Hash())] = &fakeTable{rules: []fakeRule{{comment: g.Name()}}}
 	sys.settings["net.mptcp.enabled"] = "0"
 
 	if err := a.Boot(ctx); err != nil {
@@ -227,6 +255,9 @@ func TestBootUndoesAGuardHalfOn(t *testing.T) {
 func reboot(sys *fakeSys) {
 	sys.tables = map[string]*fakeTable{}
 	sys.settings["net.mptcp.enabled"] = "1"
+	for _, u := range sys.units {
+		u.runMask = false
+	}
 }
 
 func TestBootKeepsConfirmedDropsPending(t *testing.T) {
@@ -246,11 +277,33 @@ func TestBootKeepsConfirmedDropsPending(t *testing.T) {
 	if len(st.Guards) != 1 || st.Guards[0].Hash != one.Hash() {
 		t.Fatalf("guards after boot %+v", st.Guards)
 	}
-	if sys.tables["ip "+nft.TableName(one.Hash())] == nil || sys.settings["net.mptcp.enabled"] != "0" {
+	if table(sys, one) == nil || sys.settings["net.mptcp.enabled"] != "0" {
 		t.Fatal("the confirmed guard wasn't put back")
 	}
 	if _, ok := sys.files[modprobeFile(other.Hash(), "ksmbd")]; ok {
 		t.Fatal("the pending guard's module block survived the boot")
+	}
+}
+
+// A confirmed guard that is no longer safe here (the kernel now has the
+// module built in, so the block does nothing) is taken off at boot, and the
+// boot says so.
+func TestBootTakesOffWhatIsNoLongerSafe(t *testing.T) {
+	a, sys, _ := newAgent(t)
+	g := otherGuard(t)
+	if _, err := a.Apply(ctx, g, ApplyOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	sys.modules["ksmbd"] = "builtin"
+	err := a.Boot(ctx)
+	if err == nil || !strings.Contains(err.Error(), "taken off") {
+		t.Fatalf("err %v", err)
+	}
+	if len(load(t, a).Guards) != 0 {
+		t.Fatal("still on")
+	}
+	if _, ok := sys.files[modprobeFile(g.Hash(), "ksmbd")]; ok {
+		t.Fatal("module block left behind")
 	}
 }
 
@@ -278,6 +331,31 @@ func TestSharedSetting(t *testing.T) {
 	}
 	if _, ok := sys.files[SysctlFile]; ok {
 		t.Fatal("sysctl file left behind")
+	}
+}
+
+// A guard that died before reaching a shared setting doesn't hold it: the
+// guard that set it puts it back when it comes off.
+func TestUnreachedStepsDontHold(t *testing.T) {
+	a, sys, _ := newAgent(t)
+	other := otherGuard(t) // its setting is its second step
+	if _, err := a.Apply(ctx, guardOne(t), ApplyOptions{ConfirmWithin: time.Minute}); err != nil {
+		t.Fatal(err)
+	}
+	s, st, err := a.open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Guards = append(st.Guards, &Entry{Hash: other.Hash(), Guard: other, Status: Applying, Applied: 0})
+	if err := s.save(st); err != nil {
+		t.Fatal(err)
+	}
+	s.close()
+	if _, err := a.Undo(ctx, "cve-2026-98432/linux-ipv4-ipopt", true); err != nil {
+		t.Fatal(err)
+	}
+	if sys.settings["net.mptcp.enabled"] != "1" {
+		t.Fatal("a guard that never reached the setting kept it changed")
 	}
 }
 
@@ -318,6 +396,13 @@ func TestRefusals(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+	t.Run("containers keep their own network settings", func(t *testing.T) {
+		a, sys, _ := newAgent(t)
+		sys.inUse["netns"] = "process 4242 (dockerd) lives in another network namespace"
+		if _, err := a.Apply(ctx, guardOne(t), ApplyOptions{}); err == nil || !strings.Contains(err.Error(), "network namespace") {
+			t.Fatalf("err %v", err)
+		}
+	})
 	t.Run("same guard twice is a no-op", func(t *testing.T) {
 		a, sys, _ := newAgent(t)
 		if _, err := a.Apply(ctx, guardOne(t), ApplyOptions{}); err != nil {
@@ -331,6 +416,40 @@ func TestRefusals(t *testing.T) {
 			t.Fatalf("changed something: %q", sys.log[n:])
 		}
 	})
+	unsafeCases := []struct {
+		name, block, want string
+		setup             func(*fakeSys)
+	}{
+		{"module unknown to the kernel", `{"module": {"name": "nosuchmod"}}`, "no module named exactly", nil},
+		{"module built in", `{"module": {"name": "foomod"}}`, "built into", func(s *fakeSys) { s.modules["foomod"] = "builtin" }},
+		{"ports over the ephemeral range", `{"drop": {"family": "ipv4", "protocol": "udp", "ports": ["49152-50000"]}}`, "replies would be dropped", nil},
+		{"ssh on another port", `{"drop": {"family": "ipv4", "protocol": "tcp", "ports": ["2222"]}}`, "ssh listens on port 2222", func(s *fakeSys) { s.sshPorts = []int{2222} }},
+		{"strip through a symlink", `{"strip": {"path": "/usr/bin/X11/pkexec"}}`, "symlink", func(s *fakeSys) {
+			s.addFile("/usr/bin/X11/pkexec", 0o4755).viaLink = true
+		}},
+		{"strip sudo by another name", `{"strip": {"path": "/usr/libexec/sudo-alt"}}`, "by another name", func(s *fakeSys) {
+			s.addFile("/usr/libexec/sudo-alt", 0o4755).sameAs = "/usr/bin/sudo"
+		}},
+		{"strip a file root doesn't own", `{"strip": {"path": "/opt/app/helper"}}`, "owned by root", func(s *fakeSys) {
+			s.addFile("/opt/app/helper", 0o4755).uid = 1000
+		}},
+	}
+	for _, c := range unsafeCases {
+		t.Run(c.name, func(t *testing.T) {
+			a, sys, _ := newAgent(t)
+			if c.setup != nil {
+				c.setup(sys)
+			}
+			g := parse(t, `{"id": "test/unsafe", "version": 1, "flaws": ["CVE-2099-4"],
+				"for": [{"os": "ubuntu", "releases": ["24.04"]}], "blocks": [`+c.block+`], "breaks": "x"}`)
+			if _, err := a.Apply(ctx, g, ApplyOptions{}); err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("err %v", err)
+			}
+			if len(sys.log) != 0 {
+				t.Fatalf("changed something: %q", sys.log)
+			}
+		})
+	}
 }
 
 func TestUndoIfUnconfirmed(t *testing.T) {
@@ -342,12 +461,43 @@ func TestUndoIfUnconfirmed(t *testing.T) {
 	if e, err := a.Undo(ctx, g.Hash(), true); err != nil || e != nil {
 		t.Fatalf("undo of a confirmed guard by the timer: %v %v", e, err)
 	}
-	if sys.tables["ip "+nft.TableName(g.Hash())] == nil {
+	if table(sys, g) == nil {
 		t.Fatal("the timer took off a confirmed guard")
 	}
 	// A timer for a guard already gone is not an error.
 	if _, err := a.Undo(ctx, strings.Repeat("0", 64), true); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A failed undo keeps the guard in the state, marked, so that status shows
+// it and a later undo finishes the job.
+func TestFailedUndoIsKeptAndRetried(t *testing.T) {
+	a, sys, timer := newAgent(t)
+	sys.units["cups-browsed.service"] = &fakeUnit{enabled: "enabled", active: true}
+	sys.addFile("/usr/bin/pkexec", 0o4755)
+	g := cupsGuard(t, "test/cups")
+	if _, err := a.Apply(ctx, g, ApplyOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	sys.failOn = "systemctl unmask"
+	if _, err := a.Undo(ctx, g.ID, false); err == nil {
+		t.Fatal("undo reported success")
+	}
+	st := load(t, a)
+	if len(st.Guards) != 1 || st.Guards[0].Status != Applying || st.Guards[0].Failed == "" {
+		t.Fatalf("state after a failed undo %+v", st.Guards)
+	}
+	if _, ok := timer.armed[g.Hash()]; ok {
+		t.Fatal("confirmed guard got an undo armed")
+	}
+	sys.failOn = ""
+	if _, err := a.Undo(ctx, g.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	u := sys.units["cups-browsed.service"]
+	if len(load(t, a).Guards) != 0 || u.state() != "enabled" || !u.active || sys.strips["/usr/bin/pkexec"].mode != 0o4755 {
+		t.Fatalf("after the retry: unit %+v, pkexec %v", u, sys.strips["/usr/bin/pkexec"].mode)
 	}
 }
 
@@ -370,7 +520,7 @@ func TestCheckFindsAndRepairsDrift(t *testing.T) {
 	if err != nil || len(d) != 2 || !d[0].Repaired || !d[1].Repaired {
 		t.Fatalf("repair %+v %v", d, err)
 	}
-	if tb := sys.tables["ip "+nft.TableName(g.Hash())]; tb == nil || tb.packets != 1 {
+	if tb := table(sys, g); tb == nil || tb.rules[0].packets != 1 {
 		t.Fatal("the table wasn't put back and probed")
 	}
 	if d, _ := a.Check(ctx, false); len(d) != 0 {
@@ -378,36 +528,133 @@ func TestCheckFindsAndRepairsDrift(t *testing.T) {
 	}
 }
 
+// check notices a masked service that is running anyway.
+func TestCheckSeesARunningMaskedService(t *testing.T) {
+	a, sys, _ := newAgent(t)
+	sys.units["cups-browsed.service"] = &fakeUnit{enabled: "enabled", active: true}
+	sys.addFile("/usr/bin/pkexec", 0o4755)
+	if _, err := a.Apply(ctx, cupsGuard(t, "test/cups"), ApplyOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	sys.units["cups-browsed.service"].active = true
+	d, err := a.Check(ctx, false)
+	if err != nil || len(d) != 1 || !strings.Contains(d[0].What, "still active") {
+		t.Fatalf("check %+v %v", d, err)
+	}
+}
+
+// A check finds a guard that has become unsafe (ssh moved onto a port the
+// guard drops) and, with repair, takes it off.
+func TestCheckTakesOffWhatBecameUnsafe(t *testing.T) {
+	a, sys, _ := newAgent(t)
+	g := parse(t, `{"id": "test/port", "version": 1, "flaws": ["CVE-2099-5"],
+		"for": [{"os": "ubuntu", "releases": ["24.04"]}],
+		"blocks": [{"drop": {"family": "ipv4", "protocol": "tcp", "ports": ["8022"]}}], "breaks": "port 8022"}`)
+	if _, err := a.Apply(ctx, g, ApplyOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	sys.sshPorts = []int{22, 8022}
+	d, err := a.Check(ctx, true)
+	if err != nil || len(d) != 1 || !d[0].TakenOff || !strings.Contains(d[0].What, "ssh listens") {
+		t.Fatalf("check %+v %v", d, err)
+	}
+	if table(sys, g) != nil || len(load(t, a).Guards) != 0 {
+		t.Fatal("still on")
+	}
+}
+
 func TestServiceAndStrip(t *testing.T) {
 	a, sys, _ := newAgent(t)
 	sys.units["cups-browsed.service"] = &fakeUnit{enabled: "enabled", active: true}
 	setuid := fs.FileMode(0o755) | fs.ModeSetuid
-	sys.modes["/usr/bin/pkexec"] = setuid
-	g, err := guard.Parse([]byte(`{"id": "test/cups-pkexec", "version": 1, "flaws": ["CVE-2024-47176", "CVE-2021-4034"],
-		"for": [{"os": "ubuntu", "releases": ["24.04"]}],
-		"blocks": [{"service": {"unit": "cups-browsed.service"}}, {"strip": {"path": "/usr/bin/pkexec"}}],
-		"breaks": "printer discovery; pkexec"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
+	sys.addFile("/usr/bin/pkexec", setuid)
+	g := cupsGuard(t, "test/cups")
 	if _, err := a.Apply(ctx, g, ApplyOptions{ConfirmWithin: time.Minute}); err != nil {
 		t.Fatal(err)
 	}
 	u := sys.units["cups-browsed.service"]
-	if u.active || u.enabled != "masked-runtime" || sys.modes["/usr/bin/pkexec"]&fs.ModeSetuid != 0 {
-		t.Fatalf("pending: unit %+v, mode %v", u, sys.modes["/usr/bin/pkexec"])
+	// Masked before stopped, so nothing could start it in between.
+	if u.active || u.state() != "masked-runtime" || index(sys.log, "systemctl mask --runtime --now") < 0 {
+		t.Fatalf("pending: unit %+v, log %q", u, sys.log)
+	}
+	if sys.strips["/usr/bin/pkexec"].mode&fs.ModeSetuid != 0 {
+		t.Fatal("pkexec still setuid")
 	}
 	if _, err := a.Confirm(ctx, g.ID); err != nil {
 		t.Fatal(err)
 	}
-	if u.enabled != "masked" {
+	if !u.etcMask {
 		t.Fatalf("confirmed: unit %+v", u)
 	}
 	if _, err := a.Undo(ctx, g.ID, false); err != nil {
 		t.Fatal(err)
 	}
-	if !u.active || u.enabled != "enabled" || sys.modes["/usr/bin/pkexec"] != setuid {
-		t.Fatalf("after undo: unit %+v, mode %v", u, sys.modes["/usr/bin/pkexec"])
+	if !u.active || u.state() != "enabled" || u.runMask || sys.strips["/usr/bin/pkexec"].mode != setuid {
+		t.Fatalf("after undo: unit %+v, mode %v", u, sys.strips["/usr/bin/pkexec"].mode)
+	}
+}
+
+// Undoing a pending service guard removes its runtime mask and starts the
+// service again.
+func TestUndoPendingService(t *testing.T) {
+	a, sys, _ := newAgent(t)
+	sys.units["cups-browsed.service"] = &fakeUnit{enabled: "enabled", active: true}
+	sys.addFile("/usr/bin/pkexec", 0o4755)
+	g := cupsGuard(t, "test/cups")
+	if _, err := a.Apply(ctx, g, ApplyOptions{ConfirmWithin: time.Minute}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Undo(ctx, g.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if u := sys.units["cups-browsed.service"]; u.runMask || !u.active {
+		t.Fatalf("unit %+v", u)
+	}
+}
+
+// A unit and a stripped file two guards share stay changed until the last
+// guard comes off.
+func TestSharedUnitAndStrip(t *testing.T) {
+	a, sys, _ := newAgent(t)
+	sys.units["cups-browsed.service"] = &fakeUnit{enabled: "enabled", active: true}
+	sys.addFile("/usr/bin/pkexec", 0o4755)
+	g1, g2 := cupsGuard(t, "test/cups-a"), cupsGuard(t, "test/cups-b")
+	for _, g := range []*guard.Guard{g1, g2} {
+		if _, err := a.Apply(ctx, g, ApplyOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := a.Undo(ctx, g1.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	u := sys.units["cups-browsed.service"]
+	if u.active || u.state() == "enabled" || sys.strips["/usr/bin/pkexec"].mode&fs.ModeSetuid != 0 {
+		t.Fatalf("released while the other guard holds it: unit %+v, mode %v", u, sys.strips["/usr/bin/pkexec"].mode)
+	}
+	if _, err := a.Undo(ctx, g2.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if !u.active || u.state() != "enabled" || sys.strips["/usr/bin/pkexec"].mode != 0o4755 {
+		t.Fatalf("not put back: unit %+v, mode %v", u, sys.strips["/usr/bin/pkexec"].mode)
+	}
+}
+
+// When an upgrade replaces a stripped file, undo leaves the new file's mode
+// alone: the saved mode belongs to the old file.
+func TestUndoLeavesAReplacedFileAlone(t *testing.T) {
+	a, sys, _ := newAgent(t)
+	sys.units["cups-browsed.service"] = &fakeUnit{enabled: "enabled", active: true}
+	sys.addFile("/usr/bin/pkexec", 0o4755)
+	g := cupsGuard(t, "test/cups")
+	if _, err := a.Apply(ctx, g, ApplyOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	fixed := sys.addFile("/usr/bin/pkexec", 0o755) // the vendor's fix dropped setuid
+	if _, err := a.Undo(ctx, g.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if fixed.mode != 0o755 {
+		t.Fatalf("undo put %v on the vendor's new file", fixed.mode)
 	}
 }
 
@@ -460,5 +707,43 @@ func TestStateOutlivesTighterLists(t *testing.T) {
 	}
 	if sys.settings["net.ipv4.tcp_timestamps"] != "1" {
 		t.Fatal("not put back")
+	}
+}
+
+func TestSafeExecutable(t *testing.T) {
+	if err := safeExecutable("/usr/bin/env"); err != nil {
+		t.Fatalf("/usr/bin/env: %v", err)
+	}
+	mine := filepath.Join(t.TempDir(), "autopatch-agent")
+	if err := os.WriteFile(mine, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{mine, "bin/autopatch-agent", "/tmp/autopatch-agent", "/root/.cache/go-build/x/exe/autopatch-agent"} {
+		if err := safeExecutable(p); err == nil {
+			t.Errorf("%s accepted", p)
+		}
+	}
+}
+
+func TestListsModule(t *testing.T) {
+	dep := []byte("kernel/fs/smb/server/ksmbd.ko.zst: kernel/lib/crypto/libarc4.ko.zst\n" +
+		"kernel/net/can/can-raw.ko.zst: kernel/net/can/can.ko.zst\n")
+	for name, want := range map[string]bool{"ksmbd": true, "can_raw": true, "can": false, "net_pf_16_proto_12": false} {
+		if got := listsModule(dep, name, true); got != want {
+			t.Errorf("%s: %v", name, got)
+		}
+	}
+	if !listsModule([]byte("kernel/fs/ext4/ext4.ko\n"), "ext4", false) {
+		t.Error("builtin ext4 not found")
+	}
+}
+
+func TestListeningSockets(t *testing.T) {
+	tcp := []byte("  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n" +
+		"   0: 00000000:0016 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 12345 1 0000000000000000 100 0 0 10 0\n" +
+		"   1: 0100007F:1F90 0100007F:9C40 01 00000000:00000000 00:00000000 00000000  1000        0 67890 1 0000000000000000 20 4 30 10 -1\n")
+	got := listeningSockets(tcp)
+	if len(got) != 1 || got["12345"] != 22 {
+		t.Fatalf("%v", got)
 	}
 }

@@ -34,13 +34,14 @@ func Family(f string) string {
 	return "ip"
 }
 
-// TableName returns the name of a guard's table: "autopatch_" and the first
-// 12 hex digits of its hash.
+// TableName returns the name of a guard's table: "autopatch_" and the
+// guard's whole hash. A shorter name would let a guard ground to share a
+// prefix with another replace that guard's table.
 func TableName(guardHash string) string {
-	if len(guardHash) < 12 {
-		panic("nft: short guard hash")
+	if len(guardHash) != 64 {
+		panic("nft: a guard hash is 64 hex digits")
 	}
-	return "autopatch_" + guardHash[:12]
+	return "autopatch_" + guardHash
 }
 
 // Rule returns the rule for one drop, without its comment.

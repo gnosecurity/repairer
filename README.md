@@ -48,15 +48,44 @@ turns MPTCP off for new sockets.
   `-confirm-within` (default 10 minutes). Nothing about a pending guard
   survives a reboot.
 - **`confirm`** makes the guard last: the mask becomes lasting, and the setting
-  goes into `/etc/sysctl.d/90-autopatch.conf`.
+  goes into `/etc/sysctl.d/99-zz-autopatch.conf`, which sorts after the
+  system's own files.
 - **`boot`** runs early at every boot. It takes off whatever was never
-  confirmed, including a guard left half on by a crash, and puts back what was
-  confirmed.
+  confirmed, including a guard left half on by a crash. It puts back what was
+  confirmed, unless this release no longer allows it or it is unsafe on the
+  machine now; those it takes off too, and says so.
 - **`check`** compares live state with what was set, and catches things like a
   table flushed by a firewall reload. `check -repair` puts it back and probes
   again.
 - **Shared changes come back last.** A setting, unit or file mode that two
   guards share returns to its original only when the last of them comes off.
+- **A failed undo is kept.** The guard stays in the state, marked, so status
+  shows it and the next undo or boot tries again.
+
+## Checked on the machine itself
+
+A guard's fields can't show everything, so the agent also checks the machine
+before putting a guard on, at every boot, and in `check`:
+
+- **Modules:** the running kernel must have a module by exactly that name, not
+  built in. Aliases such as `net-pf-16-proto-12` (which stands for the
+  firewall's nfnetlink) are refused.
+- **Drops by port:** they may not cover a port ssh or dropbear listens on, nor
+  the ephemeral range the machine's own connections use. A drop covers at most
+  1,024 ports.
+- **Strips:** the file must be a root-owned regular file, reached without any
+  symlink, through directories only root can change. It must not be sudo, su,
+  doas or passwd by another name. Its mode goes back only onto that same file,
+  never onto one an upgrade put in its place.
+- **Network settings:** a setting such as MPTCP or SACK lives in each network
+  namespace. When containers have their own, the agent says the guard covers
+  only its own namespace and needs `-force`.
+- **Services:** they are masked before they are stopped, so nothing can start
+  them in between. `check` also asks whether a masked service is running.
+- **Names:** tables, undo timers and module files are named by the guard's
+  whole hash.
+- **The undo timer:** it runs the agent only from a root-owned path that only
+  root can change, never from a temporary directory or a `go run` build.
 
 ## Use
 
@@ -77,6 +106,7 @@ The code uses only Go's standard library.
 ```
 make qa            # gofmt, vet, unit tests, linux amd64 and arm64 builds
 make integration   # as root on Linux: guard one for real, in a fresh network namespace
+go test -tags hostread -run HostRead ./agent   # as root: the machine checks, read-only
 ```
 
 The integration test puts guard number one on with real nftables, the real

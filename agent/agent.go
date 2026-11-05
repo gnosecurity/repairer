@@ -4,7 +4,7 @@
 // before it is made. A guard goes on live and pending: a reboot or the undo
 // timer takes it off unless it is confirmed. Confirming makes it stay across
 // reboots. The boot command takes off whatever was never confirmed and puts
-// back what was.
+// back what was, if it is still allowed and safe.
 package agent
 
 import (
@@ -20,9 +20,10 @@ import (
 	"github.com/jaekwon/autopatch/nft"
 )
 
-// Files the agent owns.
+// Files the agent owns. The sysctl file sorts after 99-sysctl.conf, so its
+// settings win over the system's own.
 const (
-	SysctlFile  = "/etc/sysctl.d/90-autopatch.conf"
+	SysctlFile  = "/etc/sysctl.d/99-zz-autopatch.conf"
 	modprobeDir = "/etc/modprobe.d"
 )
 
@@ -46,7 +47,7 @@ func (a *Agent) now() time.Time {
 // trigger before anything else.
 type step struct {
 	family string        // a table step: "ip" or "ip6"
-	drops  []*guard.Drop // a table step's drops
+	drops  []*guard.Drop // a table step's drops, in rule order
 	block  guard.Block   // any other step
 }
 
@@ -77,12 +78,54 @@ func (s step) describe() string {
 	return s.block.Describe()
 }
 
+// sameResource reports whether two steps change the same thing, which
+// only settings, units and stripped files can share.
+func sameResource(x, y step) bool {
+	a, b := x.block, y.block
+	switch {
+	case a.Setting != nil && b.Setting != nil:
+		return a.Setting.Name == b.Setting.Name
+	case a.Service != nil && b.Service != nil:
+		return a.Service.Unit == b.Service.Unit
+	case a.Strip != nil && b.Strip != nil:
+		return a.Strip.Path == b.Strip.Path
+	}
+	return false
+}
+
 func modprobeFile(hash, module string) string {
-	return modprobeDir + "/autopatch-" + hash[:12] + "-" + module + ".conf"
+	return modprobeDir + "/autopatch-" + hash + "-" + module + ".conf"
 }
 
 func modprobeText(module string) string {
 	return "# autopatch: this module is blocked by a guard.\ninstall " + module + " /bin/false\nblacklist " + module + "\n"
+}
+
+// probeRule returns the position, among the guard's IPv4 drops, of the drop
+// the agent has a probe for, or -1. The agent's one probe today is a TCP
+// connection request carrying IPv4 options, on any port.
+func probeRule(g *guard.Guard) int {
+	for i, d := range nft.Tables(g)["ip"] {
+		if d.IPOptions && d.Protocol == "tcp" && len(d.Ports) == 0 {
+			return i
+		}
+	}
+	return -1
+}
+
+// unprobed reports whether any of the guard's drops goes unprobed: every
+// drop but the one probeRule names.
+func unprobed(g *guard.Guard) bool {
+	n := 0
+	for _, b := range g.Blocks {
+		if b.Drop != nil {
+			n++
+		}
+	}
+	if probeRule(g) >= 0 {
+		n--
+	}
+	return n > 0
 }
 
 // Plan is what a guard would do on this machine.
@@ -95,11 +138,10 @@ type Plan struct {
 	// Problems are reasons it can't go on here now.
 	Problems []string
 	// InUse are problems that -force may override: something uses what a
-	// block would take away.
+	// block would take away, or a setting can't reach everything.
 	InUse []string
-	// Probed reports whether the agent can probe the guard's drops; true
-	// for a guard without drops.
-	Probed bool
+	// Unprobed reports whether some drop has no probe.
+	Unprobed bool
 }
 
 // Plan says what the guard would do here, and changes nothing.
@@ -108,8 +150,7 @@ func (a *Agent) Plan(g *guard.Guard) (*Plan, error) {
 	if err != nil {
 		return nil, err
 	}
-	hasDrops, probeable := probeKind(g)
-	p := &Plan{Hash: g.Hash(), System: sys, Probed: !hasDrops || probeable}
+	p := &Plan{Hash: g.Hash(), System: sys, Unprobed: unprobed(g)}
 	if !g.Fits(sys) {
 		p.Problems = append(p.Problems, fmt.Sprintf("written for %s, and this is %s %s", targets(g), sys.OS, sys.Release))
 	}
@@ -134,14 +175,8 @@ func (a *Agent) Plan(g *guard.Guard) (*Plan, error) {
 				p.InUse = append(p.InUse, used)
 			}
 		}
-		if s.block.Strip != nil {
-			if fi, err := a.Sys.Lstat(s.block.Strip.Path); err != nil {
-				p.Problems = append(p.Problems, err.Error())
-			} else if !fi.Mode().IsRegular() {
-				p.Problems = append(p.Problems, s.block.Strip.Path+" is not a regular file")
-			}
-		}
 	}
+	p.Problems = append(p.Problems, a.unsafe(g)...)
 	return p, nil
 }
 
@@ -165,19 +200,73 @@ func inUseChecks(s step) []string {
 	return nil
 }
 
-// probeKind reports whether the guard has drops, and whether the agent has
-// its own probe for them: today, inbound IPv4 TCP (or any protocol)
-// carrying IP options, on any port.
-func probeKind(g *guard.Guard) (hasDrops, probeable bool) {
+// unsafe returns why a guard would be unsafe on this machine as it is now,
+// beyond what the guard's own fields can show: a module named by alias or
+// built in, a drop that would cut ssh or the machine's own replies, a strip
+// of a file that is sudo by another name or that someone else could swap.
+func (a *Agent) unsafe(g *guard.Guard) []string {
+	var out []string
+	var sshPorts []int
+	lo, hi := 0, 0
 	for _, b := range g.Blocks {
-		if d := b.Drop; d != nil {
-			hasDrops = true
-			if d.Family == "ipv4" && d.IPOptions && (d.Protocol == "tcp" || d.Protocol == "") && len(d.Ports) == 0 {
-				probeable = true
+		if b.Drop != nil && len(b.Drop.Ports) > 0 && lo == 0 {
+			var err error
+			if lo, hi, err = a.Sys.EphemeralPorts(); err != nil {
+				out = append(out, "can't read the ephemeral port range: "+err.Error())
+				lo, hi = 1, 65535 // refuse every port drop
+			}
+			if sshPorts, err = a.Sys.RemoteAccessPorts(); err != nil {
+				out = append(out, "can't tell which ports ssh listens on: "+err.Error())
 			}
 		}
 	}
-	return hasDrops, probeable
+	for _, b := range g.Blocks {
+		switch {
+		case b.Drop != nil:
+			ranges, _ := b.Drop.PortRanges()
+			for _, r := range ranges {
+				if r[0] <= hi && lo <= r[1] {
+					out = append(out, fmt.Sprintf("ports %d-%d overlap %d-%d, the ports this machine's own connections use, so their replies would be dropped", r[0], r[1], lo, hi))
+				}
+				for _, p := range sshPorts {
+					if b.Drop.Protocol == "tcp" && r[0] <= p && p <= r[1] {
+						out = append(out, fmt.Sprintf("ssh listens on port %d", p))
+					}
+				}
+			}
+		case b.Module != nil:
+			loadable, builtin, err := a.Sys.Module(b.Module.Name)
+			switch {
+			case err != nil:
+				out = append(out, "module "+b.Module.Name+": "+err.Error())
+			case builtin:
+				out = append(out, "module "+b.Module.Name+" is built into this kernel; a block can't stop it")
+			case !loadable:
+				out = append(out, "this kernel has no module named exactly "+b.Module.Name+" (aliases are refused)")
+			}
+		case b.Strip != nil:
+			id, err := a.Sys.FileID(b.Strip.Path)
+			if err != nil {
+				out = append(out, err.Error())
+				continue
+			}
+			if !id.Regular || id.UID != 0 {
+				out = append(out, b.Strip.Path+" is not a regular file owned by root")
+			}
+			for _, never := range guard.NeverStripPaths() {
+				same, err := a.Sys.SameFile(b.Strip.Path, never)
+				if err != nil {
+					out = append(out, "can't compare "+b.Strip.Path+" with "+never+": "+err.Error())
+					break
+				}
+				if same {
+					out = append(out, b.Strip.Path+" is "+never+" by another name")
+					break
+				}
+			}
+		}
+	}
+	return out
 }
 
 // ApplyOptions say how a guard goes on.
@@ -207,7 +296,7 @@ func (a *Agent) Apply(ctx context.Context, g *guard.Guard, o ApplyOptions) (*Ent
 	h := g.Hash()
 	if e := st.find(h); e != nil {
 		if e.Status == Applying {
-			return nil, fmt.Errorf("%s is half on from a run that died; run boot or undo first", g.Name())
+			return nil, fmt.Errorf("%s is half on (%s); run undo or boot first", g.Name(), halfOn(e))
 		}
 		return e, nil // already on
 	}
@@ -224,12 +313,12 @@ func (a *Agent) Apply(ctx context.Context, g *guard.Guard, o ApplyOptions) (*Ent
 		return nil, fmt.Errorf("%s can't go on here: %s", g.Name(), strings.Join(p.Problems, "; "))
 	}
 	if len(p.InUse) > 0 && !o.Force {
-		return nil, fmt.Errorf("%s would take away something in use (-force overrides): %s", g.Name(), strings.Join(p.InUse, "; "))
+		return nil, fmt.Errorf("%s would take away something in use, or can't reach everything (-force overrides): %s", g.Name(), strings.Join(p.InUse, "; "))
 	}
 
 	arm := max(o.ConfirmWithin, minArm)
 	start := a.now()
-	e := &Entry{Hash: h, Guard: g, Status: Applying, AppliedAt: start, ConfirmBy: start.Add(arm)}
+	e := &Entry{Hash: h, Guard: g, Status: Applying, AppliedAt: start, ConfirmBy: start.Add(arm), Unprobed: p.Unprobed}
 	st.Guards = append(st.Guards, e)
 	if err := s.save(st); err != nil {
 		return nil, err
@@ -239,11 +328,12 @@ func (a *Agent) Apply(ctx context.Context, g *guard.Guard, o ApplyOptions) (*Ent
 		return nil, errors.Join(fmt.Errorf("arming the undo: %w", err), s.save(st))
 	}
 	fail := func(err error) (*Entry, error) {
-		uerr := a.undoSteps(ctx, st, e)
-		st.remove(h)
+		uerr := a.takeOff(ctx, st, e)
 		ferr := a.writeSysctlFile(st)
 		serr := s.save(st)
-		a.Timer.Disarm(ctx, h)
+		if uerr == nil {
+			a.Timer.Disarm(ctx, h)
+		} // else the armed undo, then boot, try again
 		return nil, errors.Join(err, uerr, ferr, serr)
 	}
 	for i, stp := range steps(g) {
@@ -253,7 +343,7 @@ func (a *Agent) Apply(ctx context.Context, g *guard.Guard, o ApplyOptions) (*Ent
 		if err := s.save(st); err != nil {
 			return fail(err)
 		}
-		if err := a.applyStep(ctx, e, stp, false); err != nil {
+		if err := a.applyStep(ctx, st, e, stp, false); err != nil {
 			return fail(fmt.Errorf("putting on %q: %w", stp.describe(), err))
 		}
 		e.Applied = i + 1
@@ -261,13 +351,10 @@ func (a *Agent) Apply(ctx context.Context, g *guard.Guard, o ApplyOptions) (*Ent
 			return fail(err)
 		}
 	}
-	switch hasDrops, probeable := probeKind(g); {
-	case probeable:
-		if err := a.probe(ctx, e); err != nil {
+	if r := probeRule(g); r >= 0 {
+		if err := a.probe(ctx, e, r); err != nil {
 			return fail(err)
 		}
-	case hasDrops:
-		e.Unprobed = true
 	}
 	e.Status = Pending
 	if err := s.save(st); err != nil {
@@ -277,6 +364,13 @@ func (a *Agent) Apply(ctx context.Context, g *guard.Guard, o ApplyOptions) (*Ent
 		return e, a.confirm(ctx, s, st, e)
 	}
 	return e, nil
+}
+
+func halfOn(e *Entry) string {
+	if e.Failed != "" {
+		return "taking it off failed: " + e.Failed
+	}
+	return "a run died while putting it on"
 }
 
 // capture records what a step's resource was before the first guard
@@ -300,17 +394,17 @@ func (a *Agent) capture(ctx context.Context, st *State, s step) error {
 		if _, ok := o.Modes[b.Strip.Path]; ok {
 			return nil
 		}
-		fi, err := a.Sys.Lstat(b.Strip.Path)
+		id, err := a.Sys.FileID(b.Strip.Path)
 		if err != nil {
 			return err
 		}
-		if !fi.Mode().IsRegular() {
-			return fmt.Errorf("%s is not a regular file", b.Strip.Path)
+		if !id.Regular || id.UID != 0 {
+			return fmt.Errorf("%s is not a regular file owned by root", b.Strip.Path)
 		}
 		if o.Modes == nil {
-			o.Modes = map[string]uint32{}
+			o.Modes = map[string]SavedMode{}
 		}
-		o.Modes[b.Strip.Path] = uint32(fi.Mode())
+		o.Modes[b.Strip.Path] = SavedMode{Mode: uint32(id.Mode), Dev: id.Dev, Ino: id.Ino}
 	case b.Service != nil:
 		if _, ok := o.Units[b.Service.Unit]; ok {
 			return nil
@@ -329,9 +423,9 @@ func (a *Agent) capture(ctx context.Context, st *State, s step) error {
 }
 
 // applyStep puts one step on. Pending guards change only what a reboot
-// clears, where the system allows it (a runtime mask); confirmed ones also
-// change what lasts.
-func (a *Agent) applyStep(ctx context.Context, e *Entry, s step, lasting bool) error {
+// clears, where the system allows it (a runtime mask); lasting ones also
+// change what stays.
+func (a *Agent) applyStep(ctx context.Context, st *State, e *Entry, s step, lasting bool) error {
 	switch b := s.block; {
 	case s.drops != nil:
 		script, err := nft.Script(s.family, nft.TableName(e.Hash), e.Guard.Name(), s.drops)
@@ -350,40 +444,57 @@ func (a *Agent) applyStep(ctx context.Context, e *Entry, s step, lasting bool) e
 		a.Sys.Run(ctx, nil, "modprobe", "-r", b.Module.Name)
 		return nil
 	case b.Service != nil:
-		if _, err := a.Sys.Run(ctx, nil, "systemctl", "stop", b.Service.Unit); err != nil {
-			return err
-		}
-		args := []string{"mask", "--runtime", b.Service.Unit}
+		// Mask first, then stop (--now), so that nothing can start it in
+		// between.
+		args := []string{"mask", "--runtime", "--now", b.Service.Unit}
 		if lasting {
-			args = []string{"mask", b.Service.Unit}
+			args = []string{"mask", "--now", b.Service.Unit}
 		}
 		_, err := a.Sys.Run(ctx, nil, "systemctl", args...)
 		return err
 	case b.Strip != nil:
-		fi, err := a.Sys.Lstat(b.Strip.Path)
+		id, err := a.Sys.FileID(b.Strip.Path)
 		if err != nil {
 			return err
 		}
-		if !fi.Mode().IsRegular() {
-			return fmt.Errorf("%s is not a regular file", b.Strip.Path)
+		if saved, ok := st.Originals.Modes[b.Strip.Path]; ok && (saved.Dev != id.Dev || saved.Ino != id.Ino) {
+			// An upgrade replaced the file, and with it, maybe, the setuid
+			// bit. What goes back at undo is now the new file's mode.
+			st.Originals.Modes[b.Strip.Path] = SavedMode{Mode: uint32(id.Mode), Dev: id.Dev, Ino: id.Ino}
 		}
-		return a.Sys.Chmod(b.Strip.Path, fi.Mode()&^(fs.ModeSetuid|fs.ModeSetgid))
+		ok, err := a.Sys.ChmodIf(b.Strip.Path, id, id.Mode&^(fs.ModeSetuid|fs.ModeSetgid))
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("%s changed while being stripped", b.Strip.Path)
+		}
+		return nil
 	}
 	return errors.New("empty step")
 }
 
-// othersHold reports whether a guard other than e also changes what step s
-// changes, so that taking e off must leave it changed.
+// reached returns how many of an entry's steps may be on: those below
+// Applied, and the one at Applied if the entry is Applying.
+func reached(e *Entry, n int) int {
+	r := e.Applied
+	if e.Status == Applying && r < n {
+		r++
+	}
+	return r
+}
+
+// othersHold reports whether a guard other than e may have on a step that
+// changes what s changes, so that taking e off must leave it changed. Only
+// steps another guard has reached count.
 func othersHold(st *State, e *Entry, s step) bool {
 	for _, o := range st.Guards {
 		if o == e {
 			continue
 		}
-		for _, b := range o.Guard.Blocks {
-			switch {
-			case s.block.Setting != nil && b.Setting != nil && b.Setting.Name == s.block.Setting.Name,
-				s.block.Service != nil && b.Service != nil && b.Service.Unit == s.block.Service.Unit,
-				s.block.Strip != nil && b.Strip != nil && b.Strip.Path == s.block.Strip.Path:
+		os := steps(o.Guard)
+		for i := 0; i < reached(o, len(os)); i++ {
+			if sameResource(os[i], s) {
 				return true
 			}
 		}
@@ -416,52 +527,73 @@ func (a *Agent) undoStep(ctx context.Context, st *State, e *Entry, s step) error
 		if othersHold(st, e, s) {
 			return nil
 		}
-		was, ok := o.Units[b.Service.Unit]
-		if ok && (was.Enabled == "masked" || was.Enabled == "masked-runtime") {
-			delete(o.Units, b.Service.Unit) // it was masked before any guard
-			return nil
-		}
-		a.Sys.Run(ctx, nil, "systemctl", "unmask", "--runtime", b.Service.Unit)
-		if _, err := a.Sys.Run(ctx, nil, "systemctl", "unmask", b.Service.Unit); err != nil {
-			return err
-		}
-		if ok && was.Active {
-			if _, err := a.Sys.Run(ctx, nil, "systemctl", "start", b.Service.Unit); err != nil {
-				return err
+		unit := b.Service.Unit
+		was, ok := o.Units[unit]
+		var errs []error
+		switch {
+		case ok && was.Enabled == "masked":
+			// Masked for good before any guard: leave it.
+		case ok && was.Enabled == "masked-runtime":
+			// Someone masked it for this boot before any guard. Take off
+			// only the lasting mask a confirm may have added.
+			if _, err := a.Sys.Run(ctx, nil, "systemctl", "unmask", unit); err != nil {
+				errs = append(errs, err)
+			}
+		default:
+			if _, err := a.Sys.Run(ctx, nil, "systemctl", "unmask", "--runtime", unit); err != nil {
+				errs = append(errs, err)
+			}
+			if _, err := a.Sys.Run(ctx, nil, "systemctl", "unmask", unit); err != nil {
+				errs = append(errs, err)
+			}
+			if len(errs) == 0 && ok && was.Active {
+				if _, err := a.Sys.Run(ctx, nil, "systemctl", "start", unit); err != nil {
+					errs = append(errs, err)
+				}
 			}
 		}
-		delete(o.Units, b.Service.Unit)
+		if len(errs) > 0 {
+			return errors.Join(errs...)
+		}
+		delete(o.Units, unit)
 		return nil
 	case b.Strip != nil:
 		if othersHold(st, e, s) {
 			return nil
 		}
-		if m, ok := o.Modes[b.Strip.Path]; ok {
-			if err := a.Sys.Chmod(b.Strip.Path, fs.FileMode(m)); err != nil {
-				return err
-			}
-			delete(o.Modes, b.Strip.Path)
+		saved, ok := o.Modes[b.Strip.Path]
+		if !ok {
+			return nil
 		}
+		// The mode goes back only onto the same file. If an upgrade has
+		// replaced it, the package's mode stands.
+		if _, err := a.Sys.ChmodIf(b.Strip.Path, FileID{Dev: saved.Dev, Ino: saved.Ino}, fs.FileMode(saved.Mode)); err != nil {
+			return err
+		}
+		delete(o.Modes, b.Strip.Path)
 		return nil
 	}
 	return errors.New("empty step")
 }
 
-// undoSteps takes off, in reverse, every step of e that may be on: those
-// below Applied, and the one at Applied if e died while applying it.
-func (a *Agent) undoSteps(ctx context.Context, st *State, e *Entry) error {
+// takeOff takes off every step of e that may be on, in reverse. If all
+// went, it removes e from the state. If any failed, e stays, Applying with
+// every step counted and the failure noted, so that undo and boot try again
+// and status shows it.
+func (a *Agent) takeOff(ctx context.Context, st *State, e *Entry) error {
 	ss := steps(e.Guard)
-	n := e.Applied
-	if e.Status == Applying && n < len(ss) {
-		n++
-	}
 	var errs []error
-	for i := n - 1; i >= 0; i-- {
+	for i := reached(e, len(ss)) - 1; i >= 0; i-- {
 		if err := a.undoStep(ctx, st, e, ss[i]); err != nil {
 			errs = append(errs, fmt.Errorf("taking off %q: %w", ss[i].describe(), err))
 		}
 	}
-	return errors.Join(errs...)
+	if err := errors.Join(errs...); err != nil {
+		e.Status, e.Applied, e.Failed = Applying, len(ss), err.Error()
+		return err
+	}
+	st.remove(e.Hash)
+	return nil
 }
 
 // writeSysctlFile writes the confirmed guards' settings where the system
@@ -496,18 +628,18 @@ func (a *Agent) writeSysctlFile(st *State) error {
 	return a.Sys.WriteFile(SysctlFile, []byte(b.String()), 0o644)
 }
 
-// probe runs the agent's own probe and checks that the guard's own rule
-// counted it.
-func (a *Agent) probe(ctx context.Context, e *Entry) error {
+// probe runs the agent's own probe and checks that the one rule it targets
+// (rule, among the guard's IPv4 drops) counted it.
+func (a *Agent) probe(ctx context.Context, e *Entry, rule int) error {
 	table := nft.TableName(e.Hash)
-	before, err := a.packets(ctx, "ip", table)
+	before, err := a.rulePackets(ctx, "ip", table, rule)
 	if err != nil {
 		return err
 	}
 	if err := a.Sys.ProbeIPOptions(ctx); err != nil {
 		return err
 	}
-	after, err := a.packets(ctx, "ip", table)
+	after, err := a.rulePackets(ctx, "ip", table, rule)
 	if err != nil {
 		return err
 	}
@@ -517,17 +649,17 @@ func (a *Agent) probe(ctx context.Context, e *Entry) error {
 	return nil
 }
 
-// packets returns the packets counted by a guard table's rules.
-func (a *Agent) packets(ctx context.Context, family, table string) (uint64, error) {
+// rulePackets returns the packets one rule of a guard table has counted.
+// The agent writes the rules in order, and nft lists them in that order.
+func (a *Agent) rulePackets(ctx context.Context, family, table string, rule int) (uint64, error) {
 	lt, err := a.liveTable(ctx, family, table)
 	if err != nil {
 		return 0, err
 	}
-	var n uint64
-	for _, r := range lt.Rules {
-		n += r.Packets
+	if rule >= len(lt.Rules) {
+		return 0, fmt.Errorf("table %s has %d rules, not %d", table, len(lt.Rules), rule+1)
 	}
-	return n, nil
+	return lt.Rules[rule].Packets, nil
 }
 
 func (a *Agent) liveTable(ctx context.Context, family, table string) (*nft.LiveTable, error) {
@@ -554,7 +686,7 @@ func (a *Agent) Confirm(ctx context.Context, key string) (*Entry, error) {
 	case Confirmed:
 		return e, nil
 	case Applying:
-		return nil, fmt.Errorf("%s is half on from a run that died; run boot or undo first", e.Guard.Name())
+		return nil, fmt.Errorf("%s is half on (%s); run undo or boot first", e.Guard.Name(), halfOn(e))
 	}
 	return e, a.confirm(ctx, s, st, e)
 }
@@ -563,7 +695,7 @@ func (a *Agent) confirm(ctx context.Context, s *store, st *State, e *Entry) erro
 	// Lasting forms first: a runtime mask becomes a mask.
 	for _, stp := range steps(e.Guard) {
 		if stp.block.Service != nil {
-			if err := a.applyStep(ctx, e, stp, true); err != nil {
+			if err := a.applyStep(ctx, st, e, stp, true); err != nil {
 				return err
 			}
 		}
@@ -599,18 +731,19 @@ func (a *Agent) Undo(ctx context.Context, key string, ifUnconfirmed bool) (*Entr
 	if ifUnconfirmed && e.Status == Confirmed {
 		return nil, nil
 	}
-	uerr := a.undoSteps(ctx, st, e)
-	st.remove(e.Hash)
+	uerr := a.takeOff(ctx, st, e)
 	ferr := a.writeSysctlFile(st)
-	if err := s.save(st); err != nil {
-		return e, errors.Join(uerr, ferr, err)
+	serr := s.save(st)
+	if uerr == nil && serr == nil {
+		a.Timer.Disarm(ctx, e.Hash)
 	}
-	a.Timer.Disarm(ctx, e.Hash)
-	return e, errors.Join(uerr, ferr)
+	return e, errors.Join(uerr, ferr, serr)
 }
 
-// Boot runs early at every boot: it takes off what was never confirmed and
-// puts back what was. It does as much as it can and reports every failure.
+// Boot runs early at every boot. It takes off what was never confirmed (or
+// failed to come off before), and puts back what was confirmed, unless this
+// release no longer allows it or it is unsafe on the machine now; those it
+// takes off too. It does as much as it can and reports every failure.
 func (a *Agent) Boot(ctx context.Context) error {
 	s, st, err := a.open()
 	if err != nil {
@@ -620,32 +753,43 @@ func (a *Agent) Boot(ctx context.Context) error {
 	var errs []error
 	for _, e := range append([]*Entry(nil), st.Guards...) {
 		if e.Status == Confirmed {
-			for _, stp := range steps(e.Guard) {
-				if err := a.applyStep(ctx, e, stp, true); err != nil {
-					errs = append(errs, fmt.Errorf("%s: putting back %q: %w", e.Guard.Name(), stp.describe(), err))
-				}
+			why := ""
+			if err := e.Guard.Validate(); err != nil {
+				why = "this release no longer allows it: " + err.Error()
+			} else if probs := a.unsafe(e.Guard); len(probs) > 0 {
+				why = "it is unsafe on this machine now: " + strings.Join(probs, "; ")
 			}
-			continue
+			if why == "" {
+				for _, stp := range steps(e.Guard) {
+					if err := a.applyStep(ctx, st, e, stp, true); err != nil {
+						errs = append(errs, fmt.Errorf("%s: putting back %q: %w", e.Guard.Name(), stp.describe(), err))
+					}
+				}
+				continue
+			}
+			errs = append(errs, fmt.Errorf("%s: taken off because %s", e.Guard.Name(), why))
 		}
-		if err := a.undoSteps(ctx, st, e); err != nil {
+		if err := a.takeOff(ctx, st, e); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", e.Guard.Name(), err))
 		}
-		st.remove(e.Hash)
 	}
 	errs = append(errs, a.writeSysctlFile(st), s.save(st))
 	return errors.Join(errs...)
 }
 
-// Drift is a difference between what a guard set and what is live.
+// Drift is a difference between what a guard set and what is live, or a
+// guard that is no longer safe here.
 type Drift struct {
 	Guard    string
 	What     string
-	Repaired bool
+	Repaired bool // put back
+	TakenOff bool // taken off as no longer allowed or safe, or after a failed undo
 	Err      error
 }
 
 // Check compares each guard's live state with what the agent set. With
-// repair, it puts drifted steps back and probes again.
+// repair, it puts drifted steps back and probes again, retries failed undos,
+// and takes off guards that are no longer allowed or safe here.
 func (a *Agent) Check(ctx context.Context, repair bool) ([]Drift, error) {
 	s, st, err := a.open()
 	if err != nil {
@@ -653,29 +797,55 @@ func (a *Agent) Check(ctx context.Context, repair bool) ([]Drift, error) {
 	}
 	defer s.close()
 	var out []Drift
-	for _, e := range st.Guards {
+	for _, e := range append([]*Entry(nil), st.Guards...) {
+		name := e.Guard.Name()
 		if e.Status == Applying {
-			out = append(out, Drift{Guard: e.Guard.Name(), What: "half on from a run that died; run boot or undo"})
+			d := Drift{Guard: name, What: "half on: " + halfOn(e)}
+			if repair {
+				d.Err = a.takeOff(ctx, st, e)
+				d.TakenOff = d.Err == nil
+			}
+			out = append(out, d)
+			continue
+		}
+		why := ""
+		if err := e.Guard.Validate(); err != nil {
+			why = "this release no longer allows it: " + err.Error()
+		} else if probs := a.unsafe(e.Guard); len(probs) > 0 {
+			why = "unsafe on this machine now: " + strings.Join(probs, "; ")
+		}
+		if why != "" {
+			d := Drift{Guard: name, What: why}
+			if repair {
+				d.Err = a.takeOff(ctx, st, e)
+				d.TakenOff = d.Err == nil
+			}
+			out = append(out, d)
 			continue
 		}
 		if e.Status == Pending && a.now().After(e.ConfirmBy.Add(time.Minute)) {
-			out = append(out, Drift{Guard: e.Guard.Name(), What: "pending past its confirm time; its undo should have run"})
+			out = append(out, Drift{Guard: name, What: "pending past its confirm time; its undo should have run"})
 		}
 		ss := steps(e.Guard)
 		for i := 0; i < e.Applied && i < len(ss); i++ {
-			what := a.verify(ctx, e, ss[i])
+			what := a.verify(ctx, st, e, ss[i])
 			if what == "" {
 				continue
 			}
-			d := Drift{Guard: e.Guard.Name(), What: what}
+			d := Drift{Guard: name, What: what}
 			if repair {
-				d.Err = a.applyStep(ctx, e, ss[i], e.Status == Confirmed)
-				if _, probeable := probeKind(e.Guard); d.Err == nil && ss[i].drops != nil && probeable {
-					d.Err = a.probe(ctx, e)
+				d.Err = a.applyStep(ctx, st, e, ss[i], e.Status == Confirmed)
+				if r := probeRule(e.Guard); d.Err == nil && ss[i].family == "ip" && r >= 0 {
+					d.Err = a.probe(ctx, e, r)
 				}
 				d.Repaired = d.Err == nil
 			}
 			out = append(out, d)
+		}
+	}
+	if repair {
+		if err := errors.Join(a.writeSysctlFile(st), s.save(st)); err != nil {
+			return out, err
 		}
 	}
 	return out, nil
@@ -683,19 +853,20 @@ func (a *Agent) Check(ctx context.Context, repair bool) ([]Drift, error) {
 
 // verify says how a step's live state differs from what the agent set, or
 // "" if it doesn't.
-func (a *Agent) verify(ctx context.Context, e *Entry, s step) string {
+func (a *Agent) verify(ctx context.Context, st *State, e *Entry, s step) string {
 	switch b := s.block; {
 	case s.drops != nil:
-		lt, err := a.liveTable(ctx, s.family, nft.TableName(e.Hash))
+		table := nft.TableName(e.Hash)
+		lt, err := a.liveTable(ctx, s.family, table)
 		if err != nil {
-			return "table " + nft.TableName(e.Hash) + " is missing or unreadable"
+			return "the guard's " + s.family + " table is missing or unreadable"
 		}
 		if lt.Hook != "prerouting" || lt.Priority != nft.Priority || len(lt.Rules) != len(s.drops) {
-			return "table " + nft.TableName(e.Hash) + " isn't as the agent wrote it"
+			return "the guard's " + s.family + " table isn't as the agent wrote it"
 		}
 		for _, r := range lt.Rules {
 			if r.Comment != e.Guard.Name() {
-				return "table " + nft.TableName(e.Hash) + " holds a rule the agent didn't write"
+				return "the guard's " + s.family + " table holds a rule the agent didn't write"
 			}
 		}
 	case b.Setting != nil:
@@ -708,15 +879,19 @@ func (a *Agent) verify(ctx context.Context, e *Entry, s step) string {
 		}
 	case b.Service != nil:
 		out, _ := a.Sys.Run(ctx, nil, "systemctl", "is-enabled", b.Service.Unit)
-		if st := strings.TrimSpace(string(out)); st != "masked" && st != "masked-runtime" {
-			return b.Service.Unit + " is " + st + ", not masked"
+		if en := strings.TrimSpace(string(out)); en != "masked" && en != "masked-runtime" {
+			return b.Service.Unit + " is " + en + ", not masked"
+		}
+		out, _ = a.Sys.Run(ctx, nil, "systemctl", "is-active", b.Service.Unit)
+		if act := strings.TrimSpace(string(out)); act == "active" || act == "activating" || act == "reloading" {
+			return b.Service.Unit + " is masked but still " + act
 		}
 	case b.Strip != nil:
-		fi, err := a.Sys.Lstat(b.Strip.Path)
+		id, err := a.Sys.FileID(b.Strip.Path)
 		if err != nil {
-			return b.Strip.Path + ": " + err.Error()
+			return err.Error()
 		}
-		if fi.Mode()&(fs.ModeSetuid|fs.ModeSetgid) != 0 {
+		if id.Mode&(fs.ModeSetuid|fs.ModeSetgid) != 0 {
 			return b.Strip.Path + " has its setuid or setgid bit again (an upgrade puts it back)"
 		}
 	}
@@ -724,7 +899,7 @@ func (a *Agent) verify(ctx context.Context, e *Entry, s step) string {
 }
 
 // Status lists the guards on this machine with the packets each guard's
-// drops have stopped (-1 where the table can't be read).
+// drops have stopped (-1 where a table can't be read).
 func (a *Agent) Status(ctx context.Context) ([]*Entry, map[string]int64, error) {
 	s, st, err := a.open()
 	if err != nil {
@@ -735,12 +910,14 @@ func (a *Agent) Status(ctx context.Context) ([]*Entry, map[string]int64, error) 
 	for _, e := range st.Guards {
 		var n int64
 		for f := range nft.Tables(e.Guard) {
-			p, err := a.packets(ctx, f, nft.TableName(e.Hash))
+			lt, err := a.liveTable(ctx, f, nft.TableName(e.Hash))
 			if err != nil {
 				n = -1
 				break
 			}
-			n += int64(p)
+			for _, r := range lt.Rules {
+				n += int64(r.Packets)
+			}
 		}
 		hits[e.Hash] = n
 	}

@@ -71,7 +71,7 @@ func TestRules(t *testing.T) {
 func TestScriptRefusesOddComment(t *testing.T) {
 	d := []*guard.Drop{{Family: "ipv4", IPOptions: true}}
 	for _, c := range []string{`x" ; flush ruleset ; "`, "", strings.Repeat("a", 101), "UPPER"} {
-		if _, err := Script("ip", "autopatch_0123456789ab", c, d); err == nil {
+		if _, err := Script("ip", TableName(strings.Repeat("0", 64)), c, d); err == nil {
 			t.Errorf("comment %q accepted", c)
 		}
 	}

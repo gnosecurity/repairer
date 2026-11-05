@@ -84,20 +84,31 @@ type Evidence struct {
 	// guard's later windows even when their baseline has it failing (a unit
 	// can stay failed after the guard comes off), and while it fails the
 	// guard is never confirmed, booted or answered for (round 8, new major
-	// 1). A record from a window clears at a confirm with the check passing;
-	// one from a boot, only at a boot the check came back through.
+	// 1). A record made in a shared window counts only at the guard's solo
+	// boot, where it is judged alone; and when a recorded check is failing
+	// with the guard off, the guard waits for the owner at once instead of
+	// retrying (round 9, new major 4). A record from a window clears at a
+	// confirm with the check passing; one from a boot, only at a boot the
+	// check came back through and held.
 	Broke map[string]Broken `json:"broke,omitempty"`
 }
 
-// Broken is one check a guard's window or boot broke.
+// Broken is one check a guard's window or boot broke. Shared says the
+// window had other suspects.
 type Broken struct {
 	Why    string    `json:"why"`
 	At     time.Time `json:"at"`
 	AtBoot bool      `json:"at_boot,omitempty"`
+	Shared bool      `json:"shared,omitempty"`
 }
 
+// counts says whether a record counts in a window: always if the guard
+// earned it alone; one from a shared window, only when this window is the
+// guard's alone (its solo boot).
+func (b Broken) counts(solo bool) bool { return !b.Shared || solo }
+
 // noteBroke records checks (key to why) a window or a boot broke.
-func (ev *Evidence) noteBroke(broke map[string]string, at time.Time, atBoot bool) {
+func (ev *Evidence) noteBroke(broke map[string]string, at time.Time, atBoot, shared bool) {
 	if len(broke) == 0 {
 		return
 	}
@@ -107,7 +118,8 @@ func (ev *Evidence) noteBroke(broke map[string]string, at time.Time, atBoot bool
 	for k, why := range broke {
 		// What a boot broke stays a boot's: a later window failing on the
 		// same check doesn't let it clear before a boot shows it back.
-		ev.Broke[k] = Broken{Why: why, At: at.UTC(), AtBoot: atBoot || ev.Broke[k].AtBoot}
+		old, had := ev.Broke[k]
+		ev.Broke[k] = Broken{Why: why, At: at.UTC(), AtBoot: atBoot || old.AtBoot, Shared: shared && (!had || old.Shared)}
 	}
 }
 
@@ -414,7 +426,8 @@ func (a *Agent) watch(ctx context.Context, e *Entry, ev *Evidence, checks []poli
 	settled := true
 	for _, h := range checks {
 		k := checkKey(h)
-		_, recorded := ev.Broke[k]
+		b, recorded := ev.Broke[k]
+		recorded = recorded && b.counts(false) // a running window is never a solo boot
 		if n, sampled := t.Before[k]; !recorded && (!sampled || n > 0) {
 			continue // didn't hold in the baseline, or added since, and this guard never broke it
 		}
@@ -453,7 +466,7 @@ func (a *Agent) watch(ctx context.Context, e *Entry, ev *Evidence, checks []poli
 			a.saveEvidence(e.Hash, ev)
 			return verdictNone
 		}
-		ev.noteBroke(broke, now, e.BootWindow)
+		ev.noteBroke(broke, now, e.BootWindow, t.Shared)
 		why := fmt.Sprintf("health failed %d times in a row: %s", failRun, strings.Join(bad, "; "))
 		if t.Shared {
 			a.suspectWindow(e.Hash, ev, why+" (a keep went on during its window)", res)
@@ -599,6 +612,17 @@ func (a *Agent) next(ctx context.Context, f *Fleet, p *policy.Policy, entries []
 		}
 		keep := d.By == "me" && yes != nil && yes.Mode == "keep"
 		if keepOnly && !keep {
+			continue
+		}
+		// A check this guard broke before is failing with it off too: a unit
+		// stuck failed, or a flood. Retrying would only reach the ask later;
+		// the owner hears now (round 9, new major 4).
+		if failing := ev.brokeFailing(sample); !keep && len(failing) > 0 {
+			ev.Ask, ev.Trial = true, nil
+			ev.Last = "waiting for you: " + strings.Join(failing, ", ") + ", which it broke before, is failing with it off too (a unit stuck failed, or a flood); " +
+				"put it back with your Yes (keep, or nocanary) or On once you've looked (" + a.now().UTC().Format(time.RFC3339) + ")"
+			a.saveEvidence(h, ev)
+			res.Waiting = append(res.Waiting, g.Name()+" ("+ev.Last+")")
 			continue
 		}
 		if !keep && g.Later() && g.BitesAtBoot() && ((ev.Suspect && unbooted > 0) || suspectUnbooted) {

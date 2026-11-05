@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -40,7 +41,7 @@ func newTrial(t *testing.T, host, extra string) *trial {
 
 // newTrialTier is newTrial with tier A's hosts (and anything else of the
 // tier's) given.
-func newTrialTier(t *testing.T, host, tierA, extra string) *trial {
+func newTrialTier(t *testing.T, host, tierA, extra string, moreTargets ...string) *trial {
 	t.Helper()
 	a, sys, timer := newAgent(t)
 	tr := &trial{t: t, a: a, sys: sys, timer: timer, clock: time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC),
@@ -62,7 +63,7 @@ func newTrialTier(t *testing.T, host, tierA, extra string) *trial {
 		"agents":[{"name":"backup","key":"` + pub(tr.keys["backup"]) + `","host":"backup"},
 		          {"name":"mail","key":"` + pub(tr.keys["mail"]) + `","host":"mail"}]},
 		"tiers":[{"name":"A",` + tierA + `,"admit":["me","rig"],"canaries":["backup"]}],
-		"health":[{"hosts":["backup","mail"],"kind":"tcp","target":"` + site + `","want":""}]` + extra + `}`))
+		"health":[` + healthJSON(append([]string{site}, moreTargets...)) + `]` + extra + `}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,6 +77,15 @@ func newTrialTier(t *testing.T, host, tierA, extra string) *trial {
 		t.Fatal(err)
 	}
 	return tr
+}
+
+// healthJSON is one TCP check per target, on both machines.
+func healthJSON(targets []string) string {
+	var out []string
+	for _, tg := range targets {
+		out = append(out, `{"hosts":["backup","mail"],"kind":"tcp","target":"`+tg+`","want":""}`)
+	}
+	return strings.Join(out, ",")
 }
 
 // deliver hands the agent a bundle through intake, as the lookout would.
@@ -1226,15 +1236,20 @@ func TestStripBrokeAtBootNeverBooted(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		tr.step(time.Minute)
 	}
+	if e := tr.entry(s); e.Booted {
+		t.Fatal("booted on the check's first passing samples, before it held for the window (round 9, minor 8)")
+	}
+	for i := 0; i < 10; i++ {
+		tr.step(time.Minute)
+	}
 	if e := tr.entry(s); !e.Booted || len(tr.evidence(s).Broke) != 0 {
-		t.Fatalf("after a boot the check came back through: %+v, broke %+v", e, tr.evidence(s).Broke)
+		t.Fatalf("after a boot the check came back through and held: %+v, broke %+v", e, tr.evidence(s).Broke)
 	}
 }
 
-// A module block whose unit stays failed after the undo: each retry counts
-// the recorded check though its baseline has it failing, so the block is
-// never confirmed again, and its retries end in the owner's ask (round 8,
-// new major 1).
+// A module block whose unit stays failed after the undo: the check it broke
+// is failing with it off too, so it waits for the owner at once instead of
+// retrying into the ask (round 8, new major 1; round 9, new major 4).
 func TestModuleBlockBrokeAtBootReachesAsk(t *testing.T) {
 	tr := newTrial(t, "backup", "")
 	w := ksmbdGuard(t)
@@ -1258,8 +1273,11 @@ func TestModuleBlockBrokeAtBootReachesAsk(t *testing.T) {
 			t.Fatalf("confirmed at minute %d with the check it broke still failing", i+1)
 		}
 	}
-	if ev := tr.evidence(w); !ev.Ask || ev.Tries != len(retries)+1 {
-		t.Fatalf("never reached the ask: ask %v, tries %d", ev.Ask, ev.Tries)
+	if ev := tr.evidence(w); !ev.Ask || ev.Tries != 1 || !strings.Contains(ev.Last, "failing with it off too") {
+		t.Fatalf("didn't ask at once: ask %v, tries %d, %q", ev.Ask, ev.Tries, ev.Last)
+	}
+	if r := tr.reportOf(); !strings.Contains(fmt.Sprint(r.OnTheWay), "failing with it off too") {
+		t.Fatalf("the report doesn't say why: %+v", r.OnTheWay)
 	}
 	// The owner looks, fixes the unit, and says yes again (what a Yes does
 	// to the evidence): the block goes on, and at a boot the check comes
@@ -1289,8 +1307,9 @@ func TestModuleBlockBrokeAtBootReachesAsk(t *testing.T) {
 }
 
 // A guard that bites now breaks a check in its window, and the check stays
-// failed after the undo: its retry counts the check, though its baseline
-// has it failing, and doesn't confirm (round 8, new major 1).
+// failed after the undo: it doesn't confirm, and since the check fails with
+// it off too, it waits for the owner (round 8, new major 1; round 9, new
+// major 4).
 func TestWindowRecordCountsOnRetry(t *testing.T) {
 	tr := newTrial(t, "backup", "")
 	g := ipoptGuard(t)
@@ -1311,8 +1330,8 @@ func TestWindowRecordCountsOnRetry(t *testing.T) {
 			t.Fatalf("confirmed at minute %d with the check it broke failing", i+1)
 		}
 	}
-	if ev := tr.evidence(g); ev.Tries < 2 {
-		t.Fatalf("the retry didn't count the check: tries %d", ev.Tries)
+	if ev := tr.evidence(g); !ev.Ask || ev.Tries != 1 {
+		t.Fatalf("after the check stayed failed: ask %v, tries %d", ev.Ask, ev.Tries)
 	}
 }
 
@@ -1550,5 +1569,87 @@ func TestBootRecordSurvivesARunningConfirm(t *testing.T) {
 		if e := tr.entry(w); e != nil && e.Booted {
 			t.Fatalf("booted at minute %d with the check it broke at a boot failing", i+1)
 		}
+	}
+}
+
+// Two later guards share a boot; the unit one of them broke stays failed.
+// Both come off as suspects with a shared record, and since the check fails
+// with them off, each waits for the owner at once: neither counts a try,
+// and the innocent one isn't retried into the ask beside the guilty one
+// (round 9, new major 4).
+func TestSharedBootInnocentCountsNoTry(t *testing.T) {
+	tr := newTrial(t, "backup", "")
+	k, m := ksmbdGuard(t), mptcpGuard(t)
+	tr.sharedSuspectsStuck(k, m)
+	for i := 0; i < 6*60; i++ {
+		tr.step(time.Minute)
+		for _, g := range []*guard.Guard{k, m} {
+			if e := tr.entry(g); e != nil {
+				t.Fatalf("%s went on with the check it shared still failing", g.Name())
+			}
+		}
+	}
+	for _, g := range []*guard.Guard{k, m} {
+		if ev := tr.evidence(g); ev.Tries != 0 || !ev.Ask || !ev.Broke["tcp "+site+" "].Shared {
+			t.Fatalf("%s: tries %d, ask %v, broke %+v", g.Name(), ev.Tries, ev.Ask, ev.Broke)
+		}
+	}
+}
+
+// sharedSuspectsStuck is sharedSuspects with the broken check left failing.
+func (tr *trial) sharedSuspectsStuck(x, y *guard.Guard) {
+	tr.t.Helper()
+	tr.tested(x)
+	tr.tested(y)
+	tr.tick()
+	tr.bothOn(x, y)
+	tr.step(time.Minute)
+	if err := tr.a.Boot(ctx); err != nil {
+		tr.t.Fatal(err)
+	}
+	tr.step(time.Minute)
+	tr.fail[site] = "the unit hit its start limit"
+	for i := 0; i < 3; i++ {
+		tr.step(time.Minute)
+	}
+	for _, g := range []*guard.Guard{x, y} {
+		if ev := tr.evidence(g); tr.entry(g) != nil || !ev.Suspect {
+			tr.t.Fatalf("%s isn't a suspect", g.Name())
+		}
+	}
+}
+
+// A watched strip that never boots (its check never comes back) makes only
+// its first boot shared: at a later boot, a module block that breaks
+// another check fails alone and counts a try (round 9, minor 8).
+func TestObservedSharesOnlyItsFirstBoot(t *testing.T) {
+	const site2 = "203.0.113.6:443"
+	tr := newTrialTier(t, "backup", `"hosts":["backup","mail"]`, "", site2)
+	s := fusermountStrip(t, tr)
+	tr.tested(s)
+	tr.tick()
+	tr.onAndConfirmed(s)
+	tr.step(time.Minute)
+	if err := tr.a.Boot(ctx); err != nil { // its first boot: it breaks site, for good
+		t.Fatal(err)
+	}
+	tr.fail[site] = "the strip broke this"
+	for i := 0; i < 15; i++ {
+		tr.step(time.Minute)
+	}
+	w := ksmbdGuard(t)
+	tr.tested(w)
+	tr.onAndConfirmedWhenReady(t, w)
+	tr.step(time.Minute)
+	if err := tr.a.Boot(ctx); err != nil { // the strip's second boot, the block's first
+		t.Fatal(err)
+	}
+	tr.step(time.Minute)
+	tr.fail[site2] = "the block broke this"
+	for i := 0; i < 3; i++ {
+		tr.step(time.Minute)
+	}
+	if ev := tr.evidence(w); tr.entry(w) != nil || ev.Suspect || ev.Tries != 1 {
+		t.Fatalf("the block at the strip's second boot: on %v, suspect %v, tries %d", tr.entry(w) != nil, ev.Suspect, ev.Tries)
 	}
 }

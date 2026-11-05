@@ -66,6 +66,10 @@ type bootGroup struct {
 	// that held has passed since the boot.
 	Windowed []string `json:"windowed,omitempty"`
 	Observed []string `json:"observed,omitempty"`
+	// ObservedNew are the observed guards at their first boot: only they
+	// make the window shared, so one that never boots doesn't make every
+	// later boot shared (round 9, minor 8).
+	ObservedNew []string `json:"observed_new,omitempty"`
 	// Cut are windows after an earlier boot that this boot cut short;
 	// CutShared says whether that group had more than one guard.
 	Cut       []string `json:"cut,omitempty"`
@@ -75,10 +79,12 @@ type bootGroup struct {
 	Shared bool `json:"shared,omitempty"`
 	// Armed: the check has passed since the boot, or its grace ran out.
 	// Passed: it has passed since the boot. Back: it passed within its grace,
-	// so it came back through the boot by itself.
+	// so it came back through the boot by itself; Lapsed: it failed again
+	// after that.
 	Armed   map[string]bool   `json:"armed,omitempty"`
 	Passed  map[string]bool   `json:"passed,omitempty"`
 	Back    map[string]bool   `json:"back,omitempty"`
+	Lapsed  map[string]bool   `json:"lapsed,omitempty"`
 	Streak  map[string]int    `json:"streak,omitempty"`
 	Why     map[string]string `json:"why,omitempty"`
 	Settled time.Time         `json:"settled,omitzero"`
@@ -87,11 +93,11 @@ type bootGroup struct {
 // shared says whether the window has more than one suspect: several guards,
 // windowed or watched (round 8, new major 1), or a keep that joined it.
 func (g *bootGroup) shared() bool {
-	return len(g.Windowed)+len(g.Observed) > 1 || g.Shared
+	return len(g.Windowed)+len(g.ObservedNew) > 1 || g.Shared
 }
 
-func (a *Agent) openBootGroup(windowed, observed, cut []string, cutShared bool) error {
-	g := bootGroup{At: a.now().UTC(), Before: map[string]int{}, Windowed: windowed, Observed: observed, Cut: cut, CutShared: cutShared}
+func (a *Agent) openBootGroup(windowed, observed, observedNew, cut []string, cutShared bool) error {
+	g := bootGroup{At: a.now().UTC(), Before: map[string]int{}, Windowed: windowed, Observed: observed, ObservedNew: observedNew, Cut: cut, CutShared: cutShared}
 	var recs []sampleRecord
 	if b, err := os.ReadFile(filepath.Join(a.StateDir, healthFile)); err == nil {
 		json.Unmarshal(b, &recs)
@@ -182,6 +188,7 @@ func (a *Agent) watchBootGroup(ctx context.Context, f *Fleet, checks []policy.He
 			windowed = append(windowed, h)
 		case e != nil && e.Status == Confirmed && !e.Booted:
 			g.Observed = append(g.Observed, h) // kept during the window: watched, not judged
+			g.ObservedNew = append(g.ObservedNew, h)
 		case e == nil && !containsHash(f.Off, h):
 			if ev := evs[h]; ev != nil && !ev.Held {
 				why := "its window after the boot ended without a verdict"
@@ -215,6 +222,9 @@ func (a *Agent) watchBootGroup(ctx context.Context, f *Fleet, checks []policy.He
 	if g.Back == nil {
 		g.Back = map[string]bool{}
 	}
+	if g.Lapsed == nil {
+		g.Lapsed = map[string]bool{}
+	}
 	if g.Streak == nil {
 		g.Streak = map[string]int{}
 	}
@@ -227,11 +237,12 @@ func (a *Agent) watchBootGroup(ctx context.Context, f *Fleet, checks []policy.He
 	now := a.now()
 	// A check a windowed guard broke before counts even if it was failing
 	// before this boot: a unit can stay failed after the guard comes off.
+	solo := !g.shared()
 	recorded := map[string]bool{}
 	for _, h := range g.Windowed {
 		if ev := evs[h]; ev != nil {
-			for k := range ev.Broke {
-				recorded[k] = true
+			for k, b := range ev.Broke {
+				recorded[k] = recorded[k] || b.counts(solo)
 			}
 		}
 	}
@@ -246,6 +257,8 @@ func (a *Agent) watchBootGroup(ctx context.Context, f *Fleet, checks []policy.He
 			if now.Sub(g.At) < time.Duration(h.Grace())*time.Second {
 				g.Back[k] = true
 			}
+		} else if g.Back[k] {
+			g.Lapsed[k] = true
 		}
 		if n, sampled := g.Before[k]; !recorded[k] && g.Sampled && (!sampled || n > 0) {
 			continue // didn't hold before the boot, or wasn't checked then
@@ -278,16 +291,19 @@ func (a *Agent) watchBootGroup(ctx context.Context, f *Fleet, checks []policy.He
 	stamp := now.UTC().Format(time.RFC3339)
 	// The observed guards (keep, strips) count as booted once every check
 	// that held has passed since the boot, and every check one of them broke
-	// before came back through this boot; and only when no windowed guard of
-	// this boot is still waiting for its verdict. Nothing takes them off.
+	// before came back through this boot and held for the window's length
+	// (round 9, minor 8); and only when no windowed guard of this boot is
+	// still waiting for its verdict. Nothing takes them off.
 	if len(bad) == 0 && len(g.Windowed) == 0 {
 		var still []string
 		for _, h := range g.Observed {
 			ev := evs[h]
 			ready := allPassed
 			if ev != nil {
-				for k := range ev.Broke {
-					ready = ready && g.Back[k]
+				for k, b := range ev.Broke {
+					if b.counts(solo) {
+						ready = ready && g.Back[k] && !g.Lapsed[k] && !g.Settled.IsZero() && !now.Before(g.Settled.Add(TrialWindow))
+					}
 				}
 			}
 			if !ready {
@@ -313,7 +329,7 @@ func (a *Agent) watchBootGroup(ctx context.Context, f *Fleet, checks []policy.He
 		// back, so none of them is booted while the check stays failed.
 		for _, h := range g.Observed {
 			if ev := evs[h]; ev != nil {
-				ev.noteBroke(broke, now, true)
+				ev.noteBroke(broke, now, true, shared)
 				ev.Last = "not booted: " + why + " (" + stamp + ")"
 				a.saveEvidence(h, ev)
 			}
@@ -327,7 +343,7 @@ func (a *Agent) watchBootGroup(ctx context.Context, f *Fleet, checks []policy.He
 			if ev == nil {
 				continue
 			}
-			ev.noteBroke(broke, now, true)
+			ev.noteBroke(broke, now, true, shared)
 			if shared {
 				a.suspectWindow(h, ev, why+" (shared with another guard of the boot)", res)
 			} else {
@@ -344,8 +360,8 @@ func (a *Agent) watchBootGroup(ctx context.Context, f *Fleet, checks []policy.He
 			}
 			if ev := evs[h]; ev != nil {
 				ev.Tries, ev.Suspect, ev.Last = 0, false, "confirmed after a boot "+stamp
-				for k := range ev.Broke {
-					if g.Back[k] {
+				for k, b := range ev.Broke {
+					if b.counts(solo) && g.Back[k] && !g.Lapsed[k] {
 						delete(ev.Broke, k)
 					}
 				}

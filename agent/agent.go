@@ -859,7 +859,7 @@ func (a *Agent) Boot(ctx context.Context) error {
 	}
 	defer s.close()
 	var errs []error
-	var windows, observed []string
+	var windows, observed, observedNew []string
 	var off []string
 	// Windows after an earlier boot that this restart cuts short: each one
 	// counts as a failure (shared, if the group had more than one).
@@ -901,6 +901,10 @@ func (a *Agent) Boot(ctx context.Context) error {
 				if e.Later && !e.Booted && e.By != "" {
 					if e.Keep || !e.Guard.BitesAtBoot() {
 						observed = append(observed, e.Hash)
+						e.Observed++
+						if e.Observed == 1 {
+							observedNew = append(observedNew, e.Hash)
+						}
 					} else {
 						now := a.now()
 						e.Status, e.BootWindow, e.AppliedAt, e.ConfirmBy = Pending, true, now, now.Add(a.bootArm())
@@ -917,7 +921,7 @@ func (a *Agent) Boot(ctx context.Context) error {
 	}
 	errs = append(errs, a.writeSysctlFile(st), s.save(st))
 	if len(windows)+len(observed) > 0 || len(cut) > 0 {
-		errs = append(errs, a.openBootGroup(windows, observed, cut, cutShared))
+		errs = append(errs, a.openBootGroup(windows, observed, observedNew, cut, cutShared))
 	}
 	for _, h := range windows { // armed after the save, as Apply does
 		if err := a.Timer.Arm(ctx, h, a.bootArm()); err != nil {

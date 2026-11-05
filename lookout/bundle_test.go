@@ -83,10 +83,8 @@ func TestBundleInOrderOfNeed(t *testing.T) {
 		t.Fatal("the canary's Healthy didn't make the bundle")
 	}
 	// Every machine reports guard 0 confirmed. Its statement stays: a
-	// machine added or rebuilt later needs it too (round 8, new major 3).
-	if n, err := store.Prune(); err != nil || n != 0 {
-		t.Fatalf("pruned %d: %v", n, err)
-	}
+	// machine added or rebuilt later needs it too (round 8, new major 3);
+	// the lookout keeps every statement (round 9, new major 2).
 	bundleBudget = agent.MaxBundle - 64<<10
 	tested := func(sts []HostStatus) map[string]bool {
 		b, err := store.Bundle("mail", sts, fl.p)
@@ -115,31 +113,43 @@ func TestBundleInOrderOfNeed(t *testing.T) {
 	if got := tested(debian); len(got) != 0 {
 		t.Fatalf("a Debian machine got %d statements for Ubuntu's guards", len(got))
 	}
-	// A guard whose vendor's fixes cover every release it names is forgotten.
-	old, err := guard.Decode([]byte(`{"id":"test/old","version":1,"flaws":["CVE-2099-999"],"for":[{"os":"ubuntu","releases":["22.04","24.04"]}],
+	// A one-release guard whose until names its fixed build, still in
+	// -proposed, is kept: a machine added a month later gets its Tested. One
+	// rig's Tested for two systems are two statements, each reaching only
+	// its own system's machines (round 9, new major 2).
+	one, err := guard.Decode([]byte(`{"id":"test/one","version":1,"flaws":["CVE-2099-999"],"for":[{"os":"ubuntu","releases":["24.04"]},{"os":"debian","releases":["12"]}],
 		"blocks":[{"drop":{"family":"ipv4","protocol":"udp","ports":["9999"]}}],"breaks":"x",
-		"until":[{"os":"ubuntu","release":"22.04","kernel":"5.15.0-200.210"},{"os":"ubuntu","release":"24.04","kernel":"6.8.0-200.210"}]}`))
+		"until":[{"os":"ubuntu","release":"24.04","kernel":"6.8.0-200.210"},{"os":"debian","release":"12","kernel":"6.1.0-99"}]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.AddGuard(old.Canonical()); err != nil {
+	if _, err := store.AddGuard(one.Canonical()); err != nil {
 		t.Fatal(err)
 	}
-	sg, _ := approve.SignStatement(rig, approve.Statement{Version: approve.MemoVersion, Kind: approve.KindTested, Image: "ubuntu 24.04", Chain: "autopatch:vet", Guard: old.Hash(), Rig: strings.Repeat("0", 64)})
-	raw, _ := json.Marshal(sg)
-	if err := store.AddSigned(raw); err != nil {
-		t.Fatal(err)
+	for _, image := range []string{"ubuntu 24.04", "debian 12"} {
+		sg, _ := approve.SignStatement(rig, approve.Statement{Version: approve.MemoVersion, Kind: approve.KindTested, Image: image, Chain: "autopatch:vet", Guard: one.Hash(), Rig: strings.Repeat("0", 64)})
+		raw, _ := json.Marshal(sg)
+		if err := store.AddSigned(raw); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if n, err := store.Prune(); err != nil || n != 1 {
-		t.Fatalf("pruned %d for a guard every release has a fix for: %v", n, err)
+	images := func(sts []HostStatus) []string {
+		b, _ := store.Bundle("mail", sts, fl.p)
+		var bun agent.Bundle
+		json.Unmarshal(b, &bun)
+		var out []string
+		for _, sg := range bun.Signed {
+			if sg.Statement.Guard == one.Hash() {
+				out = append(out, sg.Statement.Image)
+			}
+		}
+		return out
 	}
-	if !Retired(old) {
-		t.Fatal("not retired")
+	if got := images(rebuilt); len(got) != 1 || got[0] != "ubuntu 24.04" {
+		t.Fatalf("the Ubuntu machine got %v", got)
 	}
-	if g, _ := guard.Decode([]byte(`{"id":"test/half","version":1,"flaws":["CVE-2099-998"],"for":[{"os":"ubuntu","releases":["22.04","24.04"]}],
-		"blocks":[{"drop":{"family":"ipv4","protocol":"udp","ports":["9998"]}}],"breaks":"x",
-		"until":[{"os":"ubuntu","release":"24.04","kernel":"6.8.0-200.210"}]}`)); Retired(g) {
-		t.Fatal("retired with one release still unfixed")
+	if got := images(debian); len(got) != 1 || got[0] != "debian 12" {
+		t.Fatalf("the Debian machine got %v", got)
 	}
 	_ = context.Background
 }

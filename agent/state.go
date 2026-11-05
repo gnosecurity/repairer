@@ -45,7 +45,10 @@ type Entry struct {
 	// Later is set for a guard that bites later than now. It gets one more
 	// window after its first boot (BootWindow while it runs), and Booted is
 	// set once health held through it: what a canary's "booted" says.
-	Later      bool `json:"later,omitempty"`
+	Later bool `json:"later,omitempty"`
+	// Observed counts the boots a watched guard (a keep, a strip) came back
+	// with while not yet booted; only its first makes a boot shared.
+	Observed   int  `json:"observed,omitempty"`
 	BootWindow bool `json:"boot_window,omitempty"`
 	Booted     bool `json:"booted,omitempty"`
 }

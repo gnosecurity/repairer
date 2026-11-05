@@ -176,9 +176,6 @@ func run(ctx context.Context, cmd string, args []string, stdout io.Writer) error
 		}
 		for {
 			sts := collect()
-			if n, err := store.Prune(); err == nil && n > 0 {
-				fmt.Fprintf(stdout, "forgot %d signed statements for guards whose fixes cover every release\n", n)
-			}
 			deliver(sts)
 			feedProblems()
 			select {

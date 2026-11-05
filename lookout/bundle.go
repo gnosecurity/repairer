@@ -80,7 +80,13 @@ func (s *Store) AddSigned(b []byte) error {
 	if sg.Statement.Kind == approve.KindHealthy {
 		return errors.New("lookout: Healthy comes from the canaries' reports")
 	}
-	name := sg.Statement.Guard + "-" + sg.Statement.Kind + "-" + sg.Key[:16] + ".json"
+	// A Tested names the system it ran on, and one signer's Tested for two
+	// systems are two statements (round 9, new major 2).
+	name := sg.Statement.Guard + "-" + sg.Statement.Kind + "-" + sg.Key[:16]
+	if sg.Statement.Image != "" {
+		name += "-" + strings.ReplaceAll(sg.Statement.Image, " ", "_")
+	}
+	name += ".json"
 	out, _ := json.Marshal(sg)
 	return s.put(s.path("signed", name), out)
 }
@@ -270,8 +276,9 @@ func (s *Store) addSignedFor(b *agent.Bundle, me *agent.FleetReport, fits func(a
 			confirmed[g.Hash] = true
 		}
 	}
-	// Statements for guards written for other systems would only crowd
-	// out the ones this machine needs: everything is kept now (Prune).
+	// Statements for guards written for other systems, and Tested for
+	// another system, would only crowd out the ones this machine needs: the
+	// lookout keeps every statement (round 9, new major 2).
 	forOthers := map[string]bool{}
 	other := func(h string) bool {
 		if me.Facts == nil || me.Facts.OS.ID == "" {
@@ -313,64 +320,15 @@ func (s *Store) addSignedFor(b *agent.Bundle, me *agent.FleetReport, fits func(a
 		if err := json.Unmarshal(raw, &sg); err != nil {
 			continue
 		}
+		if me.Facts != nil && me.Facts.OS.ID != "" && sg.Statement.Kind == approve.KindTested &&
+			sg.Statement.Image != me.Facts.OS.ID+" "+me.Facts.OS.Version {
+			continue // counts only on the system it names
+		}
 		if !addGuard(sg.Statement.Guard) || !fits(sg) {
 			break
 		}
 		b.Signed = append(b.Signed, sg)
 	}
-}
-
-// Prune forgets kept signed statements only for guards no machine can
-// still need: those whose vendors' fixed builds ("until") cover every
-// release they are written for. A guard every machine has confirmed is
-// kept: a machine added or rebuilt later needs its statements too, and so
-// does an On where an Off came before the guard did (round 8, new major 3).
-// Bundles go in order of need, so what is kept never crowds out what is
-// urgent.
-func (s *Store) Prune() (int, error) {
-	files, err := filepath.Glob(s.path("signed", "*.json"))
-	if err != nil {
-		return 0, err
-	}
-	retired := map[string]bool{}
-	n := 0
-	for _, f := range files {
-		h := strings.SplitN(filepath.Base(f), "-", 2)[0]
-		r, seen := retired[h]
-		if !seen {
-			if raw, err := s.Guard(h); err == nil {
-				if g, err := guard.Parse(raw); err == nil {
-					r = Retired(g)
-				}
-			}
-			retired[h] = r
-		}
-		if r && os.Remove(f) == nil {
-			n++
-		}
-	}
-	return n, nil
-}
-
-// Retired says whether a guard's fixed builds cover every release it is
-// written for: then a machine needs it only until it boots the vendor's
-// fix, which its own updates bring.
-func Retired(g *guard.Guard) bool {
-	if len(g.For) == 0 {
-		return false
-	}
-	for _, t := range g.For {
-		for _, r := range t.Releases {
-			fixed := false
-			for _, u := range g.Until {
-				fixed = fixed || (u.OS == t.OS && u.Release == r)
-			}
-			if !fixed {
-				return false
-			}
-		}
-	}
-	return true
 }
 
 // writtenFor says whether a guard is written for a system.

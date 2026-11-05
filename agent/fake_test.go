@@ -174,7 +174,7 @@ func (f *fakeSys) Run(_ context.Context, stdin []byte, prog string, args ...stri
 		if err := f.record(line); err != nil {
 			return nil, err
 		}
-		if u == nil {
+		if u == nil || args[0] == "daemon-reload" || args[0] == "enable" {
 			return nil, nil
 		}
 		verb := strings.Join(args[:len(args)-1], " ")

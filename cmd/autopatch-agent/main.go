@@ -9,6 +9,7 @@
 //	autopatch-agent status               the guards on, and what they stopped
 //	autopatch-agent check                compare live state with what was set
 //	autopatch-agent boot                 at boot: drop the unconfirmed, restore the rest
+//	autopatch-agent install              write and turn on the boot unit, firewall unit and check timer
 package main
 
 import (
@@ -35,6 +36,7 @@ const usage = `usage: autopatch-agent <command> [flags] [args]
   status               the guards on this machine, and the packets they stopped
   check                compare live state with what the guards set (-repair: put it back)
   boot                 at boot: take off what was never confirmed, put back what was
+  install              write and turn on the boot unit, the firewall unit and the check timer
 
 Every command takes -state-dir (default /var/lib/autopatch).
 `
@@ -188,7 +190,11 @@ func run(ctx context.Context, cmd string, args []string) error {
 		if err != nil {
 			return err
 		}
+		left := 0
 		for _, d := range drifts {
+			if !d.Repaired && !d.TakenOff {
+				left++
+			}
 			line := d.Guard + ": " + d.What
 			switch {
 			case d.Repaired:
@@ -200,13 +206,23 @@ func run(ctx context.Context, cmd string, args []string) error {
 			}
 			fmt.Println(line)
 		}
-		if len(drifts) > 0 {
-			return fmt.Errorf("%d differences", len(drifts))
+		switch {
+		case left > 0:
+			return fmt.Errorf("%d differences left", left)
+		case len(drifts) > 0:
+			fmt.Printf("%d differences, all repaired or taken off\n", len(drifts))
+		default:
+			fmt.Println("every guard is as set")
 		}
-		fmt.Println("every guard is as set")
 		return nil
 	case "boot":
 		return a.Boot(ctx)
+	case "install":
+		if err := a.Install(ctx, self); err != nil {
+			return err
+		}
+		fmt.Println("installed: autopatch-boot, autopatch-firewall and autopatch-check.timer")
+		return nil
 	}
 	fs.Usage()
 	return fmt.Errorf("unknown command %q", cmd)

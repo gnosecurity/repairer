@@ -749,3 +749,29 @@ func TestListeningSockets(t *testing.T) {
 		t.Fatalf("%v", got)
 	}
 }
+
+func TestInstall(t *testing.T) {
+	a, sys, _ := newAgent(t)
+	if err := a.Install(ctx, "/usr/bin/env"); err != nil {
+		t.Fatal(err)
+	}
+	boot := sys.files["/etc/systemd/system/autopatch-boot.service"]
+	fw := sys.files["/etc/systemd/system/autopatch-firewall.service"]
+	if !strings.Contains(boot, "ExecStart=/usr/bin/env boot -state-dir "+a.StateDir) || !strings.Contains(boot, "WantedBy=sysinit.target") {
+		t.Fatalf("boot unit:\n%s", boot)
+	}
+	// The firewall unit only repairs: a firewall restart during a trial
+	// must not run boot, which takes pending guards off.
+	if !strings.Contains(fw, "PartOf=nftables.service firewalld.service") || strings.Contains(fw, " boot ") || !strings.Contains(fw, "check -state-dir "+a.StateDir+" -repair") {
+		t.Fatalf("firewall unit:\n%s", fw)
+	}
+	if !strings.Contains(sys.files["/etc/systemd/system/autopatch-check.timer"], "OnUnitActiveSec=1min") {
+		t.Fatal("no minute timer")
+	}
+	if index(sys.log, "systemctl daemon-reload") < 0 || index(sys.log, "systemctl enable autopatch-boot.service") < 0 {
+		t.Fatalf("log %q", sys.log)
+	}
+	if err := a.Install(ctx, "/tmp/autopatch-agent"); err == nil {
+		t.Fatal("installed a binary from /tmp")
+	}
+}

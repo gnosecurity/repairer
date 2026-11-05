@@ -1,6 +1,7 @@
 package signer
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
@@ -13,6 +14,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/decred/dcrd/dcrec/secp256k1/v4"
+	"github.com/decred/dcrd/dcrec/secp256k1/v4/ecdsa"
 
 	"github.com/jaekwon/autopatch/approve"
 	"github.com/jaekwon/autopatch/guard"
@@ -217,6 +221,13 @@ func TestCheckReports(t *testing.T) {
 	if !c.Pending || c.OwnerSeq != 9 || len(c.Lines) != 2 || !strings.Contains(c.Lines[1], "PENDING") {
 		t.Fatalf("%+v", c)
 	}
+	// What a machine's last tick said of a reboot is shown to the owner.
+	owed := body("backup", now.Add(-time.Minute))
+	owed["tick"] = map[string]any{"Reboot": "a reboot into 6.8.0-149-generic is owed; this tier waits for your signed Reboot"}
+	writeReport(t, dir, keys["backup"], owed)
+	if c, err := CheckReports(dir, p, nil, now); err != nil || !strings.HasPrefix(c.Reboot["backup"], "a reboot into 6.8.0-149-generic is owed") || c.Reboot["mail"] != "" {
+		t.Fatalf("%v %+v", err, c)
+	}
 
 	bad := map[string]func(){
 		"stale":            func() { writeReport(t, dir, keys["mail"], body("mail", now.Add(-20*time.Minute))) },
@@ -299,7 +310,11 @@ func TestGnokeyGolden(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for name, st := range map[string]*Statement{"yes": yes, "off": off, "policy": pol, "yes again": again} {
+	reboot, err := PrepareReboot(old, "mail", "6.8.0-149-generic", time.Date(2026, 11, 6, 9, 0, 0, 0, time.UTC), 14)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, st := range map[string]*Statement{"yes": yes, "off": off, "policy": pol, "yes again": again, "reboot": reboot} {
 		signed, err := gk.Sign(context.Background(), st, owner(t))
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
@@ -447,5 +462,62 @@ func TestGnokeySkipsChain(t *testing.T) {
 	}
 	if err := os.WriteFile(filepath.Join(dir, "policy-unread.json"), unread, 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// The owner's Reboot: a host of the policy, a kernel release, a deadline on
+// a whole minute, and a memo in words. The tool's own check refuses a
+// signed file that names another kernel, though its signature is good.
+func TestPrepareReboot(t *testing.T) {
+	key := secp256k1.PrivKeyFromBytes(bytes.Repeat([]byte{9}, 32))
+	pub := key.PubKey().SerializeCompressed()
+	p, err := policy.Decode([]byte(`{"fleet":"test","replaces":"","delay_seconds":86400,
+		"signers":{"me":{"name":"owner","key":"` + hex.EncodeToString(pub) + `"}},
+		"tiers":[{"name":"A","hosts":["web"],"admit":["me"]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Date(2026, 11, 6, 9, 0, 0, 0, time.UTC)
+	st, err := PrepareReboot(p, "web", "6.8.0-149-generic", at, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Memo != "autopatch/1 Reboot web into 6.8.0-149-generic, once, not after 2026-11-06 09:00 UTC" || strings.Join(st.Args, " ") != "web 6.8.0-149-generic 1793955600" {
+		t.Fatalf("%q %q", st.Memo, st.Args)
+	}
+	sign := func(args []string, memo string) []byte {
+		const caller = "g1ss6w8xfy7vnp595yely63jqa8553k03mjcglen"
+		msg, err := approve.SignBytes(st.Chain, st.Seq, approve.Call{Caller: caller, Func: "Reboot", Args: args}, memo, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h := sha256.Sum256(msg)
+		tx, _ := json.Marshal(map[string]any{
+			"msg": []any{map[string]any{"@type": "/vm.m_call", "caller": caller, "send": "", "max_deposit": "",
+				"pkg_path": approve.Realm, "func": "Reboot", "args": args}},
+			"signatures": []any{map[string]any{"pub_key": map[string]any{"@type": "/tm.PubKeySecp256k1", "value": pub},
+				"signature": ecdsa.SignCompact(key, h[:], true)[1:]}},
+			"memo": memo,
+		})
+		return tx
+	}
+	if err := st.verify(sign(st.Args, st.Memo), pub); err != nil {
+		t.Fatal(err)
+	}
+	other := approve.Reboot{Host: "web", Kernel: "6.8.0-150-generic", NotAfter: at.Unix()}
+	memo, _ := approve.MemoReboot(other)
+	if err := st.verify(sign(other.Args(), memo), pub); err == nil || !strings.Contains(err.Error(), "says something else") {
+		t.Fatalf("another kernel: %v", err)
+	}
+	for name, bad := range map[string]func() (*Statement, error){
+		"a host the policy lacks": func() (*Statement, error) { return PrepareReboot(p, "mail", "6.8.0-149-generic", at, 5) },
+		"not a kernel release":    func() (*Statement, error) { return PrepareReboot(p, "web", "linux", at, 5) },
+		"between minutes": func() (*Statement, error) {
+			return PrepareReboot(p, "web", "6.8.0-149-generic", at.Add(time.Second), 5)
+		},
+	} {
+		if _, err := bad(); err == nil {
+			t.Errorf("%s: prepared", name)
+		}
 	}
 }

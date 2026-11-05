@@ -159,6 +159,34 @@ func PrepareCancel(cur *policy.Policy, pending string, seq uint64) (*Statement, 
 		}}, nil
 }
 
+// PrepareReboot readies the owner's Reboot: host may reboot into kernel,
+// once, at the first tick its gates pass before notAfter (a whole minute).
+func PrepareReboot(p *policy.Policy, host, kernel string, notAfter time.Time, seq uint64) (*Statement, error) {
+	if _, ok := p.TierOf(host); !ok {
+		return nil, fmt.Errorf("signer: the policy has no host %q", host)
+	}
+	r := approve.Reboot{Host: host, Kernel: kernel, NotAfter: notAfter.Unix()}
+	if _, err := approve.ParseReboot(approve.Call{Func: "Reboot", Args: r.Args()}); err != nil {
+		return nil, err
+	}
+	memo, err := approve.MemoReboot(r)
+	if err != nil {
+		return nil, err
+	}
+	chain, _, err := chainOf(p)
+	if err != nil {
+		return nil, err
+	}
+	return &Statement{Func: "Reboot", Args: r.Args(), Memo: memo, Chain: chain, Seq: seq,
+		verify: func(tx, owner []byte) error {
+			got, err := approve.VerifyReboot(tx, chain, seq, owner)
+			if err == nil && got != r {
+				err = errors.New("signer: the signed Reboot says something else")
+			}
+			return err
+		}}, nil
+}
+
 // PreparePolicy readies a policy change: the memo is the full diff against
 // the policy it replaces.
 func PreparePolicy(old, new *policy.Policy, seq uint64) (*Statement, error) {
@@ -354,6 +382,9 @@ type reportBody struct {
 		Hash string `json:"hash"`
 		Held bool   `json:"held"`
 	} `json:"on_the_way"`
+	Tick *struct {
+		Reboot string `json:"Reboot"`
+	} `json:"tick"`
 }
 
 // Checked is what the reports say, for the owner to read before signing.
@@ -368,6 +399,9 @@ type Checked struct {
 	// HeldByHand the guards root took off there by hand.
 	Off        map[string][]string
 	HeldByHand map[string][]string
+	// Reboot holds, for each machine, what its last tick said of a reboot
+	// into a newer kernel: owed and why it waits, or under way.
+	Reboot map[string]string
 }
 
 // CheckReports reads each machine's signed report from dir (<host>.json),
@@ -433,6 +467,12 @@ func CheckReports(dir string, keysFrom *policy.Policy, unchecked []string, now t
 				}
 				c.HeldByHand[k.Host] = append(c.HeldByHand[k.Host], w.Hash)
 			}
+		}
+		if r.Tick != nil && r.Tick.Reboot != "" {
+			if c.Reboot == nil {
+				c.Reboot = map[string]string{}
+			}
+			c.Reboot[k.Host] = r.Tick.Reboot
 		}
 		c.OwnerSeq = max(c.OwnerSeq, r.OwnerSeq)
 	}

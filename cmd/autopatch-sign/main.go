@@ -378,7 +378,9 @@ func standing(configDir string, p *policy.Policy, now time.Time, stdout io.Write
 		fmt.Fprintln(stdout, "No Yes of yours is in force.")
 		return nil
 	}
-	fmt.Fprintln(stdout, "Your Yeses in force; sign each again for a machine added or rebuilt:")
+	fmt.Fprintln(stdout, "Your Yeses in force; sign each again for a machine added or rebuilt.")
+	fmt.Fprintln(stdout, "A Yes signed again for a tier clears the guard's tries, asks and suspects on every")
+	fmt.Fprintln(stdout, "machine of that tier, so a guard that reached your ask elsewhere is tried again there:")
 	for _, s := range seqs {
 		y := yeses[s]
 		ts := tiers[s]

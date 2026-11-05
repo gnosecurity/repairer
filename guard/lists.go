@@ -198,8 +198,8 @@ func (b Block) Effect() Effect {
 
 // Later reports whether any of the guard's blocks bites later than now. A
 // guard that mixes the two counts as later as a whole, and waits for a
-// canary's boot; the realm and the rig refuse a mix, so that an urgent drop
-// never waits for one.
+// canary's boot; the rig refuses a mix, so that an urgent drop never waits
+// for one.
 func (g *Guard) Later() bool {
 	for _, b := range g.Blocks {
 		if b.Effect().Later() {
@@ -211,7 +211,8 @@ func (g *Guard) Later() bool {
 
 // Timing says when the guard bites, in words: "bites now", "bites later",
 // or "mixes blocks that bite now with ones that bite later", which the rig
-// and the realm refuse.
+// refuses (the transcript's one_timing check) and an agent treats as later.
+// The realm doesn't read guards; it keeps their bytes.
 func (g *Guard) Timing() string {
 	now, later := false, false
 	for _, b := range g.Blocks {

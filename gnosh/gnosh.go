@@ -2,9 +2,10 @@
 // advisories behind it, in plain words, and says yes, no or unsure. It sees
 // advisories and the guard, never the fleet's inventory. Its yes becomes a
 // signed ModelYes only through the launcher, outside its sandbox, and only
-// within rule 6: a guard made of drops, each narrowed by IP options or by
-// ports, never one of the model's own drafts. Whatever an advisory says to
-// the model, the launcher's rule decides what can be signed.
+// within rule 6: a guard made of drops, each narrowed by IP options (a drop
+// on ports counts again only once the minute-by-minute re-check exists),
+// never one of the model's own drafts. Whatever an advisory says to the
+// model, the launcher's rule decides what can be signed.
 package gnosh
 
 import (

@@ -102,25 +102,39 @@ func renderFiling(id int) string {
 			b.WriteString("- " + who + " " + link(c.owner) + ": " + shown(c) + "\n")
 		}
 	}
-	if len(f.panel) > 0 {
-		size := 0
-		if f.panelLevel < len(PanelSizes) {
-			size = PanelSizes[f.panelLevel]
+	if f.verdict != "" && (f.state == Agreed || f.state == Appealable) {
+		what := "Agreed"
+		if f.state == Appealable {
+			what = "A panel's word"
 		}
-		b.WriteString("\n## Panel of " + strconv.Itoa(size) + "\n\n")
-		for _, c := range f.panel {
+		b.WriteString("- " + what + ": `" + f.verdict + "`, final after height " + strconv.FormatInt(f.until, 10) + " unless someone objects or appeals\n")
+	}
+	if f.floor {
+		b.WriteString("- Decided passing while the live stake was under the floor: no level written\n")
+	}
+	if o := f.objector; o != nil {
+		b.WriteString("- Objected to by " + link(o.owner) + ": `" + o.transcript + "`\n")
+	}
+	for _, a := range f.appeals {
+		b.WriteString("- Appealed by " + link(a.who) + " against `" + a.against + "`\n")
+	}
+	for i, p := range f.panels {
+		size := PanelSizes[least2(i, len(PanelSizes)-1)]
+		b.WriteString("\n## Panel " + strconv.Itoa(i+1) + " (of " + strconv.Itoa(size) + ")\n\n")
+		for _, c := range p {
 			b.WriteString("- " + link(c.owner) + ": " + shown(c) + "\n")
 		}
 	}
-	if pv := votes[id]; pv != nil {
-		var revealed int64
-		for _, a := range pv.order {
-			if pv.voters[a].revealed {
-				revealed += pv.voters[a].stake
+	if v := votes[id]; v != nil {
+		b.WriteString("\n## The pool's vote\n\n- Opened at height " + strconv.FormatInt(v.open, 10) + "; " +
+			strconv.Itoa(v.committed) + " voters committed, " + strconv.FormatInt(v.revealed, 10) + " of " + strconv.FormatInt(v.total, 10) + " ugnot of stake revealed\n")
+		if v.closed {
+			if v.decided == "" {
+				b.WriteString("- Undecided: under two thirds revealed\n")
+			} else {
+				b.WriteString("- Decided: `" + v.decided + "`\n")
 			}
 		}
-		b.WriteString("\n## The pool's vote\n\n- Opened at height " + strconv.FormatInt(pv.open, 10) + "; " +
-			strconv.Itoa(len(pv.order)) + " voters, " + strconv.FormatInt(revealed, 10) + " of " + strconv.FormatInt(pv.total, 10) + " ugnot of stake revealed\n")
 	}
 	return b.String()
 }
@@ -177,4 +191,11 @@ func max3(n int) int {
 		return 3
 	}
 	return n
+}
+
+func least2(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

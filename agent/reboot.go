@@ -77,6 +77,21 @@ type rebootState struct {
 	// first reboot, then each that settled. Every reboot pins it as GRUB's
 	// default, never a kernel in Failed (round 14, new major 3).
 	Held string `json:"held,omitempty"`
+	// HeldVersion is the package version the held kernel held at: an
+	// update that keeps the release name replaces its files in place, and
+	// the name no longer holds (round 15, new major 3). KernelVersion is
+	// the version of the kernel a reboot boots, kept when it settles.
+	HeldVersion   string `json:"held_version,omitempty"`
+	KernelVersion string `json:"kernel_version,omitempty"`
+	// Marked are the held kernel's packages the agent marked manual so
+	// autoremove keeps them while another kernel runs; their marks are put
+	// back when a kernel settles (round 15, new major 2).
+	Marked []string `json:"marked,omitempty"`
+	// Back says the reboot under way goes back to the kernel that last held;
+	// NoBack, that one came up elsewhere (GRUB didn't boot the pin), so going
+	// back waits for the owner (round 15, new major 1).
+	Back   bool `json:"back,omitempty"`
+	NoBack bool `json:"no_back,omitempty"`
 	// The health window, judged as a boot's (bootgroup.go): the checks
 	// armed (passed since the boot, or out of their grace), each one's
 	// failures in a row, and when every check was armed (round 14, new major
@@ -234,14 +249,87 @@ func (a *Agent) rebootAsked() string {
 	return " (" + strings.Join(pkgs, ", ") + ")"
 }
 
-// newestKernel is the release of the newest installed kernel package.
-func (a *Agent) newestKernel(ctx context.Context) (string, error) {
+// kernels lists the installed kernel packages: the newest release, and
+// each release's package version.
+func (a *Agent) kernels(ctx context.Context) (string, map[string]string, error) {
 	out, err := a.Sys.Run(ctx, nil, "dpkg-query", "-W", "-f", "${Package} ${Version} ${db:Status-Abbrev}\n", "linux-image-[0-9]*")
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
-	_, rel := installedKernels(out)
-	return rel, nil
+	_, newest := installedKernels(out)
+	version := map[string]string{}
+	for _, l := range lines(out) {
+		if f := strings.Fields(l); len(f) >= 3 && f[2] == "ii" {
+			version[strings.TrimPrefix(f[0], "linux-image-")] = f[1]
+		}
+	}
+	return newest, version, nil
+}
+
+// keepKernel keeps a kernel's packages from autoremove while another kernel
+// runs: it marks manual those installed and marked auto, and says which.
+func (a *Agent) keepKernel(ctx context.Context, rel string) ([]string, error) {
+	pkgs := []string{"linux-image-" + rel, "linux-modules-" + rel, "linux-modules-extra-" + rel}
+	out, _ := a.Sys.Run(ctx, nil, "dpkg-query", append([]string{"-W", "-f", "${Package} ${db:Status-Abbrev}\n"}, pkgs...)...) // exits 1 for one not installed
+	var have []string
+	for _, l := range lines(out) {
+		if f := strings.Fields(l); len(f) >= 2 && f[1] == "ii" && contains(pkgs, f[0]) {
+			have = append(have, f[0])
+		}
+	}
+	if len(have) == 0 {
+		return nil, nil // a kernel no package owns: apt doesn't remove it
+	}
+	manual, err := a.Sys.Run(ctx, nil, "apt-mark", append([]string{"showmanual"}, have...)...)
+	if err != nil {
+		return nil, err
+	}
+	var mark []string
+	for _, p := range have {
+		if !contains(lines(manual), p) {
+			mark = append(mark, p)
+		}
+	}
+	if len(mark) == 0 {
+		return nil, nil
+	}
+	if _, err := a.Sys.Run(ctx, nil, "apt-mark", append([]string{"manual"}, mark...)...); err != nil {
+		return nil, err
+	}
+	return mark, nil
+}
+
+// unmark puts back the marks keepKernel changed, of the packages still
+// installed, once they no longer keep a fallback.
+func (a *Agent) unmark(ctx context.Context, st *rebootState) error {
+	if len(st.Marked) == 0 {
+		return nil
+	}
+	out, _ := a.Sys.Run(ctx, nil, "dpkg-query", append([]string{"-W", "-f", "${Package} ${db:Status-Abbrev}\n"}, st.Marked...)...)
+	var have []string
+	for _, l := range lines(out) {
+		if f := strings.Fields(l); len(f) >= 2 && f[1] == "ii" && contains(st.Marked, f[0]) {
+			have = append(have, f[0])
+		}
+	}
+	if len(have) > 0 {
+		if _, err := a.Sys.Run(ctx, nil, "apt-mark", append([]string{"auto"}, have...)...); err != nil {
+			return fmt.Errorf("putting back apt's marks of %s: %w", strings.Join(have, ", "), err)
+		}
+	}
+	st.Marked = nil
+	return nil
+}
+
+// ordered says whether the owner's unspent Reboot names rel within its
+// deadline now.
+func (st *rebootState) ordered(f *Fleet, now time.Time, rel string) bool {
+	for _, o := range f.Reboots {
+		if o.Seq > st.Spent && !now.After(o.NotAfter) && o.Kernel == rel {
+			return true
+		}
+	}
+	return false
 }
 
 // grubReady says why GRUB can't boot a new kernel once and come back from
@@ -284,6 +372,20 @@ func (a *Agent) grubReady(ctx context.Context) error {
 	}
 	if savedef == "true" {
 		return errors.New("GRUB_SAVEDEFAULT is true: GRUB would make the new kernel the default as it boots, before its health held")
+	}
+	// What GRUB boots by is grub.cfg, written by update-grub: the settings
+	// above count only once it ran (round 15, new major 1).
+	cfg, err := a.Sys.ReadFile("/boot/grub/grub.cfg")
+	if err != nil {
+		return fmt.Errorf("can't read grub.cfg: %v", err)
+	}
+	if !bytes.Contains(cfg, []byte(`set default="${saved_entry}"`)) {
+		return errors.New("grub.cfg doesn't boot the saved entry: GRUB_DEFAULT=saved takes effect only once update-grub runs; run update-grub")
+	}
+	for _, l := range lines(cfg) {
+		if l == "savedefault" {
+			return errors.New("grub.cfg's entries save themselves as the default (GRUB_SAVEDEFAULT took effect): remove it and run update-grub")
+		}
 	}
 	out, err := a.Sys.Run(ctx, nil, "findmnt", "-n", "-o", "FSTYPE,SOURCE", "--target", "/boot/grub")
 	f := strings.Fields(string(out))
@@ -393,6 +495,12 @@ func (a *Agent) rebootStep(ctx context.Context, f *Fleet, p *policy.Policy, samp
 				msg = "rebooted " + what() + "; its health window runs"
 			}
 			return msg, false, errors.Join(a.oneShotGone(ctx), a.saveReboot(st))
+		case booted && st.Back:
+			// GRUB booted something but the pin: going back again would loop
+			// (round 15, new major 1); it waits for the owner.
+			st.NoBack = true
+			st.fail(now, "the reboot back to "+st.Kernel+" came up on "+running+": GRUB didn't boot the pinned kernel, so going back waits for your signed Reboot")
+			return st.Why, false, errors.Join(a.oneShotGone(ctx), a.saveReboot(st))
 		case booted:
 			st.fail(now, st.Kernel+" didn't boot: back on "+running)
 			return st.Why, false, errors.Join(a.oneShotGone(ctx), a.saveReboot(st))
@@ -433,43 +541,102 @@ func (a *Agent) rebootStep(ctx context.Context, f *Fleet, p *policy.Policy, samp
 				return "", false, fmt.Errorf("making %s the default: %w", st.Kernel, err)
 			}
 		}
-		st.Held = st.Kernel
+		unmark := a.unmark(ctx, st) // the kernel that held before is no longer the fallback, or runs: its marks go back
+		st.Held, st.HeldVersion, st.NoBack = st.Kernel, st.KernelVersion, false
 		st.Phase, st.Since, st.Why, st.Armed, st.Streak = Settled, now, "", nil, nil
+		msg := "rebooted into " + running + "; it is the default now"
 		if st.Same {
-			return "rebooted " + what() + "; health held", false, a.saveReboot(st)
+			msg = "rebooted " + what() + "; health held"
 		}
-		return "rebooted into " + running + "; it is the default now", false, a.saveReboot(st)
+		if unmark != nil {
+			st.Why = unmark.Error()
+			msg += "; " + st.Why
+		}
+		return msg, false, a.saveReboot(st)
 	}
 
-	newest, err := a.newestKernel(ctx)
+	newest, versions, err := a.kernels(ctx)
 	if err != nil || newest == "" {
 		return "", false, nil
+	}
+	// Until its first reboot the agent takes the running kernel as the one
+	// that holds, at its package version as first seen, so an update that
+	// rebuilds it in place shows (round 15, new major 3).
+	if st.Phase == "" && versions[running] != "" && (st.Held != running || st.HeldVersion == "") {
+		st.Held, st.HeldVersion = running, versions[running]
+		if err := a.saveReboot(st); err != nil {
+			return "", false, err
+		}
+	}
+	// Marks a settled kernel no longer needs, left by a failed try.
+	var markErr error
+	if st.Phase == Settled && len(st.Marked) > 0 {
+		if markErr = a.unmark(ctx, st); markErr == nil {
+			st.Why = ""
+			if err := a.saveReboot(st); err != nil {
+				return "", false, err
+			}
+		}
 	}
 	held := st.Held
 	if held == "" {
 		held = running // before the first reboot, the running kernel is the one that holds
 	}
+	heldVersion := st.HeldVersion
+	if heldVersion == "" && held == running {
+		heldVersion = versions[held]
+	}
+	// The held kernel replaced in place by an update that kept its name
+	// (round 15, new major 3), or gone: its files removed (round 15, new
+	// major 2). A kernel no package owns has no version, and isn't rebuilt.
+	rebuilt := st.HeldVersion != "" && versions[held] != "" && versions[held] != st.HeldVersion
+	heldGone := false
+	if held != running {
+		for _, fl := range []string{"/boot/vmlinuz-" + held, "/boot/initrd.img-" + held} {
+			if fi, err := a.Sys.Stat(fl); err != nil || fi.Size() == 0 {
+				heldGone = true
+			}
+		}
+	}
 	// What is owed, in order: back to the kernel that last held, from one
-	// that failed its trial; a reboot into the newest kernel; or, with none
-	// newer, a plain reboot the system asks for, a canary's boot for its
-	// later guards, or the owner's Reboot of the running kernel.
+	// that failed its trial or when it is the newest; a reboot into the
+	// newest kernel; or, with none newer, a plain reboot the system asks
+	// for, a canary's boot for its later guards, or the owner's Reboot of
+	// the running kernel. Off the kernel that last held (on a kernel the
+	// agent didn't boot), the pin boots that one, so a plain reboot is a
+	// reboot back to it, and the owner's Reboot of the running kernel tries
+	// it as a new kernel (round 15, minor 1).
+	offHeld := held != running && !heldGone
 	var target, owed string
 	var why, whys []string // a reboot into a kernel that ran here: its reasons, for the record and in words
 	var entries []*Entry
 	var later, laterNames []string // later guards this canary must boot with
-	same, back := false, false
+	same, back, plain := false, false, false
 	switch {
-	case st.failed(running) && held != running:
+	case offHeld && (st.failed(running) || newest == held):
 		target, same, back = held, true, true
 		why = []string{"back to " + held}
 		owed = "a reboot back to " + held + " is owed: " + running + " failed its trial"
+		if !st.failed(running) {
+			owed = "a reboot back to " + held + ", the newest kernel and the one that last held, is owed: the agent didn't boot " + running
+		}
 	case newest != running:
 		target = newest
 		owed = "a reboot into " + newest + " is owed"
+	case offHeld && st.ordered(f, now, running):
+		target = running
+		owed = "a reboot into " + running + ", which the agent didn't boot, is owed: your Reboot names it, so it boots once and becomes the default once its health holds"
 	default:
-		target, same = running, true
+		target, same, plain = running, true, true
+		if offHeld {
+			target, back = held, true
+		}
 		if asked := a.rebootAsked(); asked != "" {
 			why, whys = append(why, "the system asked"), append(whys, "the system asks for one"+asked)
+		}
+		if rebuilt && held == running {
+			why = append(why, running+" rebuilt")
+			whys = append(whys, "the running kernel, "+running+", was replaced in place ("+st.HeldVersion+" to "+versions[running]+")")
 		}
 		if tier, ok := p.TierOf(f.Host); ok && contains(tier.Canaries, f.Host) {
 			if entries, _, err = a.Status(ctx); err != nil {
@@ -487,20 +654,54 @@ func (a *Agent) rebootStep(ctx context.Context, f *Fleet, p *policy.Policy, samp
 		}
 	}
 	use, notes := st.order(f, now, target)
+	if markErr != nil {
+		notes = append(notes, markErr.Error())
+	}
+	if use == nil { // said in every report, owed or not
+		switch {
+		case heldGone: // round 15, new major 2
+			n := "the kernel that last held, " + held + ", is gone"
+			if st.failed(running) {
+				n += ", and " + running + " failed its trial: a Reboot you sign of the newest kernel or of " + running + " goes ahead with " + running + " pinned as the fallback"
+			}
+			notes = append([]string{n}, notes...)
+		case plain && back:
+			notes = append([]string{"the agent didn't boot " + running + ": a reboot boots " + held + ", the kernel that last held, unless your Reboot names " + running + ", which tries it as a new kernel"}, notes...)
+		}
+	}
 	say := func(s string) string {
 		if s == "" {
 			return strings.Join(notes, "; ")
 		}
 		return strings.Join(append([]string{s}, notes...), "; ")
 	}
-	if same && !back {
+	if plain {
 		if len(why) == 0 {
 			if use == nil {
 				return say(""), false, nil // nothing owed
 			}
-			why, whys = []string{fmt.Sprintf("your Reboot #%d", use.Seq)}, []string{fmt.Sprintf("your Reboot #%d names the running kernel", use.Seq)}
+			why, whys = []string{fmt.Sprintf("your Reboot #%d", use.Seq)}, []string{fmt.Sprintf("your Reboot #%d names %s", use.Seq, target)}
 		}
 		owed = "a reboot is owed: " + strings.Join(whys, ", and ")
+		if back {
+			why = append([]string{"back to " + held}, why...)
+			owed += "; it boots " + held + ", the kernel that last held, not " + running + ", which the agent didn't boot"
+		}
+	}
+	if use == nil {
+		switch {
+		case rebuilt && plain && held == running: // the rebuild is in owed's words
+			return say(owed + "; with nothing to fall back on, it waits for your signed Reboot"), false, nil
+		case rebuilt:
+			return say(owed + "; the kernel that last held, " + held + ", was replaced in place (" + st.HeldVersion + " to " + versions[held] +
+				"): there is nothing to fall back on, so every reboot waits for your signed Reboot"), false, nil
+		case heldGone:
+			return say(owed + "; the kernel that last held, " + held + ", is gone: a reboot waits for your signed Reboot, with " + running + " pinned as the fallback"), false, nil
+		case st.failed(held):
+			return say(owed + "; the kernel that last held, " + held + ", failed since: a reboot waits for your signed Reboot"), false, nil
+		case back && st.NoBack:
+			return say(owed + "; GRUB didn't boot it the last time, so it waits for your signed Reboot"), false, nil
+		}
 	}
 	if use != nil {
 		owed += fmt.Sprintf("; your Reboot #%d allows it", use.Seq)
@@ -527,7 +728,7 @@ func (a *Agent) rebootStep(ctx context.Context, f *Fleet, p *policy.Policy, samp
 			}
 			// Once in 20 hours, so a window across midnight holds one reboot;
 			// going back from a kernel that failed its trial doesn't wait.
-			if !back && !st.Began.IsZero() && now.Sub(st.Began) < rebootGap {
+			if !(back && st.failed(running)) && !st.Began.IsZero() && now.Sub(st.Began) < rebootGap {
 				return say(owed + "; this machine rebooted less than 20 hours ago"), false, nil
 			}
 		}
@@ -564,14 +765,31 @@ func (a *Agent) rebootStep(ctx context.Context, f *Fleet, p *policy.Policy, samp
 	if err != nil {
 		return say(owed + "; can't read grub.cfg: " + err.Error()), false, nil
 	}
-	pinEntry, err := grubEntry(cfg, held)
-	if err != nil {
-		return say(owed + "; the kernel that last held, " + held + ", has no GRUB entry to fall back on: " + err.Error()), false, nil
+	fallback := held
+	if heldGone { // only with the owner's Reboot, above
+		fallback = running
 	}
-	for _, fl := range []string{"/boot/vmlinuz-" + held, "/boot/initrd.img-" + held} {
+	pinEntry, err := grubEntry(cfg, fallback)
+	if err != nil {
+		return say(owed + "; the kernel to fall back on, " + fallback + ", has no GRUB entry: " + err.Error()), false, nil
+	}
+	for _, fl := range []string{"/boot/vmlinuz-" + fallback, "/boot/initrd.img-" + fallback} {
 		if fi, err := a.Sys.Stat(fl); err != nil || fi.Size() == 0 {
-			return say(owed + "; the kernel that last held, " + held + ", is gone (" + fl + "): there is nothing to fall back on"), false, nil
+			return say(owed + "; the kernel to fall back on, " + fallback + ", is gone (" + fl + "): there is nothing to fall back on"), false, nil
 		}
+	}
+	// A reboot into another kernel keeps the fallback from autoremove while
+	// that kernel runs (round 15, new major 2).
+	marked := st.Marked
+	if target != fallback {
+		m, err := a.keepKernel(ctx, fallback)
+		if err != nil {
+			return say(owed + "; can't keep " + fallback + " from autoremove: " + err.Error()), false, nil
+		}
+		marked = append(marked, m...)
+	}
+	if fallback != held {
+		heldVersion = versions[fallback]
 	}
 	var newEntry string
 	if !same {
@@ -585,7 +803,8 @@ func (a *Agent) rebootStep(ctx context.Context, f *Fleet, p *policy.Policy, samp
 	}
 	*st = rebootState{Kernel: target, Entry: newEntry, Phase: Rebooting, Since: now, Began: now,
 		Failing: sortedKeys(sample), Failed: st.Failed, Spent: spent, Boot: a.bootID(), Same: same,
-		For: strings.Join(why, "; "), Held: held, Canary: later, CanaryBoots: st.CanaryBoots}
+		For: strings.Join(why, "; "), Held: fallback, HeldVersion: heldVersion, KernelVersion: versions[target],
+		Marked: marked, Back: back, NoBack: st.NoBack, Canary: later, CanaryBoots: st.CanaryBoots}
 	if err := a.saveReboot(st); err != nil {
 		return "", false, err
 	}

@@ -7,6 +7,7 @@
 //	autopatch-agent confirm HASH|ID      keep it on across reboots
 //	autopatch-agent undo    HASH|ID      take it off
 //	autopatch-agent status               the guards on, and what they stopped
+//	autopatch-agent report               this machine's facts for the lookout, as JSON
 //	autopatch-agent check                compare live state with what was set
 //	autopatch-agent boot                 at boot: drop the unconfirmed, restore the rest
 //	autopatch-agent install              write and turn on the boot unit, firewall unit and check timer
@@ -14,6 +15,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -34,6 +36,7 @@ const usage = `usage: autopatch-agent <command> [flags] [args]
   confirm HASH|ID      keep a pending guard on, across reboots
   undo    HASH|ID      take a guard off (-if-unconfirmed: only if not confirmed)
   status               the guards on this machine, and the packets they stopped
+  report               this machine's facts for the lookout, as JSON (reads only)
   check                compare live state with what the guards set (-repair: put it back)
   boot                 at boot: take off what was never confirmed, put back what was
   install              write and turn on the boot unit, the firewall unit and the check timer
@@ -87,7 +90,7 @@ func run(ctx context.Context, cmd string, args []string) error {
 		Timer:    agent.SystemdTimer{Sys: sys, Self: self, StateDir: *stateDir, Root: *root},
 		StateDir: *stateDir,
 	}
-	changes := cmd != "fmt" && cmd != "plan" && cmd != "status" && !(cmd == "check" && !*repair)
+	changes := cmd != "fmt" && cmd != "plan" && cmd != "status" && cmd != "report" && !(cmd == "check" && !*repair)
 	if changes && os.Geteuid() != 0 && *root == "" {
 		return errors.New(cmd + " changes the machine; run it as root")
 	}
@@ -214,6 +217,13 @@ func run(ctx context.Context, cmd string, args []string) error {
 		default:
 			fmt.Println("every guard is as set")
 		}
+		return nil
+	case "report":
+		b, err := json.MarshalIndent(a.Report(ctx), "", "  ")
+		if err != nil {
+			return err
+		}
+		fmt.Printf("%s\n", b)
 		return nil
 	case "boot":
 		return a.Boot(ctx)

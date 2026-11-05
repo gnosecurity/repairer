@@ -775,3 +775,55 @@ func TestInstall(t *testing.T) {
 		t.Fatal("installed a binary from /tmp")
 	}
 }
+
+func TestReportParsers(t *testing.T) {
+	vers, newest := installedKernels([]byte("linux-image-6.8.0-142-generic 6.8.0-142.142 ii \nlinux-image-6.8.0-149-generic 6.8.0-149.149 ii \nlinux-image-6.8.0-147-generic 6.8.0-147.147 iF \n"))
+	if strings.Join(vers, ",") != "6.8.0-142.142,6.8.0-149.149" || newest != "6.8.0-149-generic" {
+		t.Fatalf("kernels %v %q (a half-configured kernel isn't installed)", vers, newest)
+	}
+	missing := dkmsMissing([]byte("amdgpu/6.12.12, 6.8.0-137-generic, x86_64: installed\nmlnx-ofed/24.10, 6.8.0-149-generic, x86_64: built\n"), "6.8.0-149-generic")
+	if strings.Join(missing, ",") != "amdgpu,mlnx-ofed" {
+		t.Fatalf("dkms missing %v", missing)
+	}
+	last, kept := unattended([]byte("2026-10-21 06:12:01,123 INFO Starting unattended upgrades script\n" +
+		"2026-10-21 06:12:30,001 INFO Packages that are kept back: linux-image-generic openssl\n" +
+		"2026-11-04 06:40:02,500 INFO Starting unattended upgrades script\n" +
+		"2026-11-04 06:40:30,001 INFO Packages that are kept back: sudo\n"))
+	if last.Format(time.RFC3339) != "2026-11-04T06:40:02Z" || strings.Join(kept, ",") != "sudo" {
+		t.Fatalf("unattended %v %v", last, kept)
+	}
+	o := osFacts([]byte("ID=ubuntu\nVERSION_ID=\"24.04\"\nVERSION_CODENAME=noble\n"))
+	if o.ID != "ubuntu" || o.Version != "24.04" || o.Codename != "noble" {
+		t.Fatalf("os %+v", o)
+	}
+	a, sys, _ := newAgent(t)
+	sys.files["/usr/share/distro-info/ubuntu.csv"] = "version,codename,series,created,release,eol,eol-server,eol-esm\n" +
+		"24.04 LTS,Noble Numbat,noble,2023-10-12,2024-04-25,2029-05-31,2029-05-31,2034-04-25\n" +
+		"25.04,Plucky Puffin,plucky,2024-10-10,2025-04-17,2026-01-15\n"
+	if e := a.eol(o); e != "2029-05-31" {
+		t.Fatalf("eol %q", e)
+	}
+	if e := a.eol(OSFacts{ID: "ubuntu", Codename: "plucky"}); e != "2026-01-15" {
+		t.Fatalf("plucky eol %q", e)
+	}
+	pk := sourcePackages([]byte("openssl 3.0.13-0ubuntu3.5 ii\nopenssl 3.0.13-0ubuntu3.5 ii\nlinux 6.8.0-149.149 ii\nfoo 1 rc\n"))
+	if len(pk) != 2 || pk[0].Source != "linux" {
+		t.Fatalf("packages %+v", pk)
+	}
+}
+
+func TestProcAddr(t *testing.T) {
+	for in, want := range map[string]string{
+		"0100007F":                         "127.0.0.1",
+		"00000000":                         "0.0.0.0",
+		"0101A8C0":                         "192.168.1.1",
+		"00000000000000000000000000000000": "::",
+		"0000000000000000FFFF00000100007F": "127.0.0.1",
+		"00000000000000000000000001000000": "::1",
+	} {
+		a, ok := procAddr(in)
+		if !ok || a.String() != want {
+			t.Errorf("procAddr(%s) = %v %v, want %s", in, a, ok, want)
+		}
+	}
+}

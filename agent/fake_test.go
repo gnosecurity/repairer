@@ -24,6 +24,7 @@ type fakeSys struct {
 	inUse    map[string]string
 	modules  map[string]string // name: "loadable" or "builtin"
 	sshPorts []int
+	listen   []Listen
 	ephLo    int
 	ephHi    int
 	log      []string
@@ -291,6 +292,8 @@ func (f *fakeSys) Module(name string) (bool, bool, error) {
 func (f *fakeSys) RemoteAccessPorts() ([]int, error) { return f.sshPorts, nil }
 
 func (f *fakeSys) EphemeralPorts() (int, int, error) { return f.ephLo, f.ephHi, nil }
+
+func (f *fakeSys) Listening() ([]Listen, error) { return f.listen, nil }
 
 func (f *fakeSys) FileID(path string) (FileID, error) {
 	ff, ok := f.strips[path]

@@ -4,13 +4,16 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -57,6 +60,9 @@ type System interface {
 	// SameFile reports whether two paths, following symlinks, are the same
 	// file. A path that doesn't exist is the same as nothing.
 	SameFile(a, b string) (bool, error)
+	// Listening lists TCP and UDP sockets listening on an address other than
+	// loopback, with the process that holds each.
+	Listening() ([]Listen, error)
 }
 
 // FileID is what the agent knows of a file it strips.
@@ -331,6 +337,91 @@ func (l Linux) RemoteAccessPorts() ([]int, error) {
 		return ""
 	})
 	return ports, err
+}
+
+// Listening reads /proc/net/{tcp,tcp6,udp,udp6} for sockets listening on
+// an address other than loopback (TCP in LISTEN, UDP bound and unconnected),
+// and names each one's process.
+func (l Linux) Listening() ([]Listen, error) {
+	type sock struct {
+		Listen
+		inode string
+	}
+	var socks []sock
+	for _, src := range []struct{ proto, file, state string }{
+		{"tcp", "/proc/net/tcp", "0A"}, {"tcp", "/proc/net/tcp6", "0A"},
+		{"udp", "/proc/net/udp", "07"}, {"udp", "/proc/net/udp6", "07"},
+	} {
+		b, err := os.ReadFile(src.file)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		sc := bufio.NewScanner(bytes.NewReader(b))
+		for sc.Scan() {
+			f := strings.Fields(sc.Text())
+			if len(f) < 10 || f[3] != src.state {
+				continue
+			}
+			hexAddr, hexPort, ok := strings.Cut(f[1], ":")
+			if !ok {
+				continue
+			}
+			addr, ok := procAddr(hexAddr)
+			port, err := strconv.ParseUint(hexPort, 16, 16)
+			if !ok || err != nil || addr.IsLoopback() {
+				continue
+			}
+			socks = append(socks, sock{Listen{Proto: src.proto, Addr: addr.String(), Port: int(port)}, f[9]})
+		}
+	}
+	owner := map[string]string{}
+	scanProcs(func(pid string) string {
+		fds, err := os.ReadDir("/proc/" + pid + "/fd")
+		if err != nil {
+			return ""
+		}
+		for _, fd := range fds {
+			if t, err := os.Readlink("/proc/" + pid + "/fd/" + fd.Name()); err == nil && strings.HasPrefix(t, "socket:[") {
+				owner[strings.TrimSuffix(strings.TrimPrefix(t, "socket:["), "]")] = comm(pid)
+			}
+		}
+		return ""
+	})
+	seen := map[Listen]bool{}
+	var out []Listen
+	for _, s := range socks {
+		s.Process = owner[s.inode]
+		if !seen[s.Listen] {
+			seen[s.Listen] = true
+			out = append(out, s.Listen)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Port != out[j].Port {
+			return out[i].Port < out[j].Port
+		}
+		return out[i].Proto+out[i].Addr < out[j].Proto+out[j].Addr
+	})
+	return out, nil
+}
+
+// procAddr reads an address as /proc/net writes it: IPv4 as one 32-bit word
+// in host (little-endian) order, IPv6 as four such words.
+func procAddr(h string) (netip.Addr, bool) {
+	b, err := hex.DecodeString(h)
+	if err != nil || (len(b) != 4 && len(b) != 16) {
+		return netip.Addr{}, false
+	}
+	for i := 0; i < len(b); i += 4 {
+		b[i], b[i+1], b[i+2], b[i+3] = b[i+3], b[i+2], b[i+1], b[i]
+	}
+	if len(b) == 4 {
+		return netip.AddrFrom4([4]byte(b)), true
+	}
+	return netip.AddrFrom16([16]byte(b)).Unmap(), true
 }
 
 // listeningSockets reads /proc/net/tcp or tcp6 and returns each listening

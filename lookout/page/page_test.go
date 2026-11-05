@@ -89,7 +89,8 @@ func testPage(t *testing.T, w testWallet) (*Server, *httptest.Server, ed25519.Pr
 	rep := agent.FleetReport{Version: approve.MemoVersion, Kind: "report", Chain: approve.ChainID(owner, "home"), Host: "mail", Seq: 3,
 		Time: now.Add(-2 * time.Minute), Policy: p.Hash(),
 		Pending:  &agent.PendingReport{Hash: strings.Repeat("ab", 32), FirstSeen: now.Add(-time.Hour)},
-		OnTheWay: []agent.OnTheWay{{Hash: strings.Repeat("cd", 32), Name: "cve-2099-1/test v1", Ask: true, Last: "health failed 3 times in a row"}}}
+		OnTheWay: []agent.OnTheWay{{Hash: strings.Repeat("cd", 32), Name: "cve-2099-1/test v1", Ask: true, Last: "health failed 3 times in a row"}},
+		Hits:     []agent.HitResult{{Check: strings.Repeat("ef", 32), Name: "cve-2099-1/hit v1", Ran: now.Add(-time.Hour), Flag: true, Count: 1, Paths: []string{"/var/tmp/.s"}}}}
 	body, _ := json.Marshal(rep)
 	signed, _ := json.Marshal(approve.SignReport(key, body))
 	col := &lookout.Collector{Policy: p, Dir: t.TempDir(), Now: clock,
@@ -187,7 +188,8 @@ func TestSignInAndDashboard(t *testing.T) {
 	}
 	_, body = get(t, ts, "/admin", ck)
 	for _, want := range []string{"mail", "2 min ago", "PENDING", "waiting for you: health failed 3 times in a row", "cve-2099-1/test v1",
-		"<td>web</td>", "no agent key in the policy yet"} { // a machine that can't report yet is listed
+		"<td>web</td>", "no agent key in the policy yet", // a machine that can't report yet is listed
+		"was I hit: cve-2099-1/hit v1 (2026-11-05 11:00 UTC): FLAGGED, 1 found: /var/tmp/.s"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("the dashboard lacks %q", want)
 		}

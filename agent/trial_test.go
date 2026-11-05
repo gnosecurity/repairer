@@ -1058,6 +1058,50 @@ func (tr *trial) onAndConfirmedWhenReady(t *testing.T, g *guard.Guard) {
 	t.Fatalf("%s never went on", g.Name())
 }
 
+// A watched guard whose recorded check came back after its first boot, but
+// past its grace (a service slow to start), stays unbooted, and counts
+// toward a later boot's being shared once that check held just before it:
+// a block booting beside it isn't judged alone for what may be the strip's
+// doing, and counts no try (round 10, minor 7).
+func TestObservedSharesWhenItsCheckHeld(t *testing.T) {
+	const site2 = "203.0.113.6:443"
+	tr := newTrialTier(t, "backup", `"hosts":["backup","mail"]`, "", site2)
+	s := fusermountStrip(t, tr)
+	tr.tested(s)
+	tr.tick()
+	tr.onAndConfirmed(s)
+	tr.step(time.Minute)
+	if err := tr.a.Boot(ctx); err != nil { // its first boot: site fails past its grace
+		t.Fatal(err)
+	}
+	tr.fail[site] = "the strip broke this, until long after the boot"
+	for i := 0; i < 15; i++ {
+		tr.step(time.Minute)
+	}
+	delete(tr.fail, site) // it comes back by itself, too late to count as back
+	for i := 0; i < 50; i++ {
+		tr.step(time.Minute)
+	}
+	if e := tr.entry(s); e == nil || e.Booted {
+		t.Fatalf("the strip, its check back only after its grace: %+v", e)
+	}
+	w := ksmbdGuard(t)
+	tr.tested(w)
+	tr.onAndConfirmedWhenReady(t, w)
+	tr.step(time.Minute)
+	if err := tr.a.Boot(ctx); err != nil { // the strip's second boot, the block's first
+		t.Fatal(err)
+	}
+	tr.step(time.Minute)
+	tr.fail[site2] = "the block broke this, or the strip did"
+	for i := 0; i < 3; i++ {
+		tr.step(time.Minute)
+	}
+	if ev := tr.evidence(w); tr.entry(w) != nil || !ev.Suspect || ev.Tries != 0 {
+		t.Fatalf("the block beside a strip whose check held: on %v, suspect %v, tries %d", tr.entry(w) != nil, ev.Suspect, ev.Tries)
+	}
+}
+
 // A keep that goes on during another guard's window shares it: if that
 // window fails, no try is counted (round 7, minor 7).
 func TestKeepSharesTheWindow(t *testing.T) {

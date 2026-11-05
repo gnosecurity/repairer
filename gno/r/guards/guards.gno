@@ -5,22 +5,25 @@
 //     filings committed MinTicketAge blocks or more after it was staked, so
 //     names made for one attack can't check it.
 //   - A worker commits a filing with a bond: sha256 of its address, the
-//     guard's hash, its rig transcript's own commitment and a salt, so nobody
-//     can copy the filing from the mempool and claim it.
+//     guard's hash, the system its rig ran ("ubuntu 24.04"), its transcript's
+//     own commitment and a salt, so nobody can copy the filing from the
+//     mempool and claim it.
 //   - The reveal puts the guard on chain (at most 4,000 bytes) and fixes the
 //     drand evmnet round that will draw its checkers, DrawDelay rounds after
-//     the reveal's time, and the pool that round draws from: nobody can see
-//     the draw before revealing, pick a round, or change the pool after.
+//     the reveal's time, and the pool that round draws from (the version of
+//     the tree of stake sums current then): nobody can see the draw before
+//     revealing, pick a round, or change the pool after.
 //   - Three checkers are drawn by weight, one per owner, never the filer.
 //     They commit their transcripts, and once all are in, every transcript
 //     is opened, the worker's too, as "<hash> pass" or "<hash> fail".
 //   - Every transcript matches: agreed. For ObjectionWindow anyone may
 //     object with a bond and another transcript, which opens a dispute;
-//     otherwise Finalize ends it: passing, the guard is "tested" (the param
-//     lvl_<hash> light clients prove, written only while the live stake
-//     passes LevelFloor); failing, failed, and a level written before is
-//     pulled. Each checker is paid CheckFee from the bond, FundFee goes to
-//     the dispute fund, and the rest goes back.
+//     otherwise Finalize ends it: passing, the guard is "tested" on that
+//     system (the param lvl_<hash>_<system> light clients prove, written
+//     only while the live stake passes LevelFloor, and never over "pulled");
+//     failing, failed, and a level written before is pulled. Each checker is
+//     paid CheckFee from the bond, FundFee goes to the dispute fund, and the
+//     rest goes back.
 //   - One differs: a dispute (dispute.gno), then the pool's vote (pool.gno),
 //     with every bond and drawn ticket held until the last word.
 //   - A drawn checker who stays silent is fined NoShowFine: before the
@@ -95,12 +98,13 @@ const (
 )
 
 type check struct {
-	ticket     int // -1 for the worker's own transcript, -2 for an objector
+	ticket     int // -1 for the worker's own transcript, -2 for an objector; a panel's seat otherwise
 	owner      address
 	commitment string
 	transcript string
 	revealed   bool
-	prev       string // the transcript revealed in the run before this one
+	prev       string   // the transcript revealed in the run before this one
+	past       []string // every transcript revealed in earlier runs (round 10, minor 4)
 }
 
 type appeal struct {
@@ -116,9 +120,11 @@ type filing struct {
 	bond       int64
 	state      string
 	guardHash  string
-	oldBelow   int    // tickets staked by committed - MinTicketAge: its draws' pool
-	round      uint64 // the beacon round that draws it now
-	fixedAt    int64  // the height that round was fixed: the pool as it was then
+	system     string   // the system its transcripts are for: os-release ID and VERSION_ID
+	oldBelow   int      // tickets staked by committed - MinTicketAge: its draws' pool
+	round      uint64   // the beacon round that draws it now
+	fixedAt    int64    // the height that round was fixed
+	pool       *sumNode // the version of the tree of stake sums current then: every draw of the round reads it
 	draws      int
 	drawnAt    int64
 	allIn      int64            // height the last commitment of the run came in; 0 before
@@ -131,12 +137,13 @@ type filing struct {
 	// A dispute (dispute.gno): reruns by the same parties, then panels.
 	reruns     int
 	panelLevel int        // which of PanelSizes the next or current panel is
-	panels     [][]*check // every panel of the dispute, the current last
+	panels     [][]*check // every panel of the dispute, the current last; a check per seat
 	reserve    int64      // every panel's fees, set aside from the dispute fund
 	panelCost  int64      // what the fund set aside for this dispute (panels and the vote)
 	appeals    []appeal
-	taken      int64 // what the pool's vote took from voters who said otherwise
-	floor      bool  // decided passing while the live stake was under LevelFloor: no level written
+	lastWord   string // the last panel's word, which settles the money if the pool's vote can't
+	floor      bool   // decided passing while the live stake was under LevelFloor: no level written
+	pulled     bool   // decided passing after its level was pulled: the pull stands
 }
 
 // Record is an address's public record (rule 7).
@@ -163,6 +170,8 @@ var (
 
 // Commitment is what a filing, a check or a vote commits: sha256 of who,
 // what kind, the payload and a salt, so nobody can copy it and claim it.
+// A filing's payload is GuardHash(guard), its system and its transcript's
+// commitment, each followed by a zero byte but the last.
 func Commitment(who address, kind, payload, salt string) string {
 	sum := sha256.Sum256([]byte(string(who) + "\x00" + kind + "\x00" + payload + "\x00" + salt))
 	return hex.EncodeToString(sum[:])
@@ -176,9 +185,10 @@ func GuardHash(guard string) string {
 }
 
 // Commit files a guard's commitment, with the coins sent as its bond:
-// Commitment(filer, "guard", GuardHash(guard)+"\x00"+transcriptCommitment,
-// salt), where transcriptCommitment is Commitment(filer, "transcript",
-// transcript, salt2).
+// Commitment(filer, "guard", GuardHash(guard)+"\x00"+system+"\x00"+
+// transcriptCommitment, salt), where transcriptCommitment is
+// Commitment(filer, "transcript", transcript, salt2), and system is what the
+// rig ran, as its transcript names it ("ubuntu 24.04").
 func Commit(cur realm, commitment string) int {
 	if !isHex(commitment, 64) {
 		panic("guards: a commitment is 64 hex digits")
@@ -196,10 +206,11 @@ func Commit(cur realm, commitment string) int {
 	return id
 }
 
-// Reveal opens a filing within RevealWindow: the guard itself, and its
-// transcript's commitment (the transcript is opened with the checkers').
-// It fixes the beacon round that will draw the checkers, and the pool.
-func Reveal(cur realm, id int, guard, transcriptCommitment, salt string) {
+// Reveal opens a filing within RevealWindow: the guard itself, the system
+// its transcripts are for, and its transcript's commitment (the transcript
+// is opened with the checkers'). It fixes the beacon round that will draw
+// the checkers, and the pool.
+func Reveal(cur realm, id int, guard, system, transcriptCommitment, salt string) {
 	f := get(id)
 	who := caller(cur)
 	h := GuardHash(guard)
@@ -214,25 +225,28 @@ func Reveal(cur realm, id int, guard, transcriptCommitment, salt string) {
 		panic("guards: a guard is at most " + strconv.Itoa(MaxGuard) + " bytes")
 	case !isHex(transcriptCommitment, 64):
 		panic("guards: a commitment is 64 hex digits")
-	case Commitment(who, "guard", h+"\x00"+transcriptCommitment, salt) != f.commitment:
+	case !isSystem(system):
+		panic("guards: a system is its os-release ID and VERSION_ID, such as \"ubuntu 24.04\"")
+	case Commitment(who, "guard", h+"\x00"+system+"\x00"+transcriptCommitment, salt) != f.commitment:
 		panic("guards: that isn't what was committed")
 	}
-	f.guardHash = h
+	f.guardHash, f.system = h, system
 	keepGuard(id, h, strings.TrimSuffix(guard, "\n"))
 	f.checks = []*check{{ticket: -1, owner: who, commitment: transcriptCommitment}}
 	fixRound(f)
 	f.state = Revealed
-	chain.Emit("GuardRevealed", "filing", strconv.Itoa(id), "hash", h, "round", strconv.FormatUint(f.round, 10), "guard", strings.TrimSuffix(guard, "\n"))
+	chain.Emit("GuardRevealed", "filing", strconv.Itoa(id), "hash", h, "system", system, "round", strconv.FormatUint(f.round, 10), "guard", strings.TrimSuffix(guard, "\n"))
 }
 
 // fixRound fixes the beacon round of a filing's next draw, DrawDelay rounds
-// after the round in progress, and the pool it draws from: as of now.
+// after the round in progress, and the pool it draws from: the version of
+// the tree of stake sums current now, which nothing after can change.
 func fixRound(f *filing) {
 	r := int64(1)
 	if t := time.Now().Unix(); t > drandGenesis {
 		r = (t-drandGenesis)/drandPeriod + 1
 	}
-	f.round, f.fixedAt = uint64(r+DrawDelay), now()
+	f.round, f.fixedAt, f.pool = uint64(r+DrawDelay), now(), sumRoot
 }
 
 // Forfeit locks the bond of a filing not revealed in time.
@@ -280,7 +294,7 @@ func Draw(cur realm, id int) {
 	case now() > f.fixedAt+DrawDeadline:
 		panic("guards: the draw's deadline has passed; abandon it")
 	}
-	picks := pick(roundSig(f), "draw", id, f.draws, Checkers-(len(f.checks)-1), f, f.fixedAt)
+	picks := pick(roundSig(f), "draw", id, f.draws, Checkers-(len(f.checks)-1), f, false)
 	if picks == nil {
 		panic("guards: too few staked checkers for this filing")
 	}
@@ -306,11 +320,13 @@ func CommitCheck(cur realm, id int, commitment string) {
 	if !isHex(commitment, 64) {
 		panic("guards: a commitment is 64 hex digits")
 	}
-	ch := findIn(committers(f), who)
-	if ch.commitment != "" {
+	mine := findIn(committers(f), who)
+	if mine[0].commitment != "" {
 		panic("guards: already committed")
 	}
-	ch.commitment = commitment
+	for _, ch := range mine {
+		ch.commitment = commitment
+	}
 	for _, c := range committers(f) {
 		if c.commitment == "" {
 			return
@@ -333,14 +349,16 @@ func RevealCheck(cur realm, id int, transcript, salt string) {
 	case verdict(transcript) == "":
 		panic("guards: a transcript is its 64-hex hash and pass or fail")
 	}
-	ch := findIn(revealers(f), who)
-	if ch.revealed {
+	mine := findIn(revealers(f), who)
+	if mine[0].revealed {
 		panic("guards: already revealed")
 	}
-	if Commitment(who, kindOf(ch), transcript, salt) != ch.commitment {
+	if Commitment(who, kindOf(mine[0]), transcript, salt) != mine[0].commitment {
 		panic("guards: that isn't what was committed")
 	}
-	ch.transcript, ch.revealed = transcript, true
+	for _, ch := range mine {
+		ch.transcript, ch.revealed = transcript, true
+	}
 }
 
 // running says whether a run of commitments and reveals is under way.
@@ -364,13 +382,18 @@ func revealers(f *filing) []*check {
 	return f.checks
 }
 
-func findIn(cs []*check, who address) *check {
+// findIn is who's checks in a run: one, or a panel member's seats.
+func findIn(cs []*check, who address) []*check {
+	var mine []*check
 	for _, c := range cs {
 		if c.owner == who {
-			return c
+			mine = append(mine, c)
 		}
 	}
-	panic("guards: you weren't drawn for this filing")
+	if len(mine) == 0 {
+		panic("guards: you weren't drawn for this filing")
+	}
+	return mine
 }
 
 func kindOf(c *check) string {
@@ -477,7 +500,7 @@ func workerSilent(cur realm, f *filing, id int) string {
 		}
 	}
 	burned += bond
-	f.bond, f.state = 0, Forfeited
+	f.bond, f.state, f.pool = 0, Forfeited, nil
 	rec(f.filer).Forfeited++
 	chain.Emit("GuardForfeited", "filing", strconv.Itoa(id))
 	return f.state
@@ -495,7 +518,7 @@ func Object(cur realm, id int, transcript string) {
 		panic("guards: no agreement to object to")
 	case verdict(transcript) == "" || transcript == f.verdict:
 		panic("guards: an objection is another transcript, its 64-hex hash and pass or fail")
-	case onFiling(f, who):
+	case party(f, who):
 		panic("guards: a party can't object to its own filing")
 	}
 	f.objBond = received(ObjectionBond)
@@ -537,23 +560,64 @@ func abandon(cur realm, f *filing, id int) string {
 		release(c)
 	}
 	pay(cur, f.filer, bond)
-	f.bond, f.state = 0, Abandoned
+	f.bond, f.state, f.pool = 0, Abandoned, nil
 	chain.Emit("GuardAbandoned", "filing", strconv.Itoa(id))
 	return f.state
 }
 
-// final is a filing's last word, t: everyone who said t is paid, and
-// everyone who said otherwise loses its bond or Slash of its stake (the
-// worker, the checkers, an objector, every panelist of every panel, an
-// appellant who appealed t). Of what is taken, ShowShare percent goes to the
-// parties who said t (who showed it), as much as the fund set aside for
-// this dispute goes back to it (the losing side pays every panel and the
-// vote), and the rest is locked for good. Passing, the guard is tested and
-// its level written, if the live stake passes LevelFloor; failing, failed,
-// and a level written before is pulled.
+// final is a filing's last word, t: settle pays and charges everyone by
+// it, and the guard is tested or failed on the filing's system. Passing,
+// its level is written if the live stake passes LevelFloor, but never over
+// "pulled": a guard decided against comes back as a new version (round 10,
+// minor 5). Failing, a level written before is pulled.
 func final(cur realm, f *filing, id int, t string) string {
-	taken := f.taken
+	w := f.checks[0]
+	settle(cur, f, t)
+	if verdict(t) == "pass" {
+		f.state = Tested
+		switch {
+		case Level(f.guardHash, f.system) == Pulled:
+			f.pulled = true
+		case LiveStake() < LevelFloor:
+			f.floor = true
+		default:
+			setLevel(f.guardHash, f.system, Tested)
+		}
+		if said(w) == t {
+			rec(w.owner).Passed++
+		}
+	} else {
+		f.state = Failed
+		if Level(f.guardHash, f.system) == Tested {
+			setLevel(f.guardHash, f.system, Pulled) // decided against: light clients see it pulled
+		}
+		if said(w) == t {
+			rec(w.owner).Failed++
+		}
+	}
+	chain.Emit("GuardDecided", "filing", strconv.Itoa(id), "hash", f.guardHash, "system", f.system, "state", f.state)
+	return f.state
+}
+
+// settle pays and charges everyone on a filing by the word t: whoever said
+// t is paid, and whoever said otherwise loses its bond or Slash of its
+// stake: the worker, the checkers, an objector, every seat of every panel,
+// an appellant who appealed t. A party that said t but differed from it in
+// an earlier run pays the fund RerunFee for each such run. What is taken first pays the fund back what
+// this dispute cost it (the panels' fees it paid and the vote), so the
+// losing side pays them (round 10, new major 3); ShowShare percent of the
+// rest goes to the parties who said t (who showed it), or else to the
+// panel seats that did, and the rest is locked here for good.
+func settle(cur realm, f *filing, t string) {
+	var taken int64
 	var showers []address
+	faulted := map[address]bool{}
+	fault := func(a address) { // once per filing, however many seats
+		if !faulted[a] {
+			faulted[a] = true
+			rec(a).Faults++
+		}
+	}
 	w := f.checks[0]
 	if said(w) == t {
 		showers = append(showers, w.owner)
@@ -565,19 +629,22 @@ func final(cur realm, f *filing, id int, t string) string {
 				bond -= CheckFee
 			}
 		}
-		pay(cur, w.owner, bond)
+		owed := least(rerunsOwed(w, t), bond) // the reruns its own earlier runs caused
+		fund += owed
+		pay(cur, w.owner, bond-owed)
 	} else {
 		taken += f.bond // the worker said otherwise: its whole bond
-		rec(w.owner).Faults++
+		fault(w.owner)
 	}
 	f.bond = 0
 	for _, c := range f.checks[1:] {
 		if said(c) == t {
 			showers = append(showers, c.owner)
 			rec(c.owner).Checked++
+			fund += slash(c, rerunsOwed(c, t))
 		} else {
 			taken += slash(c, Slash)
-			rec(c.owner).Faults++
+			fault(c.owner)
 		}
 		release(c)
 	}
@@ -587,7 +654,7 @@ func final(cur realm, f *filing, id int, t string) string {
 			pay(cur, o.owner, f.objBond)
 		} else {
 			taken += f.objBond
-			rec(o.owner).Faults++
+			fault(o.owner)
 		}
 		f.objBond = 0
 	}
@@ -600,7 +667,7 @@ func final(cur realm, f *filing, id int, t string) string {
 				right = append(right, c.owner)
 			} else {
 				taken += slash(c, Slash)
-				rec(c.owner).Faults++
+				fault(c.owner)
 			}
 			release(c)
 		}
@@ -608,13 +675,18 @@ func final(cur realm, f *filing, id int, t string) string {
 	for i, a := range f.appeals { // kept, settled, for the filing's page
 		if a.against == t {
 			taken += a.bond // the appeal didn't change the word
+			fault(a.who)
 		} else {
 			pay(cur, a.who, a.bond)
 		}
 		f.appeals[i].bond = 0
 	}
+	spent := f.panelCost - f.reserve // the fees it paid out, and the vote
 	fund += f.reserve
 	f.reserve = 0
+	refill := least(taken, spent)
+	fund += refill
+	taken -= refill
 	if len(showers) == 0 {
 		showers = right // only a panel said it
 	}
@@ -625,43 +697,46 @@ func final(cur realm, f *filing, id int, t string) string {
 		}
 		taken -= each * int64(len(showers))
 	}
-	refill := least(taken, f.panelCost)
-	fund += refill
-	burned += taken - refill
-	f.taken = 0
-	if verdict(t) == "pass" {
-		f.state = Tested
-		if LiveStake() >= LevelFloor {
-			setLevel(f.guardHash, Tested)
-		} else {
-			f.floor = true
-		}
-		if said(w) == t {
-			rec(w.owner).Passed++
-		}
-	} else {
-		f.state = Failed
-		if Level(f.guardHash) == Tested {
-			setLevel(f.guardHash, Pulled) // decided against: light clients see it pulled
-		}
-		if said(w) == t {
-			rec(w.owner).Failed++
+	burned += taken
+	f.pool = nil
+}
+
+func setLevel(hash, system, level string) {
+	levels.Set(levelKey(hash, system), level)
+	params.SetString(levelKey(hash, system), level)
+}
+
+// levelKey is the param that holds a guard's level on one system:
+// lvl_<hash>_<id>-<version>, such as lvl_<hash>_ubuntu-24.04.
+func levelKey(hash, system string) string {
+	return "lvl_" + hash + "_" + strings.Replace(system, " ", "-", 1)
+}
+
+// Level is a guard's level on a system, as the param lvl_<hash>_<system>
+// that light clients prove holds it: "tested", "pulled", or "".
+func Level(guardHash, system string) string {
+	v, _ := params.GetString(levelKey(guardHash, system))
+	return v
+}
+
+// isSystem says whether s names a system as an os-release ID and
+// VERSION_ID: "ubuntu 24.04", "debian 12".
+func isSystem(s string) bool {
+	id, ver, ok := strings.Cut(s, " ")
+	if !ok || len(id) == 0 || len(id) > 32 || len(ver) == 0 || len(ver) > 16 || !(id[0] >= 'a' && id[0] <= 'z') || !(ver[0] >= '0' && ver[0] <= '9') {
+		return false
+	}
+	for _, c := range id {
+		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-') {
+			return false
 		}
 	}
-	chain.Emit("GuardDecided", "filing", strconv.Itoa(id), "hash", f.guardHash, "state", f.state)
-	return f.state
-}
-
-func setLevel(hash, level string) {
-	levels.Set(hash, level)
-	params.SetString("lvl_"+hash, level)
-}
-
-// Level is a guard's level, as the param lvl_<hash> that light clients
-// prove holds it: "tested", "pulled", or "".
-func Level(guardHash string) string {
-	v, _ := params.GetString("lvl_" + guardHash)
-	return v
+	for _, c := range ver {
+		if !(c >= '0' && c <= '9' || c == '.') {
+			return false
+		}
+	}
+	return true
 }
 
 // State says where a filing stands, the beacon round that draws it now,

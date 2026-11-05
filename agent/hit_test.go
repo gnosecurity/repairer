@@ -307,4 +307,24 @@ func TestHitPartialAndClipped(t *testing.T) {
 	if got := clip("/tmp/a\nb"+strings.Repeat("x", 300), maxHitPath); len(got) != maxHitPath || strings.ContainsRune(got, '\n') {
 		t.Fatalf("clip: %q", got)
 	}
+	var hr HitResult
+	hr.add("/tmp/" + strings.Repeat("y", 400))
+	if len(hr.Paths[0]) != maxHitPath {
+		t.Fatalf("a result's path wasn't clipped: %d bytes", len(hr.Paths[0]))
+	}
+	// processes that ended while find walked /proc aren't a failure
+	sys.failOn, sys.failWith = "find /proc", ": find: '/proc/4242/exe': No such file or directory"
+	if r := a.runCheck(ctx, mkCheck(t, check.DeletedExe, check.Args{})); r.Error != "" || r.Flag {
+		t.Fatalf("vanished processes: %+v", r)
+	}
+	sys.failWith = ": find: '/proc/1/exe': Permission denied"
+	if r := a.runCheck(ctx, mkCheck(t, check.DeletedExe, check.Args{})); r.Error == "" {
+		t.Fatalf("an unreadable /proc read as clean: %+v", r)
+	}
+	// a journal read to its cap says so
+	sys.failOn = ""
+	sys.runOut["journalctl --no-pager -q -o cat -n 100000 -u ssh.service --since @"+since] = strings.Repeat("line\n", maxJournal)
+	if r := a.runCheck(ctx, mkCheck(t, check.LogMatch, check.Args{Source: "unit:ssh.service", Pattern: "x", Since: since})); r.Capped != "lines" {
+		t.Fatalf("a journal at its cap: %+v", r)
+	}
 }

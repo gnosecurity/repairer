@@ -30,6 +30,7 @@ type fakeSys struct {
 	ephHi    int
 	log      []string
 	failOn   string            // a log line prefix whose call fails
+	failWith string            // added to that failure's message
 	onRun    func(line string) // called before each call is recorded
 	probeErr error
 	// noise counts a packet on this rule of every table during a probe,
@@ -111,7 +112,7 @@ func (f *fakeSys) record(line string) error {
 	}
 	f.log = append(f.log, line)
 	if f.failOn != "" && strings.HasPrefix(line, f.failOn) {
-		return fmt.Errorf("fake failure at %q", line)
+		return fmt.Errorf("fake failure at %q%s", line, f.failWith)
 	}
 	return nil
 }

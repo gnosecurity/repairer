@@ -68,7 +68,7 @@ type Evidence struct {
 	// Suspect is set when the guard came off with others in a window they
 	// shared (a boot's, or one a keep joined): no try is counted, and after
 	// a boot's, such guards come back one per boot, so the next boot judges
-	// each alone.
+	// each alone. The owner's On, or Yes for this tier, clears it.
 	Suspect bool `json:"suspect,omitempty"`
 	// Held is set when root took the guard off by hand: it stays off until
 	// the owner's On names this host. A Yes doesn't lift it.
@@ -78,6 +78,47 @@ type Evidence struct {
 	// canary may sign.
 	Refused     string `json:"refused,omitempty"`
 	RefusedCode string `json:"refused_code,omitempty"`
+	// Broke holds what a window or a boot this guard was part of broke: the
+	// checks that had held and then failed. Such a check counts in the
+	// guard's later windows even when their baseline has it failing (a unit
+	// can stay failed after the guard comes off), and while it fails the
+	// guard is never confirmed, booted or answered for (round 8, new major
+	// 1). A record from a window clears at a confirm with the check passing;
+	// one from a boot, only at a boot the check came back through.
+	Broke map[string]Broken `json:"broke,omitempty"`
+}
+
+// Broken is one check a guard's window or boot broke.
+type Broken struct {
+	Why    string    `json:"why"`
+	At     time.Time `json:"at"`
+	AtBoot bool      `json:"at_boot,omitempty"`
+}
+
+// noteBroke records checks (key to why) a window or a boot broke.
+func (ev *Evidence) noteBroke(broke map[string]string, at time.Time, atBoot bool) {
+	if len(broke) == 0 {
+		return
+	}
+	if ev.Broke == nil {
+		ev.Broke = map[string]Broken{}
+	}
+	for k, why := range broke {
+		ev.Broke[k] = Broken{Why: why, At: at.UTC(), AtBoot: atBoot}
+	}
+}
+
+// brokeFailing lists the checks recorded against the guard that fail in a
+// sample.
+func (ev *Evidence) brokeFailing(sample map[string]string) []string {
+	var out []string
+	for k := range ev.Broke {
+		if _, failing := sample[k]; failing {
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // yesFor returns the owner's newest Yes for a tier, if any.
@@ -209,7 +250,7 @@ func (a *Agent) Tick(ctx context.Context) (*TickResult, error) {
 		res.Refused = append(res.Refused, "keeping the health samples: "+err.Error())
 	}
 	err = a.advance(ctx, f, p, sample, res)
-	if werr := a.answerWants(ctx, f, p); werr != nil {
+	if werr := a.answerWants(ctx, f, p, sample); werr != nil {
 		res.Refused = append(res.Refused, "answering canaries' wants: "+werr.Error())
 	}
 	return res, errors.Join(err, a.writeReport(ctx, f, p, res))
@@ -291,7 +332,12 @@ func (a *Agent) advance(ctx context.Context, f *Fleet, p *policy.Policy, sample 
 			t.closeWindow() // the owner's Off, or a confirm by hand or by keep
 			a.saveEvidence(h, ev)
 		case on[h] == nil:
-			a.failWindow(h, ev, "its window ended without a verdict (the undo timer, a restart, or a hand took it off)", res)
+			why := "its window ended without a verdict (the undo timer, a restart, or a hand took it off)"
+			if t.Shared {
+				a.suspectWindow(h, ev, why+" (a keep went on during its window)", res) // round 8, minor 6
+			} else {
+				a.failWindow(h, ev, why, res)
+			}
 		}
 	}
 	// The guards a boot brought back share one window (bootgroup.go).
@@ -361,11 +407,13 @@ func (a *Agent) watch(ctx context.Context, e *Entry, ev *Evidence, checks []poli
 		t.Armed = map[string]bool{}
 	}
 	var bad []string
+	broke := map[string]string{}
 	settled := true
 	for _, h := range checks {
 		k := checkKey(h)
-		if n, sampled := t.Before[k]; !sampled || n > 0 {
-			continue // didn't hold in the baseline, or added since
+		_, recorded := ev.Broke[k]
+		if n, sampled := t.Before[k]; !recorded && (!sampled || n > 0) {
+			continue // didn't hold in the baseline, or added since, and this guard never broke it
 		}
 		why, failing := sample[k]
 		if !t.Armed[k] {
@@ -384,6 +432,7 @@ func (a *Agent) watch(ctx context.Context, e *Entry, ev *Evidence, checks []poli
 		}
 		if t.Streak[k] >= failRun {
 			bad = append(bad, k+": "+t.Why[k])
+			broke[k] = t.Why[k]
 		}
 	}
 	if settled && t.Settled.IsZero() {
@@ -401,6 +450,7 @@ func (a *Agent) watch(ctx context.Context, e *Entry, ev *Evidence, checks []poli
 			a.saveEvidence(e.Hash, ev)
 			return verdictNone
 		}
+		ev.noteBroke(broke, now, e.BootWindow)
 		why := fmt.Sprintf("health failed %d times in a row: %s", failRun, strings.Join(bad, "; "))
 		if t.Shared {
 			a.suspectWindow(e.Hash, ev, why+" (a keep went on during its window)", res)
@@ -415,6 +465,11 @@ func (a *Agent) watch(ctx context.Context, e *Entry, ev *Evidence, checks []poli
 			return verdictNone
 		}
 		t.closeWindow()
+		for k, b := range ev.Broke {
+			if _, failing := sample[k]; !failing && !b.AtBoot {
+				delete(ev.Broke, k) // passed through a whole window with the guard on
+			}
+		}
 		if !e.Later || e.Keep {
 			ev.Tries = 0 // fully on: the count starts again (a later guard's, at its boot)
 		}
@@ -479,14 +534,16 @@ func (a *Agent) next(ctx context.Context, f *Fleet, p *policy.Policy, entries []
 	// The boot slot: after a shared window after a boot failed, its guards
 	// come back one per boot. A suspect that bites at a boot goes on only
 	// when no other unbooted guard that bites at a boot is on, and while
-	// one is on, no other such guard goes on.
+	// one is on, no other such guard goes on. Only guards a boot opens a
+	// window for count: one root put on by hand never boots here, and would
+	// hold the slot for good (round 8, new major 4).
 	unbooted, suspectUnbooted := 0, false
 	for _, e := range entries {
 		on[e.Hash], ids[e.Guard.ID] = true, true
 		if e.By == "model" {
 			modelGuards = append(modelGuards, e.Guard.Flaws)
 		}
-		if e.Later && !e.Booted && !e.Keep && e.Guard.BitesAtBoot() {
+		if e.Later && !e.Booted && !e.Keep && e.By != "" && e.Guard.BitesAtBoot() {
 			unbooted++
 			if ev := evs[e.Hash]; ev != nil && ev.Suspect {
 				suspectUnbooted = true
@@ -557,14 +614,18 @@ func (a *Agent) next(ctx context.Context, f *Fleet, p *policy.Policy, entries []
 		}
 		cands = append(cands, candidate{h, ev, g, d.By, keep})
 	}
+	// Guards that aren't suspects go ahead of suspects, so a new guard
+	// waits at most one boot behind them (round 8, minor 5).
 	rank := func(c candidate) int {
 		switch {
 		case c.keep:
 			return 0
 		case c.ev.Trial != nil && c.ev.Trial.Samples > 0:
 			return 1
+		case !c.ev.Suspect:
+			return 2
 		}
-		return 2
+		return 3
 	}
 	sort.SliceStable(cands, func(i, j int) bool { return rank(cands[i]) < rank(cands[j]) })
 	for _, c := range cands {
@@ -981,8 +1042,8 @@ func (a *Agent) ownerMessage(ctx context.Context, f *Fleet, p *policy.Policy, bu
 		// On: back where the owner took it off, or held it after a hand
 		// took it off or its retries ran out; admission decides again.
 		f.Off = removeHash(f.Off, o.Hash)
-		if ev.Guard != nil || ev.Ask || ev.Held {
-			ev.Tries, ev.Ask, ev.Held, ev.RetryAt = 0, false, false, time.Time{}
+		if ev.Guard != nil || ev.Ask || ev.Held || ev.Suspect {
+			ev.Tries, ev.Ask, ev.Held, ev.Suspect, ev.RetryAt = 0, false, false, false, time.Time{}
 			if err := a.saveEvidence(o.Hash, ev); err != nil {
 				return what, "", err // a disk that won't write: try again next tick
 			}
@@ -1020,8 +1081,10 @@ func (a *Agent) ownerMessage(ctx context.Context, f *Fleet, p *policy.Policy, bu
 		}
 		if tier != nil && contains(y.Tiers, tier.Name) {
 			// The owner's fresh word for this machine's tier: the retries
-			// start again. It never lifts an Off or a hold by hand; On does.
-			ev.Tries, ev.Ask, ev.RetryAt = 0, false, time.Time{}
+			// start again, and a suspect may go on beside other guards
+			// (round 8, new major 4). It never lifts an Off or a hold by
+			// hand; On does.
+			ev.Tries, ev.Ask, ev.Suspect, ev.RetryAt = 0, false, false, time.Time{}
 		}
 		if err := a.saveEvidence(h, ev); err != nil {
 			return "", "", err

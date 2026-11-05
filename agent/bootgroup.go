@@ -74,12 +74,20 @@ type bootGroup struct {
 	// holds more than one guard: a failure then counts no try.
 	Shared bool `json:"shared,omitempty"`
 	// Armed: the check has passed since the boot, or its grace ran out.
-	// Passed: it has passed since the boot.
+	// Passed: it has passed since the boot. Back: it passed within its grace,
+	// so it came back through the boot by itself.
 	Armed   map[string]bool   `json:"armed,omitempty"`
 	Passed  map[string]bool   `json:"passed,omitempty"`
+	Back    map[string]bool   `json:"back,omitempty"`
 	Streak  map[string]int    `json:"streak,omitempty"`
 	Why     map[string]string `json:"why,omitempty"`
 	Settled time.Time         `json:"settled,omitzero"`
+}
+
+// shared says whether the window has more than one suspect: several guards,
+// windowed or watched (round 8, new major 1), or a keep that joined it.
+func (g *bootGroup) shared() bool {
+	return len(g.Windowed)+len(g.Observed) > 1 || g.Shared
 }
 
 func (a *Agent) openBootGroup(windowed, observed, cut []string, cutShared bool) error {
@@ -164,7 +172,9 @@ func (a *Agent) watchBootGroup(ctx context.Context, f *Fleet, checks []policy.He
 		on[e.Hash] = e
 	}
 	// A windowed guard no longer pending ended its window some other way:
-	// the undo timer, a restart, a hand, or the owner's Off.
+	// the undo timer, a restart, a hand, or the owner's Off. In a shared
+	// window that counts no try either (round 8, minor 6).
+	shared := g.shared()
 	var windowed []string
 	for _, h := range g.Windowed {
 		switch e := on[h]; {
@@ -174,7 +184,12 @@ func (a *Agent) watchBootGroup(ctx context.Context, f *Fleet, checks []policy.He
 			g.Observed = append(g.Observed, h) // kept during the window: watched, not judged
 		case e == nil && !containsHash(f.Off, h):
 			if ev := evs[h]; ev != nil && !ev.Held {
-				a.failWindow(h, ev, "its window after the boot ended without a verdict", res)
+				why := "its window after the boot ended without a verdict"
+				if shared {
+					a.suspectWindow(h, ev, why+" (shared with another guard of the boot)", res)
+				} else {
+					a.failWindow(h, ev, why, res)
+				}
 			}
 		}
 	}
@@ -197,6 +212,9 @@ func (a *Agent) watchBootGroup(ctx context.Context, f *Fleet, checks []policy.He
 	if g.Passed == nil {
 		g.Passed = map[string]bool{}
 	}
+	if g.Back == nil {
+		g.Back = map[string]bool{}
+	}
 	if g.Streak == nil {
 		g.Streak = map[string]int{}
 	}
@@ -207,16 +225,30 @@ func (a *Agent) watchBootGroup(ctx context.Context, f *Fleet, checks []policy.He
 		g.Before = map[string]int{}
 	}
 	now := a.now()
+	// A check a windowed guard broke before counts even if it was failing
+	// before this boot: a unit can stay failed after the guard comes off.
+	recorded := map[string]bool{}
+	for _, h := range g.Windowed {
+		if ev := evs[h]; ev != nil {
+			for k := range ev.Broke {
+				recorded[k] = true
+			}
+		}
+	}
 	var bad []string
+	broke := map[string]string{}
 	settled, allPassed := true, true
 	for _, h := range checks {
 		k := checkKey(h)
-		if n, sampled := g.Before[k]; g.Sampled && (!sampled || n > 0) {
-			continue // didn't hold before the boot, or wasn't checked then
-		}
 		why, failing := sample[k]
 		if !failing {
 			g.Passed[k] = true
+			if now.Sub(g.At) < time.Duration(h.Grace())*time.Second {
+				g.Back[k] = true
+			}
+		}
+		if n, sampled := g.Before[k]; !recorded[k] && g.Sampled && (!sampled || n > 0) {
+			continue // didn't hold before the boot, or wasn't checked then
 		}
 		if !g.Passed[k] {
 			allPassed = false
@@ -237,6 +269,7 @@ func (a *Agent) watchBootGroup(ctx context.Context, f *Fleet, checks []policy.He
 		}
 		if g.Streak[k] >= failRun {
 			bad = append(bad, k+": "+g.Why[k])
+			broke[k] = g.Why[k]
 		}
 	}
 	if settled && g.Settled.IsZero() {
@@ -244,25 +277,47 @@ func (a *Agent) watchBootGroup(ctx context.Context, f *Fleet, checks []policy.He
 	}
 	stamp := now.UTC().Format(time.RFC3339)
 	// The observed guards (keep, strips) count as booted once every check
-	// that held has passed since the boot, and only when no windowed guard
-	// of this boot is still waiting for its verdict; nothing takes them off.
-	if allPassed && len(g.Windowed) == 0 {
+	// that held has passed since the boot, and every check one of them broke
+	// before came back through this boot; and only when no windowed guard of
+	// this boot is still waiting for its verdict. Nothing takes them off.
+	if len(bad) == 0 && len(g.Windowed) == 0 {
+		var still []string
 		for _, h := range g.Observed {
+			ev := evs[h]
+			ready := allPassed
+			if ev != nil {
+				for k := range ev.Broke {
+					ready = ready && g.Back[k]
+				}
+			}
+			if !ready {
+				still = append(still, h)
+				continue
+			}
 			if err := a.MarkBooted(ctx, h); err != nil {
 				return true, err
 			}
-			if ev := evs[h]; ev != nil {
-				ev.Tries, ev.Last = 0, "booted "+stamp
+			if ev != nil {
+				ev.Tries, ev.Last, ev.Broke = 0, "booted "+stamp, nil
 				a.saveEvidence(h, ev)
 			}
 		}
-		g.Observed = nil
+		g.Observed = still
 	}
 	switch {
 	case len(bad) > 0:
 		sort.Strings(bad)
 		why := fmt.Sprintf("the window after the boot failed, %d times in a row: %s", failRun, strings.Join(bad, "; "))
-		shared := len(g.Windowed) > 1 || g.Shared
+		shared = g.shared() // the observed guards count: any of them may have broken it
+		// What this boot broke is recorded against every guard it brought
+		// back, so none of them is booted while the check stays failed.
+		for _, h := range g.Observed {
+			if ev := evs[h]; ev != nil {
+				ev.noteBroke(broke, now, true)
+				ev.Last = "not booted: " + why + " (" + stamp + ")"
+				a.saveEvidence(h, ev)
+			}
+		}
 		for _, h := range g.Windowed {
 			if _, err := a.Undo(ctx, h, false); err != nil {
 				res.Refused = append(res.Refused, h[:12]+": taking it off: "+err.Error())
@@ -272,6 +327,7 @@ func (a *Agent) watchBootGroup(ctx context.Context, f *Fleet, checks []policy.He
 			if ev == nil {
 				continue
 			}
+			ev.noteBroke(broke, now, true)
 			if shared {
 				a.suspectWindow(h, ev, why+" (shared with another guard of the boot)", res)
 			} else {
@@ -288,6 +344,11 @@ func (a *Agent) watchBootGroup(ctx context.Context, f *Fleet, checks []policy.He
 			}
 			if ev := evs[h]; ev != nil {
 				ev.Tries, ev.Suspect, ev.Last = 0, false, "confirmed after a boot "+stamp
+				for k := range ev.Broke {
+					if g.Back[k] {
+						delete(ev.Broke, k)
+					}
+				}
 				a.saveEvidence(h, ev)
 			}
 			res.Confirmed = append(res.Confirmed, on[h].Guard.Name())

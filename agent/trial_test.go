@@ -1159,3 +1159,338 @@ func TestObservedWaitsForTheVerdict(t *testing.T) {
 		t.Fatalf("the kept guard after the verdict: %+v", e)
 	}
 }
+
+// fusermountStrip is a strip of fusermount3's setuid bit: what a unit that
+// mounts a share as a plain user needs at boot.
+func fusermountStrip(t *testing.T, tr *trial) *guard.Guard {
+	tr.sys.addFile("/usr/bin/fusermount3", 0o4755)
+	return parse(t, `{"id": "test/fusermount3", "version": 1, "flaws": ["CVE-2099-32"],
+		"for": [{"os": "ubuntu", "releases": ["24.04"]}],
+		"blocks": [{"strip": {"path": "/usr/bin/fusermount3"}}], "breaks": "fusermount3 for plain users"}`)
+}
+
+// The strip breaks a unit at a boot, and the unit stays failed, so at the
+// next boot it was failing before too. The check is recorded against the
+// strip, which is booted only at a boot the check comes back through; the
+// canary answers nothing for it meanwhile (round 8, new major 1).
+func TestStripBrokeAtBootNeverBooted(t *testing.T) {
+	tr := newTrial(t, "backup", "")
+	s := fusermountStrip(t, tr)
+	tr.tested(s)
+	tr.tick()
+	tr.onAndConfirmed(s)
+	tr.deliver(Bundle{Wants: []Want{{Guard: s.Hash(), Nonce: strings.Repeat("ab", 16)}}})
+	tr.step(time.Minute)
+	if h := tr.report("backup").Healthy; len(h) != 1 || h[0].Statement.State != approve.StateOn {
+		t.Fatalf("before the boot: %+v", h)
+	}
+	key := "tcp " + site + " "
+	if err := tr.a.Boot(ctx); err != nil {
+		t.Fatal(err)
+	}
+	tr.fail[site] = "the backup share's mount failed"
+	for i := 0; i < 40; i++ {
+		tr.step(time.Minute)
+	}
+	if e := tr.entry(s); e == nil || e.Booted {
+		t.Fatalf("booted with its unit failed: %+v", e)
+	}
+	if _, ok := tr.evidence(s).Broke[key]; !ok {
+		t.Fatalf("not recorded: %+v", tr.evidence(s).Broke)
+	}
+	if h := tr.report("backup").Healthy; len(h) != 0 {
+		t.Fatalf("the canary answered for it: %+v", h)
+	}
+	if err := tr.a.Boot(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 90; i++ {
+		tr.step(time.Minute)
+		if e := tr.entry(s); e.Booted {
+			t.Fatalf("booted at minute %d of the next boot, with its unit still failed", i+1)
+		}
+	}
+	delete(tr.fail, site) // fixed by hand, with the strip on: not yet
+	tr.step(time.Minute)
+	if e := tr.entry(s); e.Booted {
+		t.Fatal("booted without a boot")
+	}
+	if err := tr.a.Boot(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		tr.step(time.Minute)
+	}
+	if e := tr.entry(s); !e.Booted || len(tr.evidence(s).Broke) != 0 {
+		t.Fatalf("after a boot the check came back through: %+v, broke %+v", e, tr.evidence(s).Broke)
+	}
+}
+
+// A module block whose unit stays failed after the undo: each retry counts
+// the recorded check though its baseline has it failing, so the block is
+// never confirmed again, and its retries end in the owner's ask (round 8,
+// new major 1).
+func TestModuleBlockBrokeAtBootReachesAsk(t *testing.T) {
+	tr := newTrial(t, "backup", "")
+	w := ksmbdGuard(t)
+	tr.tested(w)
+	tr.tick()
+	tr.onAndConfirmed(w)
+	tr.step(time.Minute)
+	if err := tr.a.Boot(ctx); err != nil {
+		t.Fatal(err)
+	}
+	tr.fail[site] = "the unit that needs the module hit its start limit"
+	for i := 0; i < 15; i++ {
+		tr.step(time.Minute)
+	}
+	if ev := tr.evidence(w); tr.entry(w) != nil || ev.Tries != 1 || len(ev.Broke) != 1 {
+		t.Fatalf("after its boot: on %v, tries %d, broke %+v", tr.entry(w) != nil, ev.Tries, ev.Broke)
+	}
+	for i := 0; i < 8*60 && !tr.evidence(w).Ask; i++ {
+		tr.step(time.Minute)
+		if e := tr.entry(w); e != nil && e.Status == Confirmed {
+			t.Fatalf("confirmed at minute %d with the check it broke still failing", i+1)
+		}
+	}
+	if ev := tr.evidence(w); !ev.Ask || ev.Tries != len(retries)+1 {
+		t.Fatalf("never reached the ask: ask %v, tries %d", ev.Ask, ev.Tries)
+	}
+}
+
+// bothOn puts two guards on, the first by hash first.
+func (tr *trial) bothOn(x, y *guard.Guard) {
+	tr.t.Helper()
+	first, second := x, y
+	if y.Hash() < x.Hash() {
+		first, second = y, x
+	}
+	tr.onAndConfirmed(first)
+	tr.onAndConfirmed(second)
+}
+
+// A strip watched at a boot makes the boot's window shared: when a check
+// breaks, the module block in the window is a suspect, not blamed alone,
+// and the check is recorded against both (round 8, new major 1).
+func TestWatchedGuardsShareTheBoot(t *testing.T) {
+	tr := newTrial(t, "backup", "")
+	s, w := fusermountStrip(t, tr), ksmbdGuard(t)
+	tr.tested(s)
+	tr.tested(w)
+	tr.tick()
+	tr.bothOn(s, w)
+	tr.step(time.Minute)
+	if err := tr.a.Boot(ctx); err != nil {
+		t.Fatal(err)
+	}
+	tr.step(time.Minute)
+	tr.fail[site] = "broken at the boot"
+	for i := 0; i < 3; i++ {
+		tr.step(time.Minute)
+	}
+	if ev := tr.evidence(w); tr.entry(w) != nil || !ev.Suspect || ev.Tries != 0 || len(ev.Broke) != 1 {
+		t.Fatalf("the block: on %v, suspect %v, tries %d, broke %+v", tr.entry(w) != nil, ev.Suspect, ev.Tries, ev.Broke)
+	}
+	if e, ev := tr.entry(s), tr.evidence(s); e == nil || e.Booted || len(ev.Broke) != 1 {
+		t.Fatalf("the strip: %+v, broke %+v", e, ev.Broke)
+	}
+}
+
+// Two later guards share a boot's window, and the ticks stop until both
+// undo timers fire: the shared window ended without a verdict, so neither
+// counts a try (round 8, minor 6).
+func TestSharedBootWindowTimerCountsNoTry(t *testing.T) {
+	tr := newTrial(t, "backup", "")
+	x, y := mptcpGuard(t), ksmbdGuard(t)
+	tr.tested(x)
+	tr.tested(y)
+	tr.tick()
+	tr.bothOn(x, y)
+	tr.step(time.Minute)
+	if err := tr.a.Boot(ctx); err != nil {
+		t.Fatal(err)
+	}
+	tr.step(time.Minute)
+	for _, g := range []*guard.Guard{x, y} {
+		if _, err := tr.a.Undo(ctx, g.Hash(), true); err != nil { // the undo timers fire
+			t.Fatal(err)
+		}
+	}
+	tr.step(time.Minute)
+	for _, g := range []*guard.Guard{x, y} {
+		if ev := tr.evidence(g); tr.entry(g) != nil || !ev.Suspect || ev.Tries != 0 {
+			t.Fatalf("%s: on %v, suspect %v, tries %d", g.Name(), tr.entry(g) != nil, ev.Suspect, ev.Tries)
+		}
+	}
+}
+
+// moduleGuard blocks a loadable module of the fake machine.
+func moduleGuard(t *testing.T, tr *trial, name string) *guard.Guard {
+	tr.sys.modules[name] = "loadable"
+	return parse(t, `{"id": "test/`+name+`", "version": 1, "flaws": ["CVE-2099-33"],
+		"for": [{"os": "ubuntu", "releases": ["24.04"]}],
+		"blocks": [{"module": {"name": "`+name+`"}}], "breaks": "the `+name+` module"}`)
+}
+
+// sharedSuspects puts x and y on, boots, and fails the boot's shared window:
+// both come off as suspects.
+func (tr *trial) sharedSuspects(x, y *guard.Guard) {
+	tr.t.Helper()
+	tr.tested(x)
+	tr.tested(y)
+	tr.tick()
+	tr.bothOn(x, y)
+	tr.step(time.Minute)
+	if err := tr.a.Boot(ctx); err != nil {
+		tr.t.Fatal(err)
+	}
+	tr.step(time.Minute)
+	tr.fail[site] = "broken after the boot"
+	for i := 0; i < 3; i++ {
+		tr.step(time.Minute)
+	}
+	for _, g := range []*guard.Guard{x, y} {
+		if ev := tr.evidence(g); tr.entry(g) != nil || !ev.Suspect {
+			tr.t.Fatalf("%s isn't a suspect: on %v", g.Name(), tr.entry(g) != nil)
+		}
+	}
+	delete(tr.fail, site)
+}
+
+// A later guard root put on by hand never gets a window at a boot, so it
+// doesn't fill the one-per-boot slot: the first suspect still comes back
+// after its wait (round 8, new major 4).
+func TestHandGuardLeavesTheSlot(t *testing.T) {
+	tr := newTrial(t, "backup", "")
+	hand := moduleGuard(t, tr, "cramfs")
+	if _, err := tr.a.Apply(ctx, hand, ApplyOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tr.a.Confirm(ctx, hand.Hash()); err != nil {
+		t.Fatal(err)
+	}
+	x, y := mptcpGuard(t), ksmbdGuard(t)
+	tr.sharedSuspects(x, y)
+	for i := 0; i < 30; i++ {
+		tr.step(time.Minute)
+		if tr.entry(x) != nil || tr.entry(y) != nil {
+			return
+		}
+	}
+	t.Fatalf("no suspect came back beside a guard put on by hand: %+v", tr.step(time.Minute).Waiting)
+}
+
+// A new guard that bites at a boot goes ahead of the suspects still
+// waiting: it waits at most one boot (round 8, minor 5).
+func TestNewGuardAheadOfSuspects(t *testing.T) {
+	tr := newTrial(t, "backup", "")
+	x, y := mptcpGuard(t), ksmbdGuard(t)
+	tr.sharedSuspects(x, y)
+	var back, waiting *guard.Guard
+	for i := 0; i < 30 && back == nil; i++ {
+		tr.step(time.Minute)
+		for _, g := range []*guard.Guard{x, y} {
+			if e := tr.entry(g); e != nil && e.Status == Confirmed {
+				back = g
+			}
+		}
+	}
+	if back == nil {
+		t.Fatal("no suspect came back")
+	}
+	waiting = x
+	if back == x {
+		waiting = y
+	}
+	// A new guard whose hash sorts after the waiting suspect's.
+	var z *guard.Guard
+	for _, name := range []string{"cramfs", "freevxfs", "jffs2", "hfs", "hfsplus", "udf", "squashfs", "affs", "befs", "sysv"} {
+		if g := moduleGuard(t, tr, name); g.Hash() > waiting.Hash() {
+			z = g
+			break
+		}
+	}
+	if z == nil {
+		t.Fatal("no guard sorts after the suspect")
+	}
+	tr.tested(z)
+	tr.step(time.Minute)
+	if err := tr.a.Boot(ctx); err != nil { // judges the first suspect alone
+		t.Fatal(err)
+	}
+	for i := 0; i < 60; i++ {
+		tr.step(time.Minute)
+		if tr.entry(waiting) != nil {
+			t.Fatalf("the suspect went on ahead of the new guard (minute %d)", i+1)
+		}
+		if e := tr.entry(z); e != nil {
+			return
+		}
+	}
+	t.Fatal("the new guard never went on")
+}
+
+// A keep joins a guard's window, and the ticks stop until the guard's undo
+// timer fires: the shared window ended without a verdict, so no try is
+// counted (round 8, minor 6).
+func TestSharedWindowTimerCountsNoTry(t *testing.T) {
+	tr := newTrial(t, "backup", "")
+	g1 := ipoptGuard(t)
+	tr.tested(g1)
+	tr.tick()
+	tr.clock = tr.clock.Add(-time.Minute)
+	tr.putOn(g1)
+	g2 := portGuard(t, "test/udp5353", "udp", "5353")
+	ev := &Evidence{Guard: g2.Canonical(), Yeses: map[string]*approve.Yes{"A": {Hash: g2.Hash(), Tiers: []string{"A"}, Until: tr.clock.Add(time.Hour), Mode: "keep"}}}
+	if err := tr.a.saveEvidence(g2.Hash(), ev); err != nil {
+		t.Fatal(err)
+	}
+	tr.step(time.Minute)                                       // the keep goes on during g1's window
+	if _, err := tr.a.Undo(ctx, g1.Hash(), true); err != nil { // g1's undo timer fires
+		t.Fatal(err)
+	}
+	tr.step(time.Minute)
+	if ev := tr.evidence(g1); tr.entry(g1) != nil || !ev.Suspect || ev.Tries != 0 {
+		t.Fatalf("g1: on %v, suspect %v, tries %d", tr.entry(g1) != nil, ev.Suspect, ev.Tries)
+	}
+}
+
+// What a boot broke stays recorded through a confirm on the running
+// machine: if the check is failing again before the next boot, that boot
+// still counts it against the guard (round 8, new major 1).
+func TestBootRecordSurvivesARunningConfirm(t *testing.T) {
+	tr := newTrial(t, "backup", "")
+	w := ksmbdGuard(t)
+	tr.tested(w)
+	tr.tick()
+	tr.onAndConfirmed(w)
+	tr.step(time.Minute)
+	if err := tr.a.Boot(ctx); err != nil {
+		t.Fatal(err)
+	}
+	tr.fail[site] = "the unit failed at the boot"
+	for i := 0; i < 15; i++ {
+		tr.step(time.Minute)
+	}
+	if tr.evidence(w).Tries != 1 {
+		t.Fatalf("tries %d", tr.evidence(w).Tries)
+	}
+	delete(tr.fail, site) // fixed by hand; the retry's window passes
+	tr.onAndConfirmedWhenReady(t, w)
+	if len(tr.evidence(w).Broke) != 1 {
+		t.Fatalf("a running confirm cleared what the boot broke: %+v", tr.evidence(w).Broke)
+	}
+	tr.fail[site] = "failing again before the next boot"
+	for i := 0; i < 3; i++ {
+		tr.step(time.Minute)
+	}
+	if err := tr.a.Boot(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 30; i++ {
+		tr.step(time.Minute)
+		if e := tr.entry(w); e != nil && e.Booted {
+			t.Fatalf("booted at minute %d with the check it broke at a boot failing", i+1)
+		}
+	}
+}

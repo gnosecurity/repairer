@@ -113,7 +113,7 @@ func (a *Agent) loadHealthy() (map[string]approve.Signed, error) {
 // put on here and that is confirmed; "refused" only for a guard this
 // machine admitted itself and refused for a listed reason. A machine that
 // isn't a canary signs nothing, since only a canary's Healthy counts.
-func (a *Agent) answerWants(ctx context.Context, f *Fleet, p *policy.Policy) error {
+func (a *Agent) answerWants(ctx context.Context, f *Fleet, p *policy.Policy, sample map[string]string) error {
 	tier, ok := p.TierOf(f.Host)
 	if !ok || !contains(tier.Canaries, f.Host) {
 		return nil
@@ -151,6 +151,12 @@ func (a *Agent) answerWants(ctx context.Context, f *Fleet, p *policy.Policy) err
 		w := wants[k].Want
 		state, why := "", ""
 		if e := on[w.Guard]; e != nil {
+			// Never for a guard while a check it broke still fails here
+			// (round 8, new major 1).
+			if ev, err := a.loadEvidence(w.Guard); err == nil && len(ev.brokeFailing(sample)) > 0 {
+				delete(out, k)
+				continue
+			}
 			if e.Status == Confirmed && e.By != "" {
 				state = approve.StateOn
 				if e.Booted {
@@ -172,6 +178,7 @@ func (a *Agent) answerWants(ctx context.Context, f *Fleet, p *policy.Policy) err
 			}
 		}
 		if state == "" {
+			delete(out, k) // no longer true here: an earlier answer isn't sent again
 			continue
 		}
 		if have, ok := out[k]; ok && have.Statement.State == state && have.Statement.Why == why {

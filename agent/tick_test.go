@@ -616,3 +616,39 @@ func TestWrongPolicyFileHolds(t *testing.T) {
 		t.Fatalf("with the right file: last %d pending %v", f.LastSeq, f.Pending != nil)
 	}
 }
+
+// The owner's Yes for this machine's tier clears a suspect, and so does
+// On; a Yes for another tier doesn't (round 8, new major 4).
+func TestYesAndOnClearSuspect(t *testing.T) {
+	_, msgs, g, _ := tiersChain(t)
+	mail, tick := tiersAgent(t, "mail")
+	tick(msgs[0], msgs[1], msgs[2], msgs[3]) // Yes A, B, C; Off(mail)
+	suspect := func() {
+		ev, _ := mail.loadEvidence(g.Hash())
+		ev.Suspect = true
+		if err := mail.saveEvidence(g.Hash(), ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	isSuspect := func() bool {
+		ev, _ := mail.loadEvidence(g.Hash())
+		return ev.Suspect
+	}
+	suspect()
+	if res := tick(msgs[4]); len(res.Accepted) != 1 || isSuspect() { // Yes(A)
+		t.Fatalf("after the owner's Yes for tier A: suspect %v, %+v", isSuspect(), res)
+	}
+	suspect()
+	if res := tick(msgs[5]); len(res.Accepted) != 1 || isSuspect() { // On(mail)
+		t.Fatalf("after the owner's On: suspect %v, %+v", isSuspect(), res)
+	}
+	sentry, stick := tiersAgent(t, "sentry")
+	stick(msgs[0])
+	ev, _ := sentry.loadEvidence(g.Hash())
+	ev.Suspect = true
+	sentry.saveEvidence(g.Hash(), ev)
+	stick(msgs[1], msgs[2]) // Yes(B) is sentry's tier; Yes(C) isn't
+	if ev, _ := sentry.loadEvidence(g.Hash()); ev.Suspect {
+		t.Fatal("the Yes for the sentry's own tier didn't clear it")
+	}
+}

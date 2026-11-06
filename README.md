@@ -7,15 +7,42 @@ vendor's fix running. It is one of gno.security's two products, beside
 Immune: a small agent on each server puts on **guards**, which are stopgaps
 written as data, when the owner's signed rules allow, and takes them off once
 the real fix runs. A lookout on the owner's own network reads the security
-news, the owner signs approvals on a hardware wallet, and a swarm on gno.land
-writes and checks the guards, with money at stake. More at
-https://gno.security/repairer/.
+news, the owner signs approvals on a hardware wallet, and a swarm of
+[gnosh.ai](https://gnosh.ai) sessions on gno.land writes and checks the
+guards, with money at stake. More at https://gno.security/repairer/.
 
 Built and tested on test machines (Ubuntu 22.04, 24.04 and 26.04, Debian 12
 and 13): the agent with its guards, reboots and was-I-hit checks; signed
 policies and approvals; the lookout and its page; the test rig; gnosh at
 home; a light client for gno.land; and the Guards realm on a local chain.
 Not yet on gno.land, and not yet running on anyone's servers.
+
+## Try it in two minutes
+
+On a **throwaway Ubuntu or Debian VM** (the agent changes the firewall and a
+kernel setting, so don't use a machine you care about), as root:
+
+```sh
+# the agent, and stopgap number one: the workaround for CVE-2026-98432
+curl -LO https://github.com/gnosecurity/repairer/releases/latest/download/repairer-agent-linux-amd64
+curl -LO https://github.com/gnosecurity/repairer/releases/latest/download/cve-2026-98432.json
+chmod +x repairer-agent-linux-amd64
+
+# see what it would do — changes nothing
+./repairer-agent-linux-amd64 plan cve-2026-98432.json
+
+# put it on, with the undo already armed (it reverts by itself in ten minutes
+# unless you confirm); it probes that the drop really blocks
+./repairer-agent-linux-amd64 apply cve-2026-98432.json
+./repairer-agent-linux-amd64 status
+
+# take it straight back off
+./repairer-agent-linux-amd64 undo cve-2026-98432/linux-ipv4-ipopt
+```
+
+It needs `nftables`, which Ubuntu and Debian have by default. Nothing leaves
+the machine, and nothing here touches gno.land. On arm64, use the `-arm64`
+binary.
 
 ## Guards only take away
 

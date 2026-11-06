@@ -33,12 +33,12 @@ M = [
     ("settle before reveals end", G, "if now() <= f.allIn+RevealWindow {", "if false {"),
     ("silent worker's checkers unpaid", G, '\t\tif c.revealed || c.prev != "" {\n\t\t\tpay(cur, c.owner, CheckFee)', '\t\tif c.revealed || c.prev != "" {\n\t\t\tpay(cur, c.owner, 0)'),
     ("no level written", G, "setLevel(f.guardHash, f.system, Tested)", 'setLevel(f.guardHash, f.system, "")'),
-    ("no param written", G, "params.SetString(levelKey(hash, system), level)", "_ = system"),
+    ("no param written", G, "params.SetString(levelKey(hash, system), level)", 'params.SetString(levelKey(hash, system)+"_", level)'),
     ("levels not per system", G, 'return "lvl_" + hash + "_" + strings.Replace(system, " ", "-", 1)', 'return "lvl_" + hash + system[:0]'),
     ("Level reads the caller's param", G, "\tif v := levels.Get(levelKey(guardHash, system)); v != nil {\n\t\treturn v.(string)\n\t}\n\treturn \"\"", "\tv, _ := params.GetString(levelKey(guardHash, system))\n\treturn v"),
     ("payments from MsgRun scripts", G, "if !cur.Previous().IsUserCall() {", "if !cur.Previous().IsUser() {"),
     ("payments from any caller", G, "\tcaller(cur)\n\tsent := unsafe.OriginSend()", "\tsent := unsafe.OriginSend()"),
-    ("other denoms kept", G, 'if c.Denom != "ugnot" {', "if false {"),
+    ("other denoms kept", G, 'if c.Denom != "ugnot" {', 'if c.Denom != "ugnot" && false {'),
     ("a pull overwritten", G, "case Level(f.guardHash, f.system) == Pulled:\n\t\t\tf.pulled = true", "case false:\n\t\t\tf.pulled = true"),
     ("bad beacons accepted", G, "if !drandbn254.Verify(drandPub, round, sig) {", "if !drandbn254.Verify(drandPub, round, sig) && false {"),
     ("forfeits not locked", G, "\tburned += f.bond\n", "\tburned += 0\n"),
@@ -248,11 +248,12 @@ def run(m):
     if r.returncode == 0:
         return name, f"SURVIVED {name}", False
     # Name the tests that caught it, so a failure that has nothing to do
-    # with the mutant (a build error, a crash) can't pass for a catch.
+    # with the mutant (a build error, a crash) can't pass for a catch. A
+    # filetest that caught it is named by its file.
     # gno prints a test that panics as "panic: ..." with no "--- FAIL" line;
     # its stack names the test file's line.
     out = r.stdout + r.stderr
-    caught = sorted(set(re.findall(r"--- FAIL: (Test\w+)", out)))
+    caught = sorted(set(re.findall(r"--- FAIL: (Test\w+|\./[\w.-]+_filetest\.gno)", out)))
     p = re.search(r"^panic: (.*)$", out, re.M)
     if p:
         at = re.search(r"(\w+_test\.gno:\d+)", out[p.end():])

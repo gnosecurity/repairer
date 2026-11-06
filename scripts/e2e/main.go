@@ -28,11 +28,11 @@ import (
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/decred/dcrd/dcrec/secp256k1/v4/ecdsa"
 
-	"github.com/jaekwon/repairer/agent"
-	"github.com/jaekwon/repairer/approve"
-	"github.com/jaekwon/repairer/check"
-	"github.com/jaekwon/repairer/guard"
-	"github.com/jaekwon/repairer/policy"
+	"github.com/gnosecurity/repairer/agent"
+	"github.com/gnosecurity/repairer/approve"
+	"github.com/gnosecurity/repairer/check"
+	"github.com/gnosecurity/repairer/guard"
+	"github.com/gnosecurity/repairer/policy"
 )
 
 func main() {

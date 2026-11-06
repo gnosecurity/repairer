@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jaekwon/repairer/agent"
-	"github.com/jaekwon/repairer/approve"
-	"github.com/jaekwon/repairer/policy"
+	"github.com/gnosecurity/repairer/agent"
+	"github.com/gnosecurity/repairer/approve"
+	"github.com/gnosecurity/repairer/policy"
 )
 
 const ownerHex = "02db41e6e79a9f5fc6813df46202e996d245ef327e5ff3cc47c11bdb46071ab08e"

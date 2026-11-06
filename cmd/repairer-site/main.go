@@ -180,7 +180,7 @@ const verifyMD = "# Verify a guard's level yourself\n\n" +
 	"- Ask a node you run for that key at height H, with `abci_query` on `.store/main/key` and prove=true.\n" +
 	"- Check the proof against the app hash of header H+1, and that more than two thirds of the validators you trust signed that header.\n" +
 	"- The header must be recent, never dated ahead of your clock, and never older than one you already accepted.\n" +
-	"- repairer's light client does exactly this (github.com/jaekwon/repairer, lightclient/).\n"
+	"- repairer's light client does exactly this (github.com/gnosecurity/repairer, lightclient/).\n"
 
 // page wraps a realm page's HTML in the site's page.
 func page(md string, depth int) []byte {

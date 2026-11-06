@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jaekwon/repairer/guard"
-	"github.com/jaekwon/repairer/policy"
+	"github.com/gnosecurity/repairer/guard"
+	"github.com/gnosecurity/repairer/policy"
 )
 
 // A grub.cfg as update-grub writes it under GRUB_DEFAULT=saved: 00_header's

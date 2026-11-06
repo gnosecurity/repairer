@@ -21,10 +21,10 @@ import (
 
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/decred/dcrd/dcrec/secp256k1/v4/ecdsa"
-	"github.com/jaekwon/repairer/agent"
-	"github.com/jaekwon/repairer/approve"
-	"github.com/jaekwon/repairer/lookout"
-	"github.com/jaekwon/repairer/policy"
+	"github.com/gnosecurity/repairer/agent"
+	"github.com/gnosecurity/repairer/approve"
+	"github.com/gnosecurity/repairer/lookout"
+	"github.com/gnosecurity/repairer/policy"
 )
 
 // The address rule, against a pair taken off the live chain (gnoshop's test).

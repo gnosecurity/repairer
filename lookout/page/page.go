@@ -20,9 +20,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jaekwon/repairer/agent"
-	"github.com/jaekwon/repairer/lookout"
-	"github.com/jaekwon/repairer/policy"
+	"github.com/gnosecurity/repairer/agent"
+	"github.com/gnosecurity/repairer/lookout"
+	"github.com/gnosecurity/repairer/policy"
 )
 
 //go:embed web

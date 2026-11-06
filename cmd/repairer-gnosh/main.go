@@ -34,8 +34,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jaekwon/repairer/approve"
-	"github.com/jaekwon/repairer/gnosh"
+	"github.com/gnosecurity/repairer/approve"
+	"github.com/gnosecurity/repairer/gnosh"
 )
 
 func main() {

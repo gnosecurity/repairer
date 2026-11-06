@@ -20,7 +20,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jaekwon/repairer/guard"
+	"github.com/gnosecurity/repairer/guard"
 )
 
 // System is everything the agent reads from and does to a machine. Linux

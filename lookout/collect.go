@@ -11,9 +11,9 @@ import (
 	"sort"
 	"time"
 
-	"github.com/jaekwon/repairer/agent"
-	"github.com/jaekwon/repairer/approve"
-	"github.com/jaekwon/repairer/policy"
+	"github.com/gnosecurity/repairer/agent"
+	"github.com/gnosecurity/repairer/approve"
+	"github.com/gnosecurity/repairer/policy"
 )
 
 // Silent is how long a machine may go without a fresh report before the

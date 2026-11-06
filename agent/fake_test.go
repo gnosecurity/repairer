@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jaekwon/repairer/guard"
+	"github.com/gnosecurity/repairer/guard"
 )
 
 // fakeSys is a machine in memory. It records every change in order, and

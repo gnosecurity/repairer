@@ -16,7 +16,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/jaekwon/repairer/guard"
+	"github.com/gnosecurity/repairer/guard"
 )
 
 // Priority is where a guard's chain hooks in: the "raw" priority, before

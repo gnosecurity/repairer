@@ -11,11 +11,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jaekwon/repairer/agent"
-	"github.com/jaekwon/repairer/approve"
-	"github.com/jaekwon/repairer/guard"
-	"github.com/jaekwon/repairer/lookout"
-	"github.com/jaekwon/repairer/policy"
+	"github.com/gnosecurity/repairer/agent"
+	"github.com/gnosecurity/repairer/approve"
+	"github.com/gnosecurity/repairer/guard"
+	"github.com/gnosecurity/repairer/lookout"
+	"github.com/gnosecurity/repairer/policy"
 )
 
 // C2's test, in memory: three machines and a lookout, a minute at a time.

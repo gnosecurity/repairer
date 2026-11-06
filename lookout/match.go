@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jaekwon/repairer/guard"
+	"github.com/gnosecurity/repairer/guard"
 )
 
 // Machine is what the lookout matches flaws against: a machine's facts, as

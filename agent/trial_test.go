@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jaekwon/repairer/approve"
-	"github.com/jaekwon/repairer/guard"
-	"github.com/jaekwon/repairer/policy"
+	"github.com/gnosecurity/repairer/approve"
+	"github.com/gnosecurity/repairer/guard"
+	"github.com/gnosecurity/repairer/policy"
 )
 
 // trial is a test machine in a fleet with real Ed25519 keys for the rig and

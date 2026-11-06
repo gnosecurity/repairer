@@ -21,10 +21,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jaekwon/repairer/approve"
-	"github.com/jaekwon/repairer/check"
-	"github.com/jaekwon/repairer/guard"
-	"github.com/jaekwon/repairer/policy"
+	"github.com/gnosecurity/repairer/approve"
+	"github.com/gnosecurity/repairer/check"
+	"github.com/gnosecurity/repairer/guard"
+	"github.com/gnosecurity/repairer/policy"
 )
 
 // Statement is one owner statement, ready to sign: its call's function and

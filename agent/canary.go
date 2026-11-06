@@ -11,10 +11,10 @@ import (
 	"sort"
 	"time"
 
-	"github.com/jaekwon/repairer/admit"
-	"github.com/jaekwon/repairer/approve"
-	"github.com/jaekwon/repairer/guard"
-	"github.com/jaekwon/repairer/policy"
+	"github.com/gnosecurity/repairer/admit"
+	"github.com/gnosecurity/repairer/approve"
+	"github.com/gnosecurity/repairer/guard"
+	"github.com/gnosecurity/repairer/policy"
 )
 
 // Want asks a canary for its Healthy on a guard, with the nonce of the

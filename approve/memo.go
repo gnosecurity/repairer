@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jaekwon/repairer/check"
-	"github.com/jaekwon/repairer/guard"
-	"github.com/jaekwon/repairer/policy"
+	"github.com/gnosecurity/repairer/check"
+	"github.com/gnosecurity/repairer/guard"
+	"github.com/gnosecurity/repairer/policy"
 )
 
 // MaxMemo caps a memo, so that every statement stays small enough for a

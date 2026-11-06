@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jaekwon/repairer/guard"
+	"github.com/gnosecurity/repairer/guard"
 )
 
 // Status of a guard on this machine.

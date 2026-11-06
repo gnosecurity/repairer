@@ -16,9 +16,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jaekwon/repairer/guard"
-	"github.com/jaekwon/repairer/nft"
-	"github.com/jaekwon/repairer/policy"
+	"github.com/gnosecurity/repairer/guard"
+	"github.com/gnosecurity/repairer/nft"
+	"github.com/gnosecurity/repairer/policy"
 )
 
 // Files the agent owns. The sysctl file sorts after 99-sysctl.conf, so its

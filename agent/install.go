@@ -27,7 +27,7 @@ func UnitFiles(self, stateDir string) map[string]string {
 	return map[string]string{
 		bootUnit: `[Unit]
 Description=repairer: put back confirmed guards, take off unconfirmed ones
-Documentation=https://github.com/jaekwon/repairer
+Documentation=https://github.com/gnosecurity/repairer
 DefaultDependencies=no
 Wants=network-pre.target
 After=local-fs.target nftables.service firewalld.service
@@ -44,7 +44,7 @@ WantedBy=sysinit.target
 `,
 		firewallUnit: `[Unit]
 Description=repairer: put guards back after a firewall restart or reload
-Documentation=https://github.com/jaekwon/repairer
+Documentation=https://github.com/gnosecurity/repairer
 After=repairer-boot.service nftables.service firewalld.service
 PartOf=nftables.service firewalld.service
 ReloadPropagatedFrom=nftables.service firewalld.service
@@ -60,7 +60,7 @@ WantedBy=multi-user.target
 `,
 		checkUnit: `[Unit]
 Description=repairer: put back what drifted, take in signed messages, move guards on, report
-Documentation=https://github.com/jaekwon/repairer
+Documentation=https://github.com/gnosecurity/repairer
 After=repairer-boot.service
 
 [Service]
@@ -69,7 +69,7 @@ ExecStart=` + fmt.Sprintf(run, "tick") + `
 `,
 		checkTimer: `[Unit]
 Description=repairer: check guards every minute
-Documentation=https://github.com/jaekwon/repairer
+Documentation=https://github.com/gnosecurity/repairer
 
 [Timer]
 OnBootSec=1min

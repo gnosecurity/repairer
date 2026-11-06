@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jaekwon/repairer/guard"
-	"github.com/jaekwon/repairer/policy"
+	"github.com/gnosecurity/repairer/guard"
+	"github.com/gnosecurity/repairer/policy"
 )
 
 // The fixture is a real statement: gnokey v1.7.0 signed it offline on the

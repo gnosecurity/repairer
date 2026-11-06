@@ -20,7 +20,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jaekwon/repairer/check"
+	"github.com/gnosecurity/repairer/check"
 )
 
 // Was-I-hit checks (W1; REPAIRER.md, "Was-I-hit checks"). A check runs

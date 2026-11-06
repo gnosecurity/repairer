@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jaekwon/repairer/policy"
+	"github.com/gnosecurity/repairer/policy"
 )
 
 // NewTestAgent is an agent on a machine in memory, for tests in other

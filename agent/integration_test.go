@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jaekwon/repairer/nft"
+	"github.com/gnosecurity/repairer/nft"
 )
 
 type nopTimer struct{}

@@ -10,9 +10,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jaekwon/repairer/agent"
-	"github.com/jaekwon/repairer/approve"
-	"github.com/jaekwon/repairer/guard"
+	"github.com/gnosecurity/repairer/agent"
+	"github.com/gnosecurity/repairer/approve"
+	"github.com/gnosecurity/repairer/guard"
 )
 
 // A store of 300 kept Tested statements still carries, to a machine that

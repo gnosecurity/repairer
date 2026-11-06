@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jaekwon/repairer/approve"
+	"github.com/gnosecurity/repairer/approve"
 )
 
 // fakeGnokey is a gnokey stand-in. maketx fails unless it is told not to

@@ -1,4 +1,4 @@
-module github.com/jaekwon/repairer/gno/p/drandbn254/reference
+module github.com/gnosecurity/repairer/gno/p/drandbn254/reference
 
 go 1.27
 

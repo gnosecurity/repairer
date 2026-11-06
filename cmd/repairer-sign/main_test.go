@@ -14,10 +14,10 @@ import (
 	"time"
 
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
-	"github.com/jaekwon/repairer/approve"
-	"github.com/jaekwon/repairer/guard"
-	"github.com/jaekwon/repairer/policy"
-	"github.com/jaekwon/repairer/signer"
+	"github.com/gnosecurity/repairer/approve"
+	"github.com/gnosecurity/repairer/guard"
+	"github.com/gnosecurity/repairer/policy"
+	"github.com/gnosecurity/repairer/signer"
 )
 
 // The tool end to end with a real gnokey and a test keybase (GNOKEY_BIN,

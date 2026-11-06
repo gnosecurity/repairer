@@ -19,7 +19,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/jaekwon/repairer/guard"
+	"github.com/gnosecurity/repairer/guard"
 )
 
 // MaxSize is the largest check file the agent reads.

@@ -15,11 +15,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jaekwon/repairer/admit"
-	"github.com/jaekwon/repairer/approve"
-	"github.com/jaekwon/repairer/check"
-	"github.com/jaekwon/repairer/guard"
-	"github.com/jaekwon/repairer/policy"
+	"github.com/gnosecurity/repairer/admit"
+	"github.com/gnosecurity/repairer/approve"
+	"github.com/gnosecurity/repairer/check"
+	"github.com/gnosecurity/repairer/guard"
+	"github.com/gnosecurity/repairer/policy"
 )
 
 // Bundle is what the lookout hands an agent through intake: the owner's

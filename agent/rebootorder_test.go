@@ -14,8 +14,8 @@ import (
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/decred/dcrd/dcrec/secp256k1/v4/ecdsa"
 
-	"github.com/jaekwon/repairer/approve"
-	"github.com/jaekwon/repairer/policy"
+	"github.com/gnosecurity/repairer/approve"
+	"github.com/gnosecurity/repairer/policy"
 )
 
 // ownerKey is a test owner's secp256k1 key, from a fixed seed, as a Ledger

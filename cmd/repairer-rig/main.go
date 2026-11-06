@@ -27,8 +27,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/jaekwon/repairer/approve"
-	"github.com/jaekwon/repairer/guard"
+	"github.com/gnosecurity/repairer/approve"
+	"github.com/gnosecurity/repairer/guard"
 )
 
 func main() {

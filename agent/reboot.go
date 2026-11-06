@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jaekwon/repairer/policy"
+	"github.com/gnosecurity/repairer/policy"
 )
 
 // Reboots by tier (B3; REPAIRER.md, "Reboots and kernels"). A reboot is

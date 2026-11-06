@@ -30,9 +30,9 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/jaekwon/repairer/agent"
-	"github.com/jaekwon/repairer/guard"
-	"github.com/jaekwon/repairer/policy"
+	"github.com/gnosecurity/repairer/agent"
+	"github.com/gnosecurity/repairer/guard"
+	"github.com/gnosecurity/repairer/policy"
 )
 
 const usage = `usage: repairer-agent <command> [flags] [args]

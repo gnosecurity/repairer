@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jaekwon/repairer/guard"
+	"github.com/gnosecurity/repairer/guard"
 )
 
 // Report is what an agent tells its lookout about its machine: the facts

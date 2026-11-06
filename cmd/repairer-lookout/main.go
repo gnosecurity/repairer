@@ -26,9 +26,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jaekwon/repairer/lookout"
-	"github.com/jaekwon/repairer/lookout/page"
-	"github.com/jaekwon/repairer/policy"
+	"github.com/gnosecurity/repairer/lookout"
+	"github.com/gnosecurity/repairer/lookout/page"
+	"github.com/gnosecurity/repairer/policy"
 )
 
 const usage = `usage: repairer-lookout <collect|deliver|run|serve|feeds|add|match> -config lookout.json [args]

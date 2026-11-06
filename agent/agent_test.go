@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jaekwon/repairer/guard"
-	"github.com/jaekwon/repairer/nft"
-	"github.com/jaekwon/repairer/policy"
+	"github.com/gnosecurity/repairer/guard"
+	"github.com/gnosecurity/repairer/nft"
+	"github.com/gnosecurity/repairer/policy"
 )
 
 var ctx = context.Background()

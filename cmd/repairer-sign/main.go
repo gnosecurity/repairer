@@ -29,11 +29,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jaekwon/repairer/approve"
-	"github.com/jaekwon/repairer/check"
-	"github.com/jaekwon/repairer/guard"
-	"github.com/jaekwon/repairer/policy"
-	"github.com/jaekwon/repairer/signer"
+	"github.com/gnosecurity/repairer/approve"
+	"github.com/gnosecurity/repairer/check"
+	"github.com/gnosecurity/repairer/guard"
+	"github.com/gnosecurity/repairer/policy"
+	"github.com/gnosecurity/repairer/signer"
 )
 
 const usage = `usage: repairer-sign <yes|off|on|policy|cancel|reboot|check|standing> [flags] FILE|HASH|HOST

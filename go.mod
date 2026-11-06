@@ -1,4 +1,4 @@
-module github.com/jaekwon/repairer
+module github.com/gnosecurity/repairer
 
 go 1.27
 

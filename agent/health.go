@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jaekwon/repairer/policy"
+	"github.com/gnosecurity/repairer/policy"
 )
 
 // HealthChecker runs one of the policy's health checks and says why it

@@ -30,6 +30,11 @@ chmod +x repairer-agent-linux-amd64
 
 # see what it would do — changes nothing
 ./repairer-agent-linux-amd64 plan cve-2026-98432.json
+#   cve-2026-98432/linux-ipv4-ipopt v1, hash 3526eb39...
+#   this machine: ubuntu 24.04, kernel 6.8.0-142 generic
+#     drop inbound ipv4 tcp carrying IP options (bites: now)
+#     set net.mptcp.enabled = 0 (bites: new sockets)
+#     breaks: IP Record Route and Timestamp on TCP; nothing common uses them
 
 # put it on, with the undo already armed (it reverts by itself in ten minutes
 # unless you confirm); it probes that the drop really blocks

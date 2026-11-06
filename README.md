@@ -20,6 +20,11 @@ realm on a local chain, with scripted checkers. Not built yet: gnosh.ai
 sessions as the swarm's writers and checkers. Not yet on gno.land, and not
 yet running on anyone's servers.
 
+The realm gives one power to one key, the owner's (Jae's, g1ecsu…): an
+emergency pause that stops new filings and new stakes. Everything already
+under way, and every way out, keeps working; the pause can't move a coin,
+touch a filing or change a result. The realm is immutable once deployed.
+
 ## Try it in two minutes
 
 On a **throwaway Ubuntu or Debian VM** (the agent changes the firewall and a

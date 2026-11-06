@@ -76,6 +76,40 @@ var (
 	LevelFloor      int64 = 10_000_000_000 // ugnot of a filing's pool's stake not leaving at its fix, below which no level is written
 )
 
+// adminAddr is the owner's cold key (Jae's Ledger). It holds one power only:
+// an emergency Pause that stops NEW filings and stakes while a problem is
+// sorted out. Everything already under way — reveals, draws, checks,
+// disputes, unstakes, withdrawals, votes — goes on, so staked money always
+// has its way out. The admin can never take a coin, touch a filing, or
+// change a result. Pause is a small call a Ledger can sign; the realm's
+// deploy (a big add_package) is signed by a hotkey, and the realm is
+// immutable, so no key can ever change this code or this address.
+const adminAddr address = "g1ecsuj0q572jr0dhu29q9njtnmw03hyu7tyyvv6"
+
+var paused bool
+
+// Pause stops new filings and new stakes. Only the admin may call it, and it
+// never halts work already in flight, so nothing and no money is stranded.
+func Pause(cur realm) {
+	if caller(cur) != adminAddr {
+		panic("guards: only the admin may pause")
+	}
+	paused = true
+	chain.Emit("GuardsPaused")
+}
+
+// Unpause lets new filings and stakes resume. Only the admin may call it.
+func Unpause(cur realm) {
+	if caller(cur) != adminAddr {
+		panic("guards: only the admin may pause")
+	}
+	paused = false
+	chain.Emit("GuardsUnpaused")
+}
+
+// Paused reports whether new filings and stakes are halted.
+func Paused() bool { return paused }
+
 // drand evmnet (api.drand.sh/04f1e9062b8a81f848fded9c12306733282b2727ecced50032187751166ec8c3/info).
 var (
 	drandGenesis int64 = 1727521075
@@ -199,6 +233,9 @@ func GuardHash(guard string) string {
 // Commitment(filer, "transcript", transcript, salt2), and system is what the
 // rig ran, as its transcript names it ("ubuntu 24.04").
 func Commit(cur realm, commitment string) int {
+	if paused {
+		panic("guards: paused; no new filings until the admin lifts it")
+	}
 	if !isHex(commitment, 64) {
 		panic("guards: a commitment is 64 hex digits")
 	}

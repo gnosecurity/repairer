@@ -69,6 +69,7 @@ func reset() {
 	PoolCommitWindow, PoolRevealWindow, PoolFee, PoolClaimWindow = 5, 5, 1_000_000, 50
 	AppealBond, RerunFee, MaxSettle = 1_000_000, 500_000, 64
 	DrawFee, FilingBond = 0, 1_000_000 // TestDrawPaysTheDrawer and the tests after it set their own DrawFee
+	paused = false
 }
 
 func u(a address) runtime.Realm { return testing.NewUserRealm(a) }

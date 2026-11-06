@@ -173,6 +173,9 @@ func LiveStake() int64 { return active }
 // StakeTicket stakes the coins sent as one checker's ticket and returns its
 // number.
 func StakeTicket(cur realm) int {
+	if paused {
+		panic("guards: paused; no new stakes until the admin lifts it")
+	}
 	if nTickets >= 1<<sumDepth {
 		panic("guards: no more tickets")
 	}

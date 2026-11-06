@@ -222,6 +222,12 @@ M = [
     ("a second step counted as a voter", P, "\tif first {\n\t\tv.voters.Set(string(who), vt)\n\t\tv.committed++", "\tif true {\n\t\tv.voters.Set(string(who), vt)\n\t\tv.committed++"),
     ("SettleVotes ignores its count", T, "\tsettleVotes(t, n)\n\treturn len(allVotes) - t.votes", "\tsettleVotes(t, MaxSettle)\n\treturn len(allVotes) - t.votes"),
     ("an abstainer charged as a voter", P, "\t\tvoted := v.voted.Has(key(uint64(t.id)))\n", "\t\tvoted := true\n"),
+    # the owner's emergency pause: only the admin, and it stops new filings and stakes
+    ("pause: anyone pauses", G, 'if caller(cur) != adminAddr {\n\t\tpanic("guards: only the admin may pause")\n\t}\n\tpaused = true', 'if false {\n\t\tpanic("guards: only the admin may pause")\n\t}\n\tpaused = true'),
+    ("pause: anyone unpauses", G, 'if caller(cur) != adminAddr {\n\t\tpanic("guards: only the admin may pause")\n\t}\n\tpaused = false', 'if false {\n\t\tpanic("guards: only the admin may pause")\n\t}\n\tpaused = false'),
+    ("pause: Unpause leaves it on", G, 'paused = false\n\tchain.Emit("GuardsUnpaused")', 'chain.Emit("GuardsUnpaused")'),
+    ("pause: Commit ignores it", G, 'if paused {\n\t\tpanic("guards: paused; no new filings until the admin lifts it")', 'if false {\n\t\tpanic("guards: paused; no new filings until the admin lifts it")'),
+    ("pause: StakeTicket ignores it", T, 'if paused {\n\t\tpanic("guards: paused; no new stakes until the admin lifts it")', 'if false {\n\t\tpanic("guards: paused; no new stakes until the admin lifts it")'),
 ]
 
 if os.environ.get("ONLY"):  # a regular expression over mutant names

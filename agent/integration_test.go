@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jaekwon/autopatch/nft"
+	"github.com/jaekwon/repairer/nft"
 )
 
 type nopTimer struct{}
@@ -22,7 +22,7 @@ func (nopTimer) Disarm(_ context.Context, _ string) error               { return
 // kernel setting and the agent's own probe, then takes it off. Run it with
 // scripts/netns-test.sh, which gives it a network namespace of its own.
 func TestIntegrationGuardOne(t *testing.T) {
-	if os.Getenv("AUTOPATCH_NETNS") != "1" {
+	if os.Getenv("REPAIRER_NETNS") != "1" {
 		t.Skip("run by scripts/netns-test.sh, inside a fresh network namespace")
 	}
 	root := t.TempDir()

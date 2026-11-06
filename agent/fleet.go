@@ -14,7 +14,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/jaekwon/autopatch/policy"
+	"github.com/jaekwon/repairer/policy"
 )
 
 // The agent's fleet files, beside its state file. The policy and the

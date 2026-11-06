@@ -14,8 +14,8 @@ import (
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/decred/dcrd/dcrec/secp256k1/v4/ecdsa"
 
-	"github.com/jaekwon/autopatch/approve"
-	"github.com/jaekwon/autopatch/policy"
+	"github.com/jaekwon/repairer/approve"
+	"github.com/jaekwon/repairer/policy"
 )
 
 // ownerKey is a test owner's secp256k1 key, from a fixed seed, as a Ledger
@@ -253,7 +253,7 @@ func TestParseReboot(t *testing.T) {
 		t.Fatal(r, err)
 	}
 	memo, err := approve.MemoReboot(r)
-	if err != nil || memo != "autopatch/1 Reboot web into "+newRel+", once, not after 2026-11-06 09:00 UTC" {
+	if err != nil || memo != "repairer/1 Reboot web into "+newRel+", once, not after 2026-11-06 09:00 UTC" {
 		t.Fatalf("%q %v", memo, err)
 	}
 	for _, bad := range [][]string{

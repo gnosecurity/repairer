@@ -11,9 +11,9 @@ import (
 	"sort"
 	"time"
 
-	"github.com/jaekwon/autopatch/agent"
-	"github.com/jaekwon/autopatch/approve"
-	"github.com/jaekwon/autopatch/policy"
+	"github.com/jaekwon/repairer/agent"
+	"github.com/jaekwon/repairer/approve"
+	"github.com/jaekwon/repairer/policy"
 )
 
 // Silent is how long a machine may go without a fresh report before the
@@ -29,7 +29,7 @@ type Collector struct {
 	Policy *policy.Policy
 	Dir    string // <Dir>/<host>.json: the newest verified report, as signed
 	// Fetch gets a machine's signed report: over ssh, with a key that runs
-	// only `autopatch-agent report` there.
+	// only `repairer-agent report` there.
 	Fetch func(ctx context.Context, host string) ([]byte, error)
 	Now   func() time.Time
 }

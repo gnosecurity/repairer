@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jaekwon/autopatch/guard"
-	"github.com/jaekwon/autopatch/nft"
-	"github.com/jaekwon/autopatch/policy"
+	"github.com/jaekwon/repairer/guard"
+	"github.com/jaekwon/repairer/nft"
+	"github.com/jaekwon/repairer/policy"
 )
 
 var ctx = context.Background()
@@ -116,7 +116,7 @@ func TestApplyConfirmUndoGuardOne(t *testing.T) {
 	if tb := table(sys, g); tb == nil || tb.rules[0].packets != 1 || sys.settings["net.mptcp.enabled"] != "0" {
 		t.Fatalf("live: table %+v, mptcp %s", tb, sys.settings["net.mptcp.enabled"])
 	}
-	if len(nft.TableName(h)) != len("autopatch_")+64 {
+	if len(nft.TableName(h)) != len("repairer_")+64 {
 		t.Fatal("the table isn't named by the whole hash")
 	}
 	if _, ok := sys.files[SysctlFile]; ok {
@@ -721,11 +721,11 @@ func TestSafeExecutable(t *testing.T) {
 	if err := safeExecutable("/usr/bin/env"); err != nil {
 		t.Fatalf("/usr/bin/env: %v", err)
 	}
-	mine := filepath.Join(t.TempDir(), "autopatch-agent")
+	mine := filepath.Join(t.TempDir(), "repairer-agent")
 	if err := os.WriteFile(mine, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for _, p := range []string{mine, "bin/autopatch-agent", "/tmp/autopatch-agent", "/root/.cache/go-build/x/exe/autopatch-agent"} {
+	for _, p := range []string{mine, "bin/repairer-agent", "/tmp/repairer-agent", "/root/.cache/go-build/x/exe/repairer-agent"} {
 		if err := safeExecutable(p); err == nil {
 			t.Errorf("%s accepted", p)
 		}
@@ -760,8 +760,8 @@ func TestInstall(t *testing.T) {
 	if err := a.Install(ctx, "/usr/bin/env"); err != nil {
 		t.Fatal(err)
 	}
-	boot := sys.files["/etc/systemd/system/autopatch-boot.service"]
-	fw := sys.files["/etc/systemd/system/autopatch-firewall.service"]
+	boot := sys.files["/etc/systemd/system/repairer-boot.service"]
+	fw := sys.files["/etc/systemd/system/repairer-firewall.service"]
 	if !strings.Contains(boot, "ExecStart=/usr/bin/env boot -state-dir "+a.StateDir) || !strings.Contains(boot, "WantedBy=sysinit.target") {
 		t.Fatalf("boot unit:\n%s", boot)
 	}
@@ -770,13 +770,13 @@ func TestInstall(t *testing.T) {
 	if !strings.Contains(fw, "PartOf=nftables.service firewalld.service") || strings.Contains(fw, " boot ") || !strings.Contains(fw, "check -state-dir "+a.StateDir+" -repair") {
 		t.Fatalf("firewall unit:\n%s", fw)
 	}
-	if !strings.Contains(sys.files["/etc/systemd/system/autopatch-check.timer"], "OnUnitActiveSec=1min") {
+	if !strings.Contains(sys.files["/etc/systemd/system/repairer-check.timer"], "OnUnitActiveSec=1min") {
 		t.Fatal("no minute timer")
 	}
-	if index(sys.log, "systemctl daemon-reload") < 0 || index(sys.log, "systemctl enable autopatch-boot.service") < 0 {
+	if index(sys.log, "systemctl daemon-reload") < 0 || index(sys.log, "systemctl enable repairer-boot.service") < 0 {
 		t.Fatalf("log %q", sys.log)
 	}
-	if err := a.Install(ctx, "/tmp/autopatch-agent"); err == nil {
+	if err := a.Install(ctx, "/tmp/repairer-agent"); err == nil {
 		t.Fatal("installed a binary from /tmp")
 	}
 }
@@ -955,12 +955,12 @@ func TestAuthorizedKeys(t *testing.T) {
 		return strings.TrimSpace("ssh-ed25519 " + base64.StdEncoding.EncodeToString(wire) + " " + comment)
 	}
 	k1, k2 := sshKey("lookout-report"), sshKey("")
-	lines, err := AuthorizedKeys("/usr/local/sbin/autopatch-agent", "/var/lib/autopatch", k1, k2, "203.0.113.9,198.51.100.0/24")
+	lines, err := AuthorizedKeys("/usr/local/sbin/repairer-agent", "/var/lib/repairer", k1, k2, "203.0.113.9,198.51.100.0/24")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `restrict,from="203.0.113.9,198.51.100.0/24",command="/usr/local/sbin/autopatch-agent report -state-dir /var/lib/autopatch" ` + k1 + "\n" +
-		`restrict,from="203.0.113.9,198.51.100.0/24",command="/usr/local/sbin/autopatch-agent intake -state-dir /var/lib/autopatch" ` + k2 + "\n"
+	want := `restrict,from="203.0.113.9,198.51.100.0/24",command="/usr/local/sbin/repairer-agent report -state-dir /var/lib/repairer" ` + k1 + "\n" +
+		`restrict,from="203.0.113.9,198.51.100.0/24",command="/usr/local/sbin/repairer-agent intake -state-dir /var/lib/repairer" ` + k2 + "\n"
 	if lines != want {
 		t.Fatalf("got\n%swant\n%s", lines, want)
 	}

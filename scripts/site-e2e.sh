@@ -33,7 +33,7 @@ printf '%s\n\n\n' "source bonus chronic canvas draft south burst lottery vacant 
   | "$B/gnokey" add -home "$D/kb" -recover -insecure-password-stdin test1 >/dev/null
 addr=g1jg8mtutu9khhfwc4nxmuhcpftf0pajdhfvsqf5
 call() {
-  echo "" | "$B/gnokey" maketx call -home "$D/kb" -insecure-password-stdin -pkgpath gno.land/r/autopatch/guards \
+  echo "" | "$B/gnokey" maketx call -home "$D/kb" -insecure-password-stdin -pkgpath gno.land/r/repairer/guards \
     -gas-fee 10000000ugnot -gas-wanted 300000000 -broadcast -chainid dev -remote 127.0.0.1:36657 "$@" test1 > "$D/call.out" 2>&1 \
     || { echo "call $*: $(tail -5 "$D/call.out")"; tail -20 "$D/gnodev.log"; exit 1; }
 }
@@ -50,7 +50,7 @@ PY
 )
 call -func Commit -args "$commit" -send 1000000ugnot
 call -func Reveal -args 0 -args "$guard" -args "ubuntu 24.04" -args "$tc" -args s
-cd "$repo" && go run ./cmd/autopatch-site -rpc http://127.0.0.1:36657 -out "$D/site"
+cd "$repo" && go run ./cmd/repairer-site -rpc http://127.0.0.1:36657 -out "$D/site"
 fail() { echo "FAIL: $1"; exit 1; }
 grep -q '<a href="filing/0.html">filing 0</a>: revealed' "$D/site/index.html" || fail "the index: $(cat "$D/site/index.html")"
 grep -q 'cve-2026-98432/linux-ipv4-ipopt' "$D/site/filing/0.html" || fail "the guard isn't on its filing's page"

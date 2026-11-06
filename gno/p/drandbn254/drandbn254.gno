@@ -4,7 +4,7 @@
 // 9380's expand_message_xmd over Keccak-256 and the Shallue-van de
 // Woestijne map, under the network's G2 public key. The curve operations
 // are gno's crypto/bn254 natives (EIP-196/197); exponentiations go through
-// crypto/modexp. This is autopatch's beacon spike (F0): the draws after a
+// crypto/modexp. This is repairer's beacon spike (F0): the draws after a
 // reveal need a randomness no one in the swarm controls.
 package drandbn254
 

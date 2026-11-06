@@ -16,7 +16,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/jaekwon/autopatch/guard"
+	"github.com/jaekwon/repairer/guard"
 )
 
 // Priority is where a guard's chain hooks in: the "raw" priority, before
@@ -34,14 +34,14 @@ func Family(f string) string {
 	return "ip"
 }
 
-// TableName returns the name of a guard's table: "autopatch_" and the
+// TableName returns the name of a guard's table: "repairer_" and the
 // guard's whole hash. A shorter name would let a guard ground to share a
 // prefix with another replace that guard's table.
 func TableName(guardHash string) string {
 	if len(guardHash) != 64 {
 		panic("nft: a guard hash is 64 hex digits")
 	}
-	return "autopatch_" + guardHash
+	return "repairer_" + guardHash
 }
 
 // Rule returns the rule for one drop, without its comment.

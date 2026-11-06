@@ -1,8 +1,8 @@
-// Command autopatch-gnosh is gnosh at home: the local model's reading of a
+// Command repairer-gnosh is gnosh at home: the local model's reading of a
 // guard, and its yes within rule 6.
 //
-//	autopatch-gnosh launch -socket MODEL.sock -model NAME -weights HASH -key MODEL.key -chain CHAIN < ASK.json
-//	autopatch-gnosh judge  -socket MODEL.sock -model NAME -weights HASH < ASK.json   (what launch runs, sandboxed)
+//	repairer-gnosh launch -socket MODEL.sock -model NAME -weights HASH -key MODEL.key -chain CHAIN < ASK.json
+//	repairer-gnosh judge  -socket MODEL.sock -model NAME -weights HASH < ASK.json   (what launch runs, sandboxed)
 //
 // launch holds the model's key and never lets it into the sandbox: it runs
 // judge in new user, network and mount namespaces (unshare), in a jail whose
@@ -34,19 +34,19 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jaekwon/autopatch/approve"
-	"github.com/jaekwon/autopatch/gnosh"
+	"github.com/jaekwon/repairer/approve"
+	"github.com/jaekwon/repairer/gnosh"
 )
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: autopatch-gnosh <launch|judge> [flags] < ASK.json")
+		fmt.Fprintln(os.Stderr, "usage: repairer-gnosh <launch|judge> [flags] < ASK.json")
 		os.Exit(2)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 	if err := run(ctx, os.Args[1], os.Args[2:], os.Stdin, os.Stdout); err != nil {
-		fmt.Fprintln(os.Stderr, "autopatch-gnosh:", err)
+		fmt.Fprintln(os.Stderr, "repairer-gnosh:", err)
 		os.Exit(1)
 	}
 }
@@ -84,7 +84,7 @@ func run(ctx context.Context, cmd string, args []string, stdin io.Reader, stdout
 		if err := enterJail(*root, *socket, self); err != nil {
 			return fmt.Errorf("the jail: %w", err)
 		}
-		err = execJudge([]string{"autopatch-gnosh", "judge", "-socket", "/model.sock", "-model", *model, "-weights", *weights}, nil)
+		err = execJudge([]string{"repairer-gnosh", "judge", "-socket", "/model.sock", "-model", *model, "-weights", *weights}, nil)
 		return fmt.Errorf("the jail: running judge: %w", err)
 	}
 	in, err := io.ReadAll(io.LimitReader(stdin, 4<<20))

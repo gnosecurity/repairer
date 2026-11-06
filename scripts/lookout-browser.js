@@ -1,5 +1,5 @@
 // node scripts/lookout-browser.js LOOKOUT OUTDIR: the lookout's page end to end in headless Chrome, against a
-// throwaway lookout (the autopatch-lookout binary LOOKOUT) this script starts on localhost:18795, with a fleet of two
+// throwaway lookout (the repairer-lookout binary LOOKOUT) this script starts on localhost:18795, with a fleet of two
 // machines it can't reach. A stand-in for Adena (from gnoshop's tools/admin.js) signs what Adena signs: Node's
 // secp256k1 signs, and the document and the answer are shaped as Adena's SignArbitrary shapes them, so the server's
 // checks run as they do for the real wallet. It signs in, checks the cookie, screenshots the page at desktop and phone
@@ -154,7 +154,7 @@ function check(ok, what) {
     await Promise.all([page.waitForNavigation({ waitUntil: "networkidle0" }), page.click("#sign-in")]);
     check((await text(page, "h1")).includes("the lookout for fleet browsertest"), "the admin's wallet signs in and lands on the page");
     check((await page.content()).includes("Signed in as " + admin.addr.slice(0, 6) + "..." + admin.addr.slice(-4)), "the page names the wallet signed in");
-    const ck = (await ctx.cookies()).find((c) => c.name === "__Host-autopatch-admin");
+    const ck = (await ctx.cookies()).find((c) => c.name === "__Host-repairer-admin");
     check(ck && ck.httpOnly && ck.secure && ck.sameSite === "Lax" && ck.path === "/", "the session cookie is HttpOnly, Secure, SameSite=Lax, path /");
     const body = await page.content();
     check(body.includes("<td>mail</td>") && body.includes("<td>web</td>") && body.includes("no agent key in the policy yet"),
@@ -173,7 +173,7 @@ function check(ok, what) {
       return { policy: p.status === 200 ? await p.text() : "status " + p.status, tar: t.status, tarType: t.headers.get("content-type") };
     });
     check(files.policy.trim() === policy, "the policy downloads, byte for byte");
-    check(files.tar === 200, "the signed reports download for autopatch-sign");
+    check(files.tar === 200, "the signed reports download for repairer-sign");
 
     for (const [vp, scheme, name] of [[desktop, "dark", "page-desktop-dark"], [phone, "light", "page-phone-light"], [phone, "dark", "page-phone-dark"]]) {
       const p = await open(ctx, vp, scheme);
@@ -195,7 +195,7 @@ function check(ok, what) {
     check((await text(page2, "h1")).includes("browsertest"), "a second browser signs in too");
     await Promise.all([page.waitForNavigation({ waitUntil: "networkidle0" }), page.click('form[action="/admin/logout"] button')]);
     check((await text(page, "#sign-in")) === "Sign in with Adena", "signing out returns to the sign-in");
-    check(!(await ctx.cookies()).some((c) => c.name === "__Host-autopatch-admin" && c.value), "signing out clears the cookie");
+    check(!(await ctx.cookies()).some((c) => c.name === "__Host-repairer-admin" && c.value), "signing out clears the cookie");
     await page2.reload({ waitUntil: "networkidle0" });
     check((await text(page2, "#sign-in")) === "Sign in with Adena", "signing out ended the second browser's session too");
     const after = await page2.evaluate(async () => {
@@ -211,7 +211,7 @@ function check(ok, what) {
     await strangerPage.click("#sign-in");
     await strangerPage.waitForFunction(() => /not an admin/.test(document.getElementById("status").textContent), { timeout: 10000 });
     check((await text(strangerPage, "#status")).includes(stranger.addr.slice(0, 6)), "a wallet that isn't an admin is refused, by its address");
-    check(!(await sctx.cookies()).some((c) => c.name === "__Host-autopatch-admin"), "the refused wallet gets no cookie");
+    check(!(await sctx.cookies()).some((c) => c.name === "__Host-repairer-admin"), "the refused wallet gets no cookie");
     await shot(strangerPage, "refused-stranger");
 
     // Adena showing another account than the one the page asked to sign for.

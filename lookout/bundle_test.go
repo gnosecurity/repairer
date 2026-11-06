@@ -10,9 +10,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jaekwon/autopatch/agent"
-	"github.com/jaekwon/autopatch/approve"
-	"github.com/jaekwon/autopatch/guard"
+	"github.com/jaekwon/repairer/agent"
+	"github.com/jaekwon/repairer/approve"
+	"github.com/jaekwon/repairer/guard"
 )
 
 // A store of 300 kept Tested statements still carries, to a machine that
@@ -33,7 +33,7 @@ func TestBundleInOrderOfNeed(t *testing.T) {
 		if _, err := store.AddGuard(g.Canonical()); err != nil {
 			t.Fatal(err)
 		}
-		sg, _ := approve.SignStatement(rig, approve.Statement{Version: approve.MemoVersion, Kind: approve.KindTested, Image: "ubuntu 24.04", Chain: "autopatch:vet", Guard: g.Hash(), Rig: strings.Repeat("0", 64)})
+		sg, _ := approve.SignStatement(rig, approve.Statement{Version: approve.MemoVersion, Kind: approve.KindTested, Image: "ubuntu 24.04", Chain: "repairer:vet", Guard: g.Hash(), Rig: strings.Repeat("0", 64)})
 		b, _ := json.Marshal(sg)
 		if err := store.AddSigned(b); err != nil {
 			t.Fatal(err)
@@ -127,7 +127,7 @@ func TestBundleInOrderOfNeed(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, image := range []string{"ubuntu 24.04", "debian 12"} {
-		sg, _ := approve.SignStatement(rig, approve.Statement{Version: approve.MemoVersion, Kind: approve.KindTested, Image: image, Chain: "autopatch:vet", Guard: one.Hash(), Rig: strings.Repeat("0", 64)})
+		sg, _ := approve.SignStatement(rig, approve.Statement{Version: approve.MemoVersion, Kind: approve.KindTested, Image: image, Chain: "repairer:vet", Guard: one.Hash(), Rig: strings.Repeat("0", 64)})
 		raw, _ := json.Marshal(sg)
 		if err := store.AddSigned(raw); err != nil {
 			t.Fatal(err)
@@ -165,7 +165,7 @@ func TestBundleCarriesTheCheck(t *testing.T) {
 		t.Fatalf("%q %v", what, err)
 	}
 	h := strings.TrimPrefix(what, "check ")
-	tx := `{"msg":[{"@type":"/vm.m_call","caller":"g1ss6w8xfy7vnp595yely63jqa8553k03mjcglen","send":"","max_deposit":"","pkg_path":"gno.land/r/autopatch/approve","func":"Check","args":["` + h + `"]}],"signatures":[],"memo":"x"}`
+	tx := `{"msg":[{"@type":"/vm.m_call","caller":"g1ss6w8xfy7vnp595yely63jqa8553k03mjcglen","send":"","max_deposit":"","pkg_path":"gno.land/r/repairer/approve","func":"Check","args":["` + h + `"]}],"signatures":[],"memo":"x"}`
 	m, _ := json.Marshal(agent.Message{Seq: 1, Tx: json.RawMessage(tx)})
 	if _, err := store.AddMessage(m); err != nil {
 		t.Fatal(err)

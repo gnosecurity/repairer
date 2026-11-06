@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jaekwon/autopatch/policy"
+	"github.com/jaekwon/repairer/policy"
 )
 
 const (

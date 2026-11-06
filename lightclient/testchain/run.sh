@@ -15,7 +15,7 @@ for i in $(seq 1 60); do curl -sf -m 2 127.0.0.1:36657/status 2>/dev/null | pyth
 # gnodev's default account is the public test1 key.
 printf '%s\n\n\n' "source bonus chronic canvas draft south burst lottery vacant surface solve popular case indicate oppose farm nothing bullet exhibit title speed wink action roast" \
   | "$B/gnokey" add -home "$D/kb" -recover -insecure-password-stdin test1 >/dev/null
-echo "" | "$B/gnokey" maketx call -home "$D/kb" -insecure-password-stdin -pkgpath gno.land/r/autopatch/guards -func SetLevel \
+echo "" | "$B/gnokey" maketx call -home "$D/kb" -insecure-password-stdin -pkgpath gno.land/r/repairer/guards -func SetLevel \
   -args 73804a3fcab787f11c404c13c46b06eb8452aa585fb7f92429fa7ab98635ed6c -args tested \
   -gas-fee 1000000ugnot -gas-wanted 20000000 -broadcast -chainid dev -remote 127.0.0.1:36657 test1 >/dev/null
 sleep 3

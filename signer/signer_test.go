@@ -18,10 +18,10 @@ import (
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/decred/dcrd/dcrec/secp256k1/v4/ecdsa"
 
-	"github.com/jaekwon/autopatch/approve"
-	"github.com/jaekwon/autopatch/check"
-	"github.com/jaekwon/autopatch/guard"
-	"github.com/jaekwon/autopatch/policy"
+	"github.com/jaekwon/repairer/approve"
+	"github.com/jaekwon/repairer/check"
+	"github.com/jaekwon/repairer/guard"
+	"github.com/jaekwon/repairer/policy"
 )
 
 const ownerHex = "02db41e6e79a9f5fc6813df46202e996d245ef327e5ff3cc47c11bdb46071ab08e"
@@ -321,7 +321,7 @@ func TestGnokeyGolden(t *testing.T) {
 			t.Fatalf("%s: %v", name, err)
 		}
 		// Tampered after signing: the agent's check fails.
-		bad := []byte(strings.Replace(string(signed), `"memo":"autopatch/1`, `"memo":"autopatch/2`, 1))
+		bad := []byte(strings.Replace(string(signed), `"memo":"repairer/1`, `"memo":"repairer/2`, 1))
 		if st.verify(bad, owner(t)) == nil {
 			t.Fatalf("%s: a changed memo passed", name)
 		}
@@ -443,9 +443,9 @@ func TestGnokeySkipsChain(t *testing.T) {
 		t.Fatal(err)
 	}
 	stmts := []*Statement{
-		{Func: "Cancel", Args: []string{ps[2].Hash()}, Memo: "autopatch/1 Cancel tiers " + ps[2].Hash()[:16], Chain: chain, Seq: 9, verify: none},
-		{Func: "Yes", Args: yes.Args(), Memo: "autopatch/2 Yes " + g.Name() + " in a format from the future", Chain: chain, Seq: 10, verify: none},
-		{Func: "Policy", Args: []string{unreadHash, ps[2].Hash()}, Memo: "autopatch/1 Policy tiers " + unreadHash[:16] + " replaces " + ps[2].Hash()[:16] + ": flavor newer", Chain: chain, Seq: 11, verify: none},
+		{Func: "Cancel", Args: []string{ps[2].Hash()}, Memo: "repairer/1 Cancel tiers " + ps[2].Hash()[:16], Chain: chain, Seq: 9, verify: none},
+		{Func: "Yes", Args: yes.Args(), Memo: "repairer/2 Yes " + g.Name() + " in a format from the future", Chain: chain, Seq: 10, verify: none},
+		{Func: "Policy", Args: []string{unreadHash, ps[2].Hash()}, Memo: "repairer/1 Policy tiers " + unreadHash[:16] + " replaces " + ps[2].Hash()[:16] + ": flavor newer", Chain: chain, Seq: 11, verify: none},
 		off,
 	}
 	dir := filepath.Join(out, "tiers")
@@ -483,7 +483,7 @@ func TestPrepareReboot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.Memo != "autopatch/1 Reboot web into 6.8.0-149-generic, once, not after 2026-11-06 09:00 UTC" || strings.Join(st.Args, " ") != "web 6.8.0-149-generic 1793955600" {
+	if st.Memo != "repairer/1 Reboot web into 6.8.0-149-generic, once, not after 2026-11-06 09:00 UTC" || strings.Join(st.Args, " ") != "web 6.8.0-149-generic 1793955600" {
 		t.Fatalf("%q %q", st.Memo, st.Args)
 	}
 	sign := func(args []string, memo string) []byte {
@@ -542,7 +542,7 @@ func TestPrepareCheck(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.Memo != "autopatch/1 Check cve-2026-98432/hit v1 "+c.Hash()[:16]+": setuid changed since 1793923200" {
+	if st.Memo != "repairer/1 Check cve-2026-98432/hit v1 "+c.Hash()[:16]+": setuid changed since 1793923200" {
 		t.Fatalf("%q", st.Memo)
 	}
 	sign := func(args []string, memo string) []byte {

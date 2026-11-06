@@ -1,4 +1,4 @@
-module github.com/jaekwon/autopatch
+module github.com/jaekwon/repairer
 
 go 1.27
 

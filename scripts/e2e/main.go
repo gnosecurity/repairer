@@ -28,11 +28,11 @@ import (
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/decred/dcrd/dcrec/secp256k1/v4/ecdsa"
 
-	"github.com/jaekwon/autopatch/agent"
-	"github.com/jaekwon/autopatch/approve"
-	"github.com/jaekwon/autopatch/check"
-	"github.com/jaekwon/autopatch/guard"
-	"github.com/jaekwon/autopatch/policy"
+	"github.com/jaekwon/repairer/agent"
+	"github.com/jaekwon/repairer/approve"
+	"github.com/jaekwon/repairer/check"
+	"github.com/jaekwon/repairer/guard"
+	"github.com/jaekwon/repairer/policy"
 )
 
 func main() {
@@ -97,7 +97,7 @@ func gen3(dir string) error {
 		return err
 	}
 	sg, err := approve.SignStatement(rig, approve.Statement{Version: approve.MemoVersion, Kind: approve.KindTested,
-		Chain: "autopatch:vet", Guard: g.Hash(), Rig: strings.Repeat("0", 64), Image: "ubuntu 24.04"})
+		Chain: "repairer:vet", Guard: g.Hash(), Rig: strings.Repeat("0", 64), Image: "ubuntu 24.04"})
 	if err != nil {
 		return err
 	}
@@ -150,7 +150,7 @@ func gen(dir string) error {
 	var names []string
 	for _, g := range []*guard.Guard{now, later} {
 		sg, err := approve.SignStatement(rig, approve.Statement{Version: approve.MemoVersion, Kind: approve.KindTested,
-			Chain: "autopatch:vet", Guard: g.Hash(), Rig: strings.Repeat("0", 64), Image: "ubuntu 24.04"})
+			Chain: "repairer:vet", Guard: g.Hash(), Rig: strings.Repeat("0", 64), Image: "ubuntu 24.04"})
 		if err != nil {
 			return err
 		}
@@ -223,7 +223,7 @@ func verify(path, key string) error {
 // 2, as gnokey would sign them (the second for when the system asks for a
 // reboot once the kernel runs).
 func genReboot(dir, mode, window, kernel, notAfter string) error {
-	seed := sha256.Sum256([]byte("autopatch e2e owner"))
+	seed := sha256.Sum256([]byte("repairer e2e owner"))
 	owner := secp256k1.PrivKeyFromBytes(seed[:])
 	pub := owner.PubKey().SerializeCompressed()
 	tier := `"reboot":"` + mode + `"`
@@ -290,7 +290,7 @@ func genReboot(dir, mode, window, kernel, notAfter string) error {
 // from the same fixed seed, a tier that waits for the owner), and bundles
 // carrying the owner's signed Checks with their files, sequences 1 to 4.
 func genCheck(dir, since, pkg string) error {
-	seed := sha256.Sum256([]byte("autopatch e2e owner"))
+	seed := sha256.Sum256([]byte("repairer e2e owner"))
 	owner := secp256k1.PrivKeyFromBytes(seed[:])
 	pub := owner.PubKey().SerializeCompressed()
 	p, err := policy.Decode([]byte(`{"fleet":"e2e","replaces":"","delay_seconds":86400,

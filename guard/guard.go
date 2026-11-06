@@ -1,4 +1,4 @@
-// Package guard defines autopatch's guard: a stopgap for a security flaw,
+// Package guard defines repairer's guard: a stopgap for a security flaw,
 // written as data.
 //
 // A guard can only take exposure away. Its blocks come from a short, fixed
@@ -141,7 +141,7 @@ func Parse(data []byte) (*Guard, error) {
 	}
 	body := bytes.TrimSuffix(data, []byte("\n"))
 	if !bytes.Equal(body, g.Canonical()) {
-		return nil, errors.New("reading guard: the file isn't in canonical form; write it with `autopatch-agent fmt`")
+		return nil, errors.New("reading guard: the file isn't in canonical form; write it with `repairer-agent fmt`")
 	}
 	return g, nil
 }

@@ -1,7 +1,7 @@
 // Package page is the lookout's web page. Everything on it is behind the
 // Adena sign-in (admin.go). It shows what the lookout knows, offers files
 // to download (the guards and policy to sign, the machines' signed reports
-// for autopatch-sign), and takes files back (what autopatch-sign signed).
+// for repairer-sign), and takes files back (what repairer-sign signed).
 // It never offers a command, and it can't sign anything.
 package page
 
@@ -20,16 +20,16 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jaekwon/autopatch/agent"
-	"github.com/jaekwon/autopatch/lookout"
-	"github.com/jaekwon/autopatch/policy"
+	"github.com/jaekwon/repairer/agent"
+	"github.com/jaekwon/repairer/lookout"
+	"github.com/jaekwon/repairer/policy"
 )
 
 //go:embed web
 var web embed.FS
 
 // MaxUpload is the most one uploaded file may be: a message from
-// autopatch-sign is a few KB.
+// repairer-sign is a few KB.
 const MaxUpload = 256 << 10
 
 // Server is the lookout's page.
@@ -248,7 +248,7 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 			if !keyed[h] {
 				keyed[h] = true
 				v.Machines = append(v.Machines, machineRow{Host: h, Silent: true,
-					Error: "no agent key in the policy yet (autopatch-agent init prints it)"})
+					Error: "no agent key in the policy yet (repairer-agent init prints it)"})
 			}
 		}
 	}
@@ -448,7 +448,7 @@ func (s *Server) render(w http.ResponseWriter, name string, v view) {
 	w.Write(buf.Bytes())
 }
 
-// upload keeps what autopatch-sign signed (or a guard, a policy, a signed
+// upload keeps what repairer-sign signed (or a guard, a policy, a signed
 // Tested). The agents check every signature; the lookout only carries.
 func (s *Server) upload(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, MaxUpload+16<<10)
@@ -473,14 +473,14 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request) {
 }
 
 // reports is every machine's newest signed report, as signed, in one tar:
-// what autopatch-sign checks before you sign (its -reports folder).
+// what repairer-sign checks before you sign (its -reports folder).
 func (s *Server) reports(w http.ResponseWriter, r *http.Request) {
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
 	for _, k := range s.Policy.Signers.Agents {
 		b, err := os.ReadFile(filepath.Join(s.Collector.Dir, k.Host+".json"))
 		if err != nil {
-			continue // no report kept: autopatch-sign will say so, and ask you to name it
+			continue // no report kept: repairer-sign will say so, and ask you to name it
 		}
 		hdr := &tar.Header{Name: "reports/" + k.Host + ".json", Mode: 0o644, Size: int64(len(b)), ModTime: s.Now()}
 		if err := tw.WriteHeader(hdr); err != nil {

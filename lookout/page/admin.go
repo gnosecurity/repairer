@@ -33,7 +33,7 @@ import (
 const DefaultAdmin = "g1ecsuj0q572jr0dhu29q9njtnmw03hyu7tyyvv6"
 
 const (
-	adminCookie  = "__Host-autopatch-admin"
+	adminCookie  = "__Host-repairer-admin"
 	adminLife    = 30 * 24 * time.Hour
 	adminKeyFile = "admin.key"
 	adminBody    = 16 << 10
@@ -95,7 +95,7 @@ func (k *sessionKey) sum(addr string, exp int64) []byte {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	m := hmac.New(sha256.New, k.key)
-	fmt.Fprintf(m, "autopatch lookout admin\n%s\n%d", addr, exp)
+	fmt.Fprintf(m, "repairer lookout admin\n%s\n%d", addr, exp)
 	return m.Sum(nil)
 }
 

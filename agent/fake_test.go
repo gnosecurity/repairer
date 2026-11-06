@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jaekwon/autopatch/guard"
+	"github.com/jaekwon/repairer/guard"
 )
 
 // fakeSys is a machine in memory. It records every change in order, and
@@ -20,7 +20,7 @@ type fakeSys struct {
 	files    map[string]string
 	strips   map[string]*fakeFile
 	settings map[string]string
-	tables   map[string]*fakeTable // "ip autopatch_…"
+	tables   map[string]*fakeTable // "ip repairer_…"
 	units    map[string]*fakeUnit
 	inUse    map[string]string
 	modules  map[string]string // name: "loadable" or "builtin"

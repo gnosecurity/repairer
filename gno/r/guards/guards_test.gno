@@ -42,7 +42,7 @@ var (
 	dave   = testutils.TestAddress("dave")
 	eve    = testutils.TestAddress("eve")
 	anyone = testutils.TestAddress("anyone")
-	self   = chain.PackageAddress("gno.land/r/autopatch/guards")
+	self   = chain.PackageAddress("gno.land/r/repairer/guards")
 )
 
 // Note: testing.SetRealm rewrites the realm value of the function that

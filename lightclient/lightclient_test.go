@@ -39,7 +39,7 @@ func TestParamOnALocalChain(t *testing.T) {
 	if err := lc.Start(ctx, Checkpoint{Height: 1, ValidatorsHash: types.NewValidatorSet(vals.Validators).Hash(), Time: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
-	const realm = "gno.land/r/autopatch/guards"
+	const realm = "gno.land/r/repairer/guards"
 	const key = "lvl_73804a3fcab787f11c404c13c46b06eb8452aa585fb7f92429fa7ab98635ed6c"
 	v, found, err := lc.Param(ctx, realm, key, h)
 	if err != nil || !found || string(v) != `"tested"` {

@@ -29,7 +29,7 @@ def recvn(c, n):
 def https(c):
     t = tls.wrap_socket(c, server_side=True)
     t.recv(4096)
-    body = b"autopatch-rig https"
+    body = b"repairer-rig https"
     t.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s" % (len(body), body))
     t.close()
 

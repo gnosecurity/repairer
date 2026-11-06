@@ -3,7 +3,7 @@
 //
 // The owner signs with a Ledger through gnokey. The statement is a gno sign doc
 // on a chain id no real chain uses, whose one message is a MsgCall to
-// gno.land/r/autopatch/approve that never runs. The agent rebuilds the signed
+// gno.land/r/repairer/approve that never runs. The agent rebuilds the signed
 // bytes itself from typed fields and checks the signature against them. It
 // never checks a signature over JSON it parsed. Every other key (agents, the
 // rig, vetters, the local model) is Ed25519.
@@ -24,15 +24,15 @@ import (
 )
 
 // Realm is the path every statement's MsgCall names. Nothing runs there.
-const Realm = "gno.land/r/autopatch/approve"
+const Realm = "gno.land/r/repairer/approve"
 
 // ChainID returns the chain id of an owner's statements for one fleet:
-// "autopatch:" and the first 16 hex digits of the owner key's sha256, a "/",
+// "repairer:" and the first 16 hex digits of the owner key's sha256, a "/",
 // and the fleet's name. Two owners who both call a fleet "home" don't accept
 // each other's statements.
 func ChainID(ownerKey []byte, fleet string) string {
 	sum := sha256.Sum256(ownerKey)
-	return "autopatch:" + hex.EncodeToString(sum[:8]) + "/" + fleet
+	return "repairer:" + hex.EncodeToString(sum[:8]) + "/" + fleet
 }
 
 // Call is a statement's one message: the function and arguments of a MsgCall

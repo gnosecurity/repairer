@@ -10,17 +10,17 @@
 # journal, with history reaching back. Every report verifies against the
 # agent's key. A result never carries a file's contents.
 #
-# Needs: RIG (images/, seed.iso, rig_ed25519), SRC (the autopatch source).
+# Needs: RIG (images/, seed.iso, rig_ed25519), SRC (the repairer source).
 # Touches nothing outside $RIG/runs.
 set -euo pipefail
 run=${1:?run number}
-R=${RIG:-/root/autopatch-rig}; SRC=${SRC:-/root/src/autopatch}
+R=${RIG:-/root/repairer-rig}; SRC=${SRC:-/root/src/repairer}
 img=$R/images/ubuntu-24.04-server-cloudimg-amd64.img
 w=$R/runs/hit-$run
 port=$((2600 + run % 100))
 rm -rf "$w"; mkdir -p "$w"
 source /etc/profile.d/dev.sh
-(cd "$SRC" && CGO_ENABLED=0 go build -trimpath -o "$w/autopatch-agent" ./cmd/autopatch-agent && go build -o "$w/e2e" ./scripts/e2e)
+(cd "$SRC" && CGO_ENABLED=0 go build -trimpath -o "$w/repairer-agent" ./cmd/repairer-agent && go build -o "$w/e2e" ./scripts/e2e)
 since=$(date -u +%s)
 "$w/e2e" gencheck "$w/in" "$since" base-files
 qemu-img create -q -f qcow2 -F qcow2 -b "$img" "$w/disk.qcow2" 8G
@@ -35,20 +35,20 @@ waitssh() { for i in $(seq 1 120); do "${S[@]}" true 2>/dev/null && return 0; sl
 log() { echo "$(date -u +%H:%M:%S) $*" | tee -a "$w/log.txt"; }
 waitssh
 scp -q -i "$R/rig_ed25519" -P "$port" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-  "$w/autopatch-agent" "$w/in/policy.json" "$w"/in/check-*.json rig@127.0.0.1:
-"${S[@]}" 'sudo install -o root -g root -m 0755 autopatch-agent /usr/local/sbin/autopatch-agent && sudo useradd --system --home-dir /nonexistent --shell /usr/sbin/nologin autopatch'
-"${S[@]}" 'sudo /usr/local/sbin/autopatch-agent install' >> "$w/log.txt" 2>&1
-key=$("${S[@]}" 'sudo /usr/local/sbin/autopatch-agent init -host vm1 -seq 0 -intake-user autopatch /home/rig/policy.json' | tail -1)
+  "$w/repairer-agent" "$w/in/policy.json" "$w"/in/check-*.json rig@127.0.0.1:
+"${S[@]}" 'sudo install -o root -g root -m 0755 repairer-agent /usr/local/sbin/repairer-agent && sudo useradd --system --home-dir /nonexistent --shell /usr/sbin/nologin repairer'
+"${S[@]}" 'sudo /usr/local/sbin/repairer-agent install' >> "$w/log.txt" 2>&1
+key=$("${S[@]}" 'sudo /usr/local/sbin/repairer-agent init -host vm1 -seq 0 -intake-user repairer /home/rig/policy.json' | tail -1)
 log "init: agent key $key"
 n=0
 # ask N NAME MIN PREV: deliver Check N through intake and wait for the
 # report to carry a result of check NAME other than PREV, among at least
 # MIN results; print it.
 ask() {
-  "${S[@]}" "sudo -u autopatch /usr/local/sbin/autopatch-agent intake < /home/rig/check-$1.json" >> "$w/log.txt" 2>&1
+  "${S[@]}" "sudo -u repairer /usr/local/sbin/repairer-agent intake < /home/rig/check-$1.json" >> "$w/log.txt" 2>&1
   for i in $(seq 1 12); do
     sleep 20; n=$((n+1))
-    "${S[@]}" 'sudo -u autopatch /usr/local/sbin/autopatch-agent report' > "$w/report-$n.json" 2>/dev/null || continue
+    "${S[@]}" 'sudo -u repairer /usr/local/sbin/repairer-agent report' > "$w/report-$n.json" 2>/dev/null || continue
     "$w/e2e" verify "$w/report-$n.json" "$key" > "$w/summary-$n.txt" 2>&1 || { log "VERIFY FAILED: $(cat "$w/summary-$n.txt")"; return 1; }
     line=$(grep -m1 "^  hit: e2e/$2 v1 " "$w/summary-$n.txt" || true)
     if [ -n "$line" ] && [ "$line" != "${4:-}" ] && [ "$(grep -c '^  hit:' "$w/summary-$n.txt")" -ge "$3" ]; then

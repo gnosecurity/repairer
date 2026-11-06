@@ -1,12 +1,21 @@
-# autopatch
+# Repairer
 
-autopatch defends servers in the gap between a flaw going public and the
-vendor's fix running. It is the home half of gno.security. A small agent on
-each server puts on **guards**, which are stopgaps written as data, when the
-owner's rules allow. It takes them off once the real fix runs.
+> "Your people will rebuild the ancient ruins; you will restore the age-old foundations; you will be called Repairer of the Breach, Restorer of the Streets of Dwelling." (Isaiah 58:12, Berean Standard Bible)
 
-This repository is at step 1: the agent's guard engine. The lookout, signed
-policies, the test rig and the gno.land side come next.
+Repairer defends servers in the gap between a flaw going public and the
+vendor's fix running. It is one of gno.security's two products, beside
+Immune: a small agent on each server puts on **guards**, which are stopgaps
+written as data, when the owner's signed rules allow, and takes them off once
+the real fix runs. A lookout on the owner's own network reads the security
+news, the owner signs approvals on a hardware wallet, and a swarm on gno.land
+writes and checks the guards, with money at stake. More at
+https://gno.security/repairer/.
+
+Built and tested on test machines (Ubuntu 22.04, 24.04 and 26.04, Debian 12
+and 13): the agent with its guards, reboots and was-I-hit checks; signed
+policies and approvals; the lookout and its page; the test rig; gnosh at
+home; a light client for gno.land; and the Guards realm on a local chain.
+Not yet on gno.land, and not yet running on anyone's servers.
 
 ## Guards only take away
 
@@ -52,7 +61,7 @@ turns MPTCP off for new sockets.
   `-confirm-within` (default 10 minutes). Nothing about a pending guard
   survives a reboot.
 - **`confirm`** makes the guard last: the mask becomes lasting, and the setting
-  goes into `/etc/sysctl.d/99-zz-autopatch.conf`, which sorts after the
+  goes into `/etc/sysctl.d/99-zz-repairer.conf`, which sorts after the
   system's own files.
 - **`boot`** runs early at every boot. It takes off whatever was never
   confirmed, including a guard left half on by a crash. It puts back what was
@@ -94,14 +103,14 @@ before putting a guard on, at every boot, and in `check`:
 ## Use
 
 ```
-autopatch-agent fmt     guard.json   # print it in canonical form, the only form apply takes
-autopatch-agent plan    guard.json   # what it would do here; changes nothing
-autopatch-agent apply   guard.json   # on, pending, undo armed
-autopatch-agent confirm <hash|id>
-autopatch-agent undo    <hash|id>
-autopatch-agent status
-autopatch-agent check   [-repair]
-autopatch-agent boot
+repairer-agent fmt     guard.json   # print it in canonical form, the only form apply takes
+repairer-agent plan    guard.json   # what it would do here; changes nothing
+repairer-agent apply   guard.json   # on, pending, undo armed
+repairer-agent confirm <hash|id>
+repairer-agent undo    <hash|id>
+repairer-agent status
+repairer-agent check   [-repair]
+repairer-agent boot
 ```
 
 ## Build and test

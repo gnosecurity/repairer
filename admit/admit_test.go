@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jaekwon/autopatch/approve"
-	"github.com/jaekwon/autopatch/guard"
-	"github.com/jaekwon/autopatch/policy"
+	"github.com/jaekwon/repairer/approve"
+	"github.com/jaekwon/repairer/guard"
+	"github.com/jaekwon/repairer/policy"
 )
 
 type keyring map[string]ed25519.PrivateKey
@@ -117,12 +117,12 @@ func TestRigAndVetters(t *testing.T) {
 	p, g := fleet(t, k), guardOne(t)
 	rigHash := strings.Repeat("c", 64)
 	tested := func(who string) Signed {
-		return sign(t, k, who, approve.Statement{Kind: approve.KindTested, Image: "ubuntu 24.04", Chain: "autopatch:vet", Guard: g.Hash(), Rig: rigHash})
+		return sign(t, k, who, approve.Statement{Kind: approve.KindTested, Image: "ubuntu 24.04", Chain: "repairer:vet", Guard: g.Hash(), Rig: rigHash})
 	}
 	if d := Admit(p, "backup", g, Evidence{Signed: []Signed{tested("rig")}}, onUbuntu, nonce, now); !d.OK || d.By != "rig" {
 		t.Fatalf("rig: %+v", d)
 	}
-	unpinned := sign(t, k, "rig", approve.Statement{Kind: approve.KindTested, Image: "ubuntu 24.04", Chain: "autopatch:vet", Guard: g.Hash(), Rig: strings.Repeat("d", 64)})
+	unpinned := sign(t, k, "rig", approve.Statement{Kind: approve.KindTested, Image: "ubuntu 24.04", Chain: "repairer:vet", Guard: g.Hash(), Rig: strings.Repeat("d", 64)})
 	if d := Admit(p, "backup", g, Evidence{Signed: []Signed{unpinned}}, onUbuntu, nonce, now); d.OK || !strings.Contains(d.Why, "from a pinned rig build") {
 		t.Fatalf("a Tested from a rig build the policy doesn't pin: %+v", d) // round 9, minor 12
 	}
@@ -137,7 +137,7 @@ func TestRigAndVetters(t *testing.T) {
 		t.Fatalf("two vetters: %+v", d)
 	}
 	vetted := func(who string) Signed {
-		return sign(t, k, who, approve.Statement{Kind: approve.KindTested, Image: "ubuntu 24.04", Chain: "autopatch:vet", Guard: g.Hash(), Rig: strings.Repeat("d", 64)})
+		return sign(t, k, who, approve.Statement{Kind: approve.KindTested, Image: "ubuntu 24.04", Chain: "repairer:vet", Guard: g.Hash(), Rig: strings.Repeat("d", 64)})
 	}
 	if d := Admit(p, "backup", g, Evidence{Signed: []Signed{vetted("v1"), vetted("v3")}}, onUbuntu, nonce, now); d.OK {
 		t.Fatal("two vetters' Tested from a rig build the policy doesn't pin admitted")
@@ -156,7 +156,7 @@ func TestModelRule6(t *testing.T) {
 	k := newKeys(t, "rig", "v1", "v2", "v3", "model", "backup", "mail")
 	p := fleet(t, k)
 	modelYes := func(g *guard.Guard) Evidence {
-		return Evidence{Signed: []Signed{sign(t, k, "model", approve.Statement{Kind: approve.KindModel, Chain: "autopatch:x/home", Guard: g.Hash()})}}
+		return Evidence{Signed: []Signed{sign(t, k, "model", approve.Statement{Kind: approve.KindModel, Chain: "repairer:x/home", Guard: g.Hash()})}}
 	}
 	opts := dropOnly(t, "CVE-2099-10", `{"drop":{"family":"ipv4","protocol":"tcp","ip_options":true}}`)
 	port := dropOnly(t, "CVE-2099-11", `{"drop":{"family":"ipv4","protocol":"tcp","ports":["8080"]}}`)
@@ -193,9 +193,9 @@ func TestCanary(t *testing.T) {
 	k := newKeys(t, "rig", "v1", "v2", "v3", "model", "backup", "mail")
 	p := fleet(t, k)
 	g := dropOnly(t, "CVE-2099-14", `{"drop":{"family":"ipv4","protocol":"tcp","ip_options":true}}`) // bites now
-	rig := sign(t, k, "rig", approve.Statement{Kind: approve.KindTested, Image: "ubuntu 24.04", Chain: "autopatch:vet", Guard: g.Hash(), Rig: strings.Repeat("c", 64)})
+	rig := sign(t, k, "rig", approve.Statement{Kind: approve.KindTested, Image: "ubuntu 24.04", Chain: "repairer:vet", Guard: g.Hash(), Rig: strings.Repeat("c", 64)})
 	healthy := func(who, host, state, why, n string) Signed {
-		return sign(t, k, who, approve.Statement{Kind: approve.KindHealthy, Chain: "autopatch:x/home", Guard: g.Hash(), Host: host, State: state, Why: why, Nonce: n})
+		return sign(t, k, who, approve.Statement{Kind: approve.KindHealthy, Chain: "repairer:x/home", Guard: g.Hash(), Host: host, State: state, Why: why, Nonce: n})
 	}
 	cases := []struct {
 		name string
@@ -226,9 +226,9 @@ func TestCanaryLater(t *testing.T) {
 	if !g.Later() {
 		t.Fatal("guard one should bite later")
 	}
-	rig := sign(t, k, "rig", approve.Statement{Kind: approve.KindTested, Image: "ubuntu 24.04", Chain: "autopatch:vet", Guard: g.Hash(), Rig: strings.Repeat("c", 64)})
+	rig := sign(t, k, "rig", approve.Statement{Kind: approve.KindTested, Image: "ubuntu 24.04", Chain: "repairer:vet", Guard: g.Hash(), Rig: strings.Repeat("c", 64)})
 	healthy := func(state, why string) Signed {
-		return sign(t, k, "backup", approve.Statement{Kind: approve.KindHealthy, Chain: "autopatch:x/home", Guard: g.Hash(), Host: "backup", State: state, Why: why, Nonce: nonce})
+		return sign(t, k, "backup", approve.Statement{Kind: approve.KindHealthy, Chain: "repairer:x/home", Guard: g.Hash(), Host: "backup", State: state, Why: why, Nonce: nonce})
 	}
 	for state, ok := range map[string]bool{"on": false, "refused": false, "booted": true} {
 		why := ""
@@ -250,7 +250,7 @@ func TestCanaryLater(t *testing.T) {
 // A refusal must give one of the listed reasons, or it can't be signed.
 func TestRefusalReasons(t *testing.T) {
 	k := newKeys(t, "backup")
-	st := approve.Statement{Version: approve.MemoVersion, Kind: approve.KindHealthy, Chain: "autopatch:x/home", Guard: strings.Repeat("a", 64), Host: "backup", State: "refused", Nonce: nonce}
+	st := approve.Statement{Version: approve.MemoVersion, Kind: approve.KindHealthy, Chain: "repairer:x/home", Guard: strings.Repeat("a", 64), Host: "backup", State: "refused", Nonce: nonce}
 	for why, ok := range map[string]bool{"in-use": true, "netns": true, "never-touch": true, "protected-flow": true, "": false, "containers keep their own MPTCP": false, "no Tested": false} {
 		st.Why = why
 		if _, err := approve.SignStatement(k["backup"], st); (err == nil) != ok {
@@ -270,7 +270,7 @@ func TestOwnerFirst(t *testing.T) {
 	p := fleet(t, k)
 	p.Tiers[0].Admit = []string{"rig", "vetters", "model", "me"}
 	g := dropOnly(t, "CVE-2099-12", `{"drop":{"family":"ipv4","protocol":"tcp","ip_options":true}}`)
-	rig := sign(t, k, "rig", approve.Statement{Kind: approve.KindTested, Image: "ubuntu 24.04", Chain: "autopatch:vet", Guard: g.Hash(), Rig: strings.Repeat("c", 64)})
+	rig := sign(t, k, "rig", approve.Statement{Kind: approve.KindTested, Image: "ubuntu 24.04", Chain: "repairer:vet", Guard: g.Hash(), Rig: strings.Repeat("c", 64)})
 	yes := &approve.Yes{Hash: g.Hash(), Tiers: []string{"A"}, Until: now.Add(time.Hour), Mode: "keep", NoCanary: true}
 	if d := Admit(p, "mysites", g, Evidence{Yes: yes, Signed: []Signed{rig}}, onUbuntu, nonce, now); !d.OK || d.By != "me" {
 		t.Fatalf("the owner's yes with the rig's Tested: %+v", d)
@@ -289,7 +289,7 @@ func TestNotAutoNeedsOwner(t *testing.T) {
 	if g.Auto() {
 		t.Fatal("cifs is on the auto list; pick another module")
 	}
-	rig := sign(t, k, "rig", approve.Statement{Kind: approve.KindTested, Image: "ubuntu 24.04", Chain: "autopatch:vet", Guard: g.Hash(), Rig: strings.Repeat("c", 64)})
+	rig := sign(t, k, "rig", approve.Statement{Kind: approve.KindTested, Image: "ubuntu 24.04", Chain: "repairer:vet", Guard: g.Hash(), Rig: strings.Repeat("c", 64)})
 	if d := Admit(p, "backup", g, Evidence{Signed: []Signed{rig}}, onUbuntu, nonce, now); d.OK || !strings.Contains(d.Why, "owner's yes") {
 		t.Fatalf("the rig admitted a block outside the auto lists: %+v", d)
 	}
@@ -301,7 +301,7 @@ func TestNotAutoNeedsOwner(t *testing.T) {
 
 func TestSignedStatements(t *testing.T) {
 	k := newKeys(t, "a")
-	st := approve.Statement{Version: approve.MemoVersion, Kind: approve.KindTested, Image: "ubuntu 24.04", Chain: "autopatch:vet", Guard: strings.Repeat("a", 64), Rig: strings.Repeat("b", 64)}
+	st := approve.Statement{Version: approve.MemoVersion, Kind: approve.KindTested, Image: "ubuntu 24.04", Chain: "repairer:vet", Guard: strings.Repeat("a", 64), Rig: strings.Repeat("b", 64)}
 	s, err := approve.SignStatement(k["a"], st)
 	if err != nil {
 		t.Fatal(err)
@@ -311,15 +311,15 @@ func TestSignedStatements(t *testing.T) {
 	if _, err := approve.SignStatement(k["a"], noImage); err == nil {
 		t.Error("signed a Tested that names no system")
 	}
-	b := []byte(`{"statement":{"v":"autopatch/1","kind":"Tested","chain":"autopatch:vet","guard":"` + st.Guard + `","rig":"` + st.Rig + `","image":"ubuntu 24.04"},"key":"` + s.Key + `","sig":"` + s.Sig + `"}`)
+	b := []byte(`{"statement":{"v":"repairer/1","kind":"Tested","chain":"repairer:vet","guard":"` + st.Guard + `","rig":"` + st.Rig + `","image":"ubuntu 24.04"},"key":"` + s.Key + `","sig":"` + s.Sig + `"}`)
 	if _, key, err := approve.ParseSigned(b); err != nil || hex.EncodeToString(key) != s.Key {
 		t.Fatalf("round trip: %v", err)
 	}
 	for name, e := range map[string]string{
 		"another guard":   strings.Replace(string(b), `"guard":"aaaa`, `"guard":"baaa`, 1),
-		"a fleet":         strings.Replace(string(b), `autopatch:vet`, `autopatch:x/home`, 1),
+		"a fleet":         strings.Replace(string(b), `repairer:vet`, `repairer:x/home`, 1),
 		"an extra field":  strings.Replace(string(b), `"key":`, `"note":"x","key":`, 1),
-		"another version": strings.Replace(string(b), `autopatch/1`, `autopatch/2`, 1),
+		"another version": strings.Replace(string(b), `repairer/1`, `repairer/2`, 1),
 		"another system":  strings.Replace(string(b), `ubuntu 24.04`, `ubuntu 22.04`, 1),
 		"no system":       strings.Replace(string(b), `,"image":"ubuntu 24.04"`, ``, 1),
 	} {

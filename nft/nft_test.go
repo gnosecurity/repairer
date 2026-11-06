@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jaekwon/autopatch/guard"
+	"github.com/jaekwon/repairer/guard"
 )
 
 func guardOne(t *testing.T) *guard.Guard {
@@ -77,17 +77,17 @@ func TestScriptRefusesOddComment(t *testing.T) {
 	}
 }
 
-// A trimmed copy of `nft -j list table ip autopatch_…` from nftables 1.0.9.
+// A trimmed copy of `nft -j list table ip repairer_…` from nftables 1.0.9.
 const listJSON = `{"nftables": [{"metainfo": {"version": "1.0.9", "release_name": "Old Doc Yak #3", "json_schema_version": 1}},
-{"table": {"family": "ip", "name": "autopatch_0123456789ab", "handle": 7}},
-{"chain": {"family": "ip", "table": "autopatch_0123456789ab", "name": "in", "handle": 1, "type": "filter", "hook": "prerouting", "prio": -300, "policy": "accept"}},
-{"rule": {"family": "ip", "table": "autopatch_0123456789ab", "chain": "in", "handle": 2, "comment": "cve-2026-98432/linux-ipv4-ipopt v1",
+{"table": {"family": "ip", "name": "repairer_0123456789ab", "handle": 7}},
+{"chain": {"family": "ip", "table": "repairer_0123456789ab", "name": "in", "handle": 1, "type": "filter", "hook": "prerouting", "prio": -300, "policy": "accept"}},
+{"rule": {"family": "ip", "table": "repairer_0123456789ab", "chain": "in", "handle": 2, "comment": "cve-2026-98432/linux-ipv4-ipopt v1",
  "expr": [{"match": {"op": "==", "left": {"payload": {"protocol": "ip", "field": "protocol"}}, "right": "tcp"}},
           {"match": {"op": ">", "left": {"payload": {"protocol": "ip", "field": "hdrlength"}}, "right": 5}},
           {"counter": {"packets": 3, "bytes": 180}}, {"drop": null}]}}]}`
 
 func TestParseList(t *testing.T) {
-	lt, err := ParseList([]byte(listJSON), "autopatch_0123456789ab")
+	lt, err := ParseList([]byte(listJSON), "repairer_0123456789ab")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestParseList(t *testing.T) {
 	if lt.Rules[0].Packets != 3 || lt.Rules[0].Comment != "cve-2026-98432/linux-ipv4-ipopt v1" {
 		t.Fatalf("%+v", lt.Rules[0])
 	}
-	if _, err := ParseList([]byte(listJSON), "autopatch_other"); err == nil {
+	if _, err := ParseList([]byte(listJSON), "repairer_other"); err == nil {
 		t.Fatal("found a chain in the wrong table")
 	}
 }

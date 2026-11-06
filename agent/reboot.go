@@ -15,10 +15,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jaekwon/autopatch/policy"
+	"github.com/jaekwon/repairer/policy"
 )
 
-// Reboots by tier (B3; AUTOPATCH.md, "Reboots and kernels"). A reboot is
+// Reboots by tier (B3; REPAIRER.md, "Reboots and kernels"). A reboot is
 // owed when the newest installed kernel isn't the one running. The tier
 // says who may reboot: "window", the agent itself inside the tier's window,
 // at most once in 20 hours, never while a guard is on trial; "yes", only on

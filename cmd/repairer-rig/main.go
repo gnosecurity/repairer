@@ -1,4 +1,4 @@
-// Command autopatch-rig signs what the rig found. scripts/rig/rig.sh runs a
+// Command repairer-rig signs what the rig found. scripts/rig/rig.sh runs a
 // guard's checks in a fresh VM and writes a transcript; this command names
 // the rig that ran (a hash of its scripts, the image and the agent binary;
 // rig.sh pins QEMU's version, and the CPU is recorded beside the transcript,
@@ -8,8 +8,8 @@
 // Tested counts on. The rig's real key stays off the devbox; development
 // uses a test key.
 //
-//	autopatch-rig hash -image IMG -agent BIN
-//	autopatch-rig sign -key RIG.key -rig HASH -guard GUARD.json TRANSCRIPT.json
+//	repairer-rig hash -image IMG -agent BIN
+//	repairer-rig sign -key RIG.key -rig HASH -guard GUARD.json TRANSCRIPT.json
 package main
 
 import (
@@ -27,17 +27,17 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/jaekwon/autopatch/approve"
-	"github.com/jaekwon/autopatch/guard"
+	"github.com/jaekwon/repairer/approve"
+	"github.com/jaekwon/repairer/guard"
 )
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: autopatch-rig <hash|sign> [flags]")
+		fmt.Fprintln(os.Stderr, "usage: repairer-rig <hash|sign> [flags]")
 		os.Exit(2)
 	}
 	if err := run(os.Args[1], os.Args[2:], os.Stdout); err != nil {
-		fmt.Fprintln(os.Stderr, "autopatch-rig:", err)
+		fmt.Fprintln(os.Stderr, "repairer-rig:", err)
 		os.Exit(1)
 	}
 }
@@ -48,7 +48,7 @@ func run(cmd string, args []string, stdout io.Writer) error {
 	agentBin := fs.String("agent", "", "hash: the agent binary the rig installs")
 	scripts := fs.String("scripts", "scripts/rig", "hash: the rig's scripts")
 	keyFile := fs.String("key", "", "sign: the rig's Ed25519 key (hex seed)")
-	rig := fs.String("rig", "", "sign: the rig hash, from autopatch-rig hash")
+	rig := fs.String("rig", "", "sign: the rig hash, from repairer-rig hash")
 	guardFile := fs.String("guard", "", "sign: the guard the transcript is about")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -128,7 +128,7 @@ func Sign(seedHex []byte, rig string, guardFile, transcript []byte) (approve.Sig
 	}
 	// A guard that mixes blocks that bite now with ones that bite later is
 	// refused: an agent treats it as later, so an urgent drop would wait for
-	// a canary's boot (AUTOPATCH.md rule 4).
+	// a canary's boot (REPAIRER.md rule 4).
 	if strings.HasPrefix(g.Timing(), "mixes") {
 		return approve.Signed{}, errors.New("the guard mixes blocks that bite now with ones that bite later; file them as two guards")
 	}
@@ -156,7 +156,7 @@ func Sign(seedHex []byte, rig string, guardFile, transcript []byte) (approve.Sig
 		return approve.Signed{}, errors.New("the rig key is a 32-byte seed in hex")
 	}
 	return approve.SignStatement(ed25519.NewKeyFromSeed(seed), approve.Statement{Version: approve.MemoVersion,
-		Kind: approve.KindTested, Chain: "autopatch:vet", Guard: g.Hash(), Rig: rig, Image: t.Image})
+		Kind: approve.KindTested, Chain: "repairer:vet", Guard: g.Hash(), Rig: rig, Image: t.Image})
 }
 
 func writtenFor(g *guard.Guard, osID, release string) bool {

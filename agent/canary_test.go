@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jaekwon/autopatch/approve"
-	"github.com/jaekwon/autopatch/guard"
-	"github.com/jaekwon/autopatch/policy"
+	"github.com/jaekwon/repairer/approve"
+	"github.com/jaekwon/repairer/guard"
+	"github.com/jaekwon/repairer/policy"
 )
 
 // join makes a second machine in the same fleet as tr: the same keys,

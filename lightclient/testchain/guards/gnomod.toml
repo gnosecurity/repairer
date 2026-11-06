@@ -1,2 +1,2 @@
-module = "gno.land/r/autopatch/guards"
+module = "gno.land/r/repairer/guards"
 gno = "0.9"

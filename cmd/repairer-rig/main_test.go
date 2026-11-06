@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jaekwon/autopatch/approve"
-	"github.com/jaekwon/autopatch/guard"
+	"github.com/jaekwon/repairer/approve"
+	"github.com/jaekwon/repairer/guard"
 )
 
 func TestSign(t *testing.T) {

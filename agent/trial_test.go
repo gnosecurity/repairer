@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jaekwon/autopatch/approve"
-	"github.com/jaekwon/autopatch/guard"
-	"github.com/jaekwon/autopatch/policy"
+	"github.com/jaekwon/repairer/approve"
+	"github.com/jaekwon/repairer/guard"
+	"github.com/jaekwon/repairer/policy"
 )
 
 // trial is a test machine in a fleet with real Ed25519 keys for the rig and
@@ -105,7 +105,7 @@ func (tr *trial) deliver(b Bundle) {
 func (tr *trial) tested(g *guard.Guard) {
 	tr.t.Helper()
 	sg, err := approve.SignStatement(tr.rig, approve.Statement{Version: approve.MemoVersion, Kind: approve.KindTested,
-		Image: "ubuntu 24.04", Chain: "autopatch:vet", Guard: g.Hash(), Rig: strings.Repeat("c", 64)})
+		Image: "ubuntu 24.04", Chain: "repairer:vet", Guard: g.Hash(), Rig: strings.Repeat("c", 64)})
 	if err != nil {
 		tr.t.Fatal(err)
 	}
@@ -532,7 +532,7 @@ func TestTrialWaitsForCanary(t *testing.T) {
 	// An old nonce, mail's own key posing as the canary, and another fleet's
 	// chain don't count.
 	other := healthy(tr.keys["backup"], "backup", nonce)
-	other.Statement.Chain = "autopatch:0123456789abcdef/other"
+	other.Statement.Chain = "repairer:0123456789abcdef/other"
 	if other, err := approve.SignStatement(tr.keys["backup"], other.Statement); err != nil {
 		t.Fatal(err)
 	} else {

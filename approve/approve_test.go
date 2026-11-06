@@ -9,17 +9,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jaekwon/autopatch/guard"
-	"github.com/jaekwon/autopatch/policy"
+	"github.com/jaekwon/repairer/guard"
+	"github.com/jaekwon/repairer/policy"
 )
 
 // The fixture is a real statement: gnokey v1.7.0 signed it offline on the
-// devbox with the public test key "owner", for chain id autopatch:test,
+// devbox with the public test key "owner", for chain id repairer:test,
 // account 0, sequence 1. The golden files are what gno v1.7.0's own
 // Tx.GetSignBytes and GetSignBytesLegacy give for it.
 const (
-	fixtureChain = "autopatch:test"
-	fixtureMemo  = "autopatch: yes to guard 3526eb39300e on tiers A,B until 2026-11-06"
+	fixtureChain = "repairer:test"
+	fixtureMemo  = "repairer: yes to guard 3526eb39300e on tiers A,B until 2026-11-06"
 )
 
 func read(t *testing.T, name string) []byte {
@@ -90,13 +90,13 @@ func TestVerifyGnokeyRefusals(t *testing.T) {
 		pub   []byte
 		memo  string
 	}{
-		{"another fleet", b, "autopatch:other", 1, pub, fixtureMemo},
+		{"another fleet", b, "repairer:other", 1, pub, fixtureMemo},
 		{"another sequence", b, fixtureChain, 2, pub, fixtureMemo},
 		{"a memo the agent didn't write", b, fixtureChain, 1, pub, fixtureMemo + "!"},
 		{"another key pinned", b, fixtureChain, 1, other, fixtureMemo},
 		{"an argument changed", []byte(strings.Replace(string(b), `"A,B"`, `"A,B,C"`, 1)), fixtureChain, 1, pub, fixtureMemo},
 		{"the function changed", []byte(strings.Replace(string(b), `"func":"Yes"`, `"func":"Off"`, 1)), fixtureChain, 1, pub, fixtureMemo},
-		{"another realm", []byte(strings.Replace(string(b), `gno.land/r/autopatch/approve`, `gno.land/r/autopatch/approv`, 1)), fixtureChain, 1, pub, fixtureMemo},
+		{"another realm", []byte(strings.Replace(string(b), `gno.land/r/repairer/approve`, `gno.land/r/repairer/approv`, 1)), fixtureChain, 1, pub, fixtureMemo},
 		{"coins sent", []byte(strings.Replace(string(b), `"send":""`, `"send":"1ugnot"`, 1)), fixtureChain, 1, pub, fixtureMemo},
 		{"not JSON", []byte("{"), fixtureChain, 1, pub, fixtureMemo},
 	}
@@ -153,7 +153,7 @@ func TestVerifyEd25519(t *testing.T) {
 
 func TestChainID(t *testing.T) {
 	a := ChainID([]byte{1, 2, 3}, "home")
-	if !strings.HasPrefix(a, "autopatch:") || !strings.HasSuffix(a, "/home") || len(a) != len("autopatch:")+16+len("/home") {
+	if !strings.HasPrefix(a, "repairer:") || !strings.HasSuffix(a, "/home") || len(a) != len("repairer:")+16+len("/home") {
 		t.Fatalf("%q", a)
 	}
 	if a == ChainID([]byte{1, 2, 4}, "home") {
@@ -186,7 +186,7 @@ func TestVerifyYes(t *testing.T) {
 	}
 	pub := tx.Signatures[0].PubKey.Value
 	chain := ChainID(pub, "test")
-	if chain != "autopatch:c9216f6e4272339f/test" {
+	if chain != "repairer:c9216f6e4272339f/test" {
 		t.Fatalf("chain id %q", chain)
 	}
 	g := guardOne(t)
@@ -263,7 +263,7 @@ func TestVerifyPolicy(t *testing.T) {
 	if err := VerifyPolicy(b, chain, 8, pub, old, new); err != nil {
 		t.Fatal(err)
 	}
-	if want := "autopatch/1 Policy test " + new.Hash()[:16] + " replaces " + old.Hash()[:16] + ": delay 86400s->172800s; vetters +v2 3333333333333333333333333333333333333333333333333333333333333333; vetters needed 1->2"; tx.Memo != want {
+	if want := "repairer/1 Policy test " + new.Hash()[:16] + " replaces " + old.Hash()[:16] + ": delay 86400s->172800s; vetters +v2 3333333333333333333333333333333333333333333333333333333333333333; vetters needed 1->2"; tx.Memo != want {
 		t.Fatalf("memo %q", tx.Memo)
 	}
 	// The same signature can't carry a different change.

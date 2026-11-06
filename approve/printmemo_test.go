@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jaekwon/autopatch/guard"
-	"github.com/jaekwon/autopatch/policy"
+	"github.com/jaekwon/repairer/guard"
+	"github.com/jaekwon/repairer/policy"
 )
 
 // fixturePolicies are the old and new policies of the Policy fixture: the

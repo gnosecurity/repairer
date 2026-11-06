@@ -1,7 +1,7 @@
 #!/bin/bash
-# planted.sh OUT: the rig's negative controls (AUTOPATCH.md D1: "the planted
+# planted.sh OUT: the rig's negative controls (REPAIRER.md D1: "the planted
 # guards fail"). Each guard in scripts/rig/planted is either refused before
-# it goes on (autopatch-agent fmt, or apply in the VM) or run through the
+# it goes on (repairer-agent fmt, or apply in the VM) or run through the
 # rig; a failing check, or a refusal, is "caught". expect.tsv says which
 # the single-VM rig must catch and which it can't see yet (a gap D1's client
 # VM and router close). Exit 1 when an outcome differs from expect.tsv.

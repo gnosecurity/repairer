@@ -46,7 +46,7 @@ func IsRefusalCode(s string) bool {
 type Statement struct {
 	Version string `json:"v"`     // MemoVersion
 	Kind    string `json:"kind"`  // KindTested, KindHealthy or KindModel
-	Chain   string `json:"chain"` // autopatch:vet for Tested, the fleet's chain id otherwise
+	Chain   string `json:"chain"` // repairer:vet for Tested, the fleet's chain id otherwise
 	Guard   string `json:"guard"` // the guard's hash
 	// Rig is the pinned rig's hash, for Tested, and Image the system it ran,
 	// such as "ubuntu 24.04": a Tested counts only on machines of that
@@ -90,7 +90,7 @@ func (st Statement) bytes() ([]byte, error) {
 	}
 	switch st.Kind {
 	case KindTested:
-		if st.Chain != "autopatch:vet" || !isHash(st.Rig) || !imageRe.MatchString(st.Image) || st.Host != "" || st.State != "" {
+		if st.Chain != "repairer:vet" || !isHash(st.Rig) || !imageRe.MatchString(st.Image) || st.Host != "" || st.State != "" {
 			return nil, errors.New("approve: a Tested statement names the rig, the system it ran (\"ubuntu 24.04\") and no fleet")
 		}
 	case KindHealthy:

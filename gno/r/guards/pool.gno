@@ -8,7 +8,7 @@ import (
 	"gno.land/p/nt/avl/v0"
 )
 
-// The pool's vote (AUTOPATCH.md, the swarm's rule 3): the last word on a
+// The pool's vote (REPAIRER.md, the swarm's rule 3): the last word on a
 // dispute no panel decided or a panel's word appealed past the largest.
 // Every ticket staked MinTicketAge before the filing and not leaving when
 // the vote opens votes with its weight: its owner commits, naming its

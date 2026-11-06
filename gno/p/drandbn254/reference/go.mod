@@ -1,4 +1,4 @@
-module github.com/jaekwon/autopatch/gno/p/drandbn254/reference
+module github.com/jaekwon/repairer/gno/p/drandbn254/reference
 
 go 1.27
 

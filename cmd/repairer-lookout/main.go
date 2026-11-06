@@ -1,14 +1,14 @@
-// Command autopatch-lookout is the watcher: it collects each machine's
+// Command repairer-lookout is the watcher: it collects each machine's
 // signed report, carries signed messages to the machines, and says which
 // machines a flaw reaches. It holds no key an agent trusts; it can't sign
 // anything, log in as root, or change a machine.
 //
-//	autopatch-lookout collect -config lookout.json
-//	autopatch-lookout deliver -config lookout.json
-//	autopatch-lookout run     -config lookout.json         collect and deliver every minute
-//	autopatch-lookout serve   -config lookout.json         run, and serve the page (Adena sign-in) on -listen
-//	autopatch-lookout add     -config lookout.json FILE... a signed message, a guard, a policy, or a Tested
-//	autopatch-lookout match   -config lookout.json -ubuntu CVE.json... [-debian TRACKER.json -cve ID...] [-kev KEV.json]
+//	repairer-lookout collect -config lookout.json
+//	repairer-lookout deliver -config lookout.json
+//	repairer-lookout run     -config lookout.json         collect and deliver every minute
+//	repairer-lookout serve   -config lookout.json         run, and serve the page (Adena sign-in) on -listen
+//	repairer-lookout add     -config lookout.json FILE... a signed message, a guard, a policy, or a Tested
+//	repairer-lookout match   -config lookout.json -ubuntu CVE.json... [-debian TRACKER.json -cve ID...] [-kev KEV.json]
 package main
 
 import (
@@ -26,12 +26,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jaekwon/autopatch/lookout"
-	"github.com/jaekwon/autopatch/lookout/page"
-	"github.com/jaekwon/autopatch/policy"
+	"github.com/jaekwon/repairer/lookout"
+	"github.com/jaekwon/repairer/lookout/page"
+	"github.com/jaekwon/repairer/policy"
 )
 
-const usage = `usage: autopatch-lookout <collect|deliver|run|serve|feeds|add|match> -config lookout.json [args]
+const usage = `usage: repairer-lookout <collect|deliver|run|serve|feeds|add|match> -config lookout.json [args]
 
   collect          fetch every machine's signed report (ssh, the report key), keep the newest that verifies
   deliver          carry each machine its bundle (ssh, the intake key)
@@ -41,7 +41,7 @@ const usage = `usage: autopatch-lookout <collect|deliver|run|serve|feeds|add|mat
   feeds            fetch the flaw feeds once, with a deadline, and match them against the reports kept:
                    run it hourly from its own timer, as its own user (write access to <state>/feeds
                    only), so a slow or hostile feed holds up no delivery and is parsed apart
-  add FILE...      keep a message from autopatch-sign, a guard, a policy, or a signed Tested or model yes
+  add FILE...      keep a message from repairer-sign, a guard, a policy, or a signed Tested or model yes
   match            which machines flaws reach: -ubuntu CVE.json (repeat), -debian TRACKER.json with -cve ID
                    (repeat), -kev KEV.json
 `
@@ -59,7 +59,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 	if err := run(ctx, os.Args[1], os.Args[2:], os.Stdout); err != nil {
-		fmt.Fprintln(os.Stderr, "autopatch-lookout:", err)
+		fmt.Fprintln(os.Stderr, "repairer-lookout:", err)
 		os.Exit(1)
 	}
 }

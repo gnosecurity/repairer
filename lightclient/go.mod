@@ -1,4 +1,4 @@
-module github.com/jaekwon/autopatch/lightclient
+module github.com/jaekwon/repairer/lightclient
 
 go 1.27
 

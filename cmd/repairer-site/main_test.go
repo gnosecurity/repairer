@@ -22,7 +22,7 @@ func fakeNode(t *testing.T, pages map[string]string) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		data, _ := hex.DecodeString(strings.TrimPrefix(r.URL.Query().Get("data"), "0x"))
 		realm, path, _ := strings.Cut(string(data), ":")
-		if r.URL.Query().Get("path") != `"vm/qrender"` || realm != "gno.land/r/autopatch/guards" {
+		if r.URL.Query().Get("path") != `"vm/qrender"` || realm != "gno.land/r/repairer/guards" {
 			http.Error(w, "bad query", 400)
 			return
 		}
@@ -49,7 +49,7 @@ func TestBuild(t *testing.T) {
 	node := fakeNode(t, pages)
 	defer node.Close()
 	out := filepath.Join(t.TempDir(), "guards")
-	n, err := Build(&Node{RPC: node.URL, Client: node.Client()}, "gno.land/r/autopatch/guards", out)
+	n, err := Build(&Node{RPC: node.URL, Client: node.Client()}, "gno.land/r/repairer/guards", out)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +86,7 @@ func TestBuild(t *testing.T) {
 	}
 	// A second build replaces the first whole, and the first is gone.
 	first, _ := os.Readlink(out)
-	if _, err := Build(&Node{RPC: node.URL, Client: node.Client()}, "gno.land/r/autopatch/guards", out); err != nil {
+	if _, err := Build(&Node{RPC: node.URL, Client: node.Client()}, "gno.land/r/repairer/guards", out); err != nil {
 		t.Fatal(err)
 	}
 	if second, _ := os.Readlink(out); second == first {
@@ -104,7 +104,7 @@ func TestBuildKeepsTheOldSiteOnError(t *testing.T) {
 	}))
 	defer bad.Close()
 	out := filepath.Join(t.TempDir(), "guards")
-	if _, err := Build(&Node{RPC: bad.URL, Client: bad.Client()}, "gno.land/r/autopatch/guards", out); err == nil {
+	if _, err := Build(&Node{RPC: bad.URL, Client: bad.Client()}, "gno.land/r/repairer/guards", out); err == nil {
 		t.Fatal("built from an error")
 	}
 	if _, err := os.Lstat(out); !os.IsNotExist(err) {

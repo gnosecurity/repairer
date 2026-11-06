@@ -7,7 +7,7 @@
 # that need a client VM and a router are listed as not run.
 #
 # Needs: RIG (the rig directory: images/, debs/, seed.iso, rig_ed25519) and AGENT
-# (the autopatch-agent binary). Touches nothing outside $RIG/runs. QEMU's
+# (the repairer-agent binary). Touches nothing outside $RIG/runs. QEMU's
 # version is pinned (RIG_QEMU), so the rig hash names a rig anyone can rerun
 # on other hardware; the CPU and QEMU go beside the transcript in OUT.env.json.
 set -euo pipefail
@@ -79,7 +79,7 @@ boot
 [ "$two" = 1 ] && bootclient
 waitssh
 CP=(scp -q -i "$R/rig_ed25519" -P $port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
-"${CP[@]}" "$AGENT" rig@127.0.0.1:autopatch-agent
+"${CP[@]}" "$AGENT" rig@127.0.0.1:repairer-agent
 "${CP[@]}" "$guard" rig@127.0.0.1:
 # The link's address and the services, on a machine (again after a reboot):
 # ssh array name, MAC's last digit, IPv4, IPv6.
@@ -112,13 +112,13 @@ if [ ${#debs[@]} -gt 0 ]; then
   "${CP[@]}" "${debs[@]}" rig@127.0.0.1:debs/
   "${S[@]}" 'sudo dpkg -i debs/*.deb >/dev/null && rm -rf debs' < /dev/null || { echo "rig.sh: the pinned packages didn't install" >&2; exit 1; }
 fi
-"${S[@]}" 'sudo install -o root -g root -m 0755 autopatch-agent /usr/local/sbin/autopatch-agent && sudo /usr/local/sbin/autopatch-agent install >/dev/null && for i in $(ls /sys/class/net); do [ "$i" = lo ] || sudo ip link set dev "$i" mtu 1280; done'
-A="sudo /usr/local/sbin/autopatch-agent"
+"${S[@]}" 'sudo install -o root -g root -m 0755 repairer-agent /usr/local/sbin/repairer-agent && sudo /usr/local/sbin/repairer-agent install >/dev/null && for i in $(ls /sys/class/net); do [ "$i" = lo ] || sudo ip link set dev "$i" mtu 1280; done'
+A="sudo /usr/local/sbin/repairer-agent"
 G=/home/rig/$(basename "$guard")
 declare -A pass ev
 check() { pass[$1]=$2; ev[$1]=$3; }
 # A guard that mixes blocks that bite now with ones that bite later fails
-# here, so no honest transcript passes it (AUTOPATCH.md rule 4).
+# here, so no honest transcript passes it (REPAIRER.md rule 4).
 timing=$("$AGENT" fmt "$guard" 2>&1 >/dev/null | sed 's/.*, //')
 if [[ $timing == mixes* ]]; then check one_timing false "$timing; file them as two guards"; else check one_timing true "$timing"; fi
 snap > "$w/s0.json"

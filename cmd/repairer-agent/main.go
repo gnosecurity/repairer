@@ -1,22 +1,22 @@
-// Command autopatch-agent puts guards (stopgaps written as data) on this
+// Command repairer-agent puts guards (stopgaps written as data) on this
 // machine and takes them off.
 //
-//	autopatch-agent fmt     GUARD.json   print the guard in the canonical form the agent accepts
-//	autopatch-agent plan    GUARD.json   what the guard would do here; changes nothing
-//	autopatch-agent apply   GUARD.json   put it on, pending, with its undo armed
-//	autopatch-agent confirm HASH|ID      keep it on across reboots
-//	autopatch-agent undo    HASH|ID      take it off
-//	autopatch-agent status               the guards on, and what they stopped
-//	autopatch-agent report               this machine's facts for the lookout, as JSON
-//	autopatch-agent gates                whether this machine can reboot into its newest kernel
-//	autopatch-agent check                compare live state with what was set
-//	autopatch-agent boot                 at boot: drop the unconfirmed, restore the rest
-//	autopatch-agent install              write and turn on the boot unit, firewall unit and minute timer
-//	autopatch-agent init    POLICY.json  install the first policy by hand (-host, -seq, -intake-user)
-//	autopatch-agent intake               take one bundle from the lookout on stdin (the unprivileged half)
-//	autopatch-agent tick                 what the minute timer runs
-//	autopatch-agent report               the last signed report (-facts: this machine's facts now)
-//	autopatch-agent authorize            the intake user's two ssh lines for the lookout's keys
+//	repairer-agent fmt     GUARD.json   print the guard in the canonical form the agent accepts
+//	repairer-agent plan    GUARD.json   what the guard would do here; changes nothing
+//	repairer-agent apply   GUARD.json   put it on, pending, with its undo armed
+//	repairer-agent confirm HASH|ID      keep it on across reboots
+//	repairer-agent undo    HASH|ID      take it off
+//	repairer-agent status               the guards on, and what they stopped
+//	repairer-agent report               this machine's facts for the lookout, as JSON
+//	repairer-agent gates                whether this machine can reboot into its newest kernel
+//	repairer-agent check                compare live state with what was set
+//	repairer-agent boot                 at boot: drop the unconfirmed, restore the rest
+//	repairer-agent install              write and turn on the boot unit, firewall unit and minute timer
+//	repairer-agent init    POLICY.json  install the first policy by hand (-host, -seq, -intake-user)
+//	repairer-agent intake               take one bundle from the lookout on stdin (the unprivileged half)
+//	repairer-agent tick                 what the minute timer runs
+//	repairer-agent report               the last signed report (-facts: this machine's facts now)
+//	repairer-agent authorize            the intake user's two ssh lines for the lookout's keys
 package main
 
 import (
@@ -30,12 +30,12 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/jaekwon/autopatch/agent"
-	"github.com/jaekwon/autopatch/guard"
-	"github.com/jaekwon/autopatch/policy"
+	"github.com/jaekwon/repairer/agent"
+	"github.com/jaekwon/repairer/guard"
+	"github.com/jaekwon/repairer/policy"
 )
 
-const usage = `usage: autopatch-agent <command> [flags] [args]
+const usage = `usage: repairer-agent <command> [flags] [args]
 
   fmt     GUARD.json   print the guard in canonical form, the only form apply accepts
   plan    GUARD.json   what the guard would do here; changes nothing
@@ -56,7 +56,7 @@ const usage = `usage: autopatch-agent <command> [flags] [args]
                        keys), -from (the lookouts' addresses); -write puts them in the user's
                        ~/.ssh/authorized_keys (with -intake-user)
 
-Every command takes -state-dir (default /var/lib/autopatch).
+Every command takes -state-dir (default /var/lib/repairer).
 `
 
 func main() {
@@ -65,14 +65,14 @@ func main() {
 		os.Exit(2)
 	}
 	if err := run(context.Background(), os.Args[1], os.Args[2:]); err != nil {
-		fmt.Fprintln(os.Stderr, "autopatch-agent:", err)
+		fmt.Fprintln(os.Stderr, "repairer-agent:", err)
 		os.Exit(1)
 	}
 }
 
 func run(ctx context.Context, cmd string, args []string) error {
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
-	stateDir := fs.String("state-dir", "/var/lib/autopatch", "where the agent keeps its state")
+	stateDir := fs.String("state-dir", "/var/lib/repairer", "where the agent keeps its state")
 	root := fs.String("root", "", "prefix for files the agent writes (tests only)")
 	within := fs.Duration("confirm-within", 10*time.Minute, "apply: how long until the undo runs unless confirmed")
 	force := fs.Bool("force", false, "apply: put blocks on even when something uses what they take away")
@@ -164,7 +164,7 @@ func run(ctx context.Context, cmd string, args []string) error {
 			fmt.Println("  not every drop was probed: the agent has no probe for some of them yet")
 		}
 		if e.Status == agent.Pending {
-			fmt.Printf("  it comes off at %s unless you run: autopatch-agent confirm %s\n",
+			fmt.Printf("  it comes off at %s unless you run: repairer-agent confirm %s\n",
 				e.ConfirmBy.UTC().Format(time.RFC3339), e.Hash[:12])
 		}
 		return nil
@@ -342,7 +342,7 @@ func run(ctx context.Context, cmd string, args []string) error {
 		if err := a.Install(ctx, self); err != nil {
 			return err
 		}
-		fmt.Println("installed: autopatch-boot, autopatch-firewall and autopatch-check.timer")
+		fmt.Println("installed: repairer-boot, repairer-firewall and repairer-check.timer")
 		return nil
 	}
 	fs.Usage()

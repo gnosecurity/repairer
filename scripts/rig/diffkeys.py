@@ -7,9 +7,9 @@ blocks = json.load(open(sys.argv[3]))["blocks"] if sys.argv[3] != "-" else []
 kinds = {k for blk in blocks for k in blk}
 settings = {blk["setting"]["name"] for blk in blocks if "setting" in blk}
 strips = {blk["strip"]["path"] for blk in blocks if "strip" in blk}
-# The agent's own files: /etc/sysctl.d/99-zz-autopatch.conf and
-# /etc/modprobe.d/autopatch-<hash>-<module>.conf (round 8, minor 9).
-OURS = re.compile(r"(^|/)(99-zz-autopatch|autopatch-[0-9a-f]{64}-[A-Za-z0-9_-]+)\.conf$")
+# The agent's own files: /etc/sysctl.d/99-zz-repairer.conf and
+# /etc/modprobe.d/repairer-<hash>-<module>.conf (round 8, minor 9).
+OURS = re.compile(r"(^|/)(99-zz-repairer|repairer-[0-9a-f]{64}-[A-Za-z0-9_-]+)\.conf$")
 def ours(paths):
     return all(OURS.search(p) for p in paths)
 bad = []
@@ -17,7 +17,7 @@ for k in sorted(set(a) | set(b)):
     x, y = a.get(k), b.get(k)
     if x == y:
         continue
-    if k == "nft_tables" and "drop" in kinds and not set(x) - set(y) and all("autopatch_" in t for t in set(y) - set(x)):
+    if k == "nft_tables" and "drop" in kinds and not set(x) - set(y) and all("repairer_" in t for t in set(y) - set(x)):
         continue
     if k == "settings" and all(x.get(n) == y.get(n) or n in settings for n in set(x) | set(y)):
         continue

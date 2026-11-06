@@ -33,7 +33,7 @@ def https(addr):
             if not part:
                 break
             b += part
-        return b.endswith(b"autopatch-rig https")
+        return b.endswith(b"repairer-rig https")
 
 
 def smtp(addr):

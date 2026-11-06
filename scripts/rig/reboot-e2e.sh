@@ -16,17 +16,17 @@
 # a plain reboot (a new boot id, the same kernel) and the health window.
 #
 # Needs: RIG (images/, seed.iso, rig_ed25519), KDEBS, KREL (the new kernel's
-# release), SRC (the autopatch source). Touches nothing outside $RIG/runs.
+# release), SRC (the repairer source). Touches nothing outside $RIG/runs.
 set -euo pipefail
 run=${1:?run number}; mode=${2:-window}
-R=${RIG:-/root/autopatch-rig}; SRC=${SRC:-/root/src/autopatch}
+R=${RIG:-/root/repairer-rig}; SRC=${SRC:-/root/src/repairer}
 KDEBS=${KDEBS:?a directory of the new kernel debs}; KREL=${KREL:?the new kernel release}
 img=$R/images/ubuntu-24.04-server-cloudimg-amd64.img
 w=$R/runs/reboot-$run
 port=$((2500 + run % 100))
 rm -rf "$w"; mkdir -p "$w"
 source /etc/profile.d/dev.sh
-(cd "$SRC" && CGO_ENABLED=0 go build -trimpath -o "$w/autopatch-agent" ./cmd/autopatch-agent && go build -o "$w/e2e" ./scripts/e2e)
+(cd "$SRC" && CGO_ENABLED=0 go build -trimpath -o "$w/repairer-agent" ./cmd/repairer-agent && go build -o "$w/e2e" ./scripts/e2e)
 # A window from five minutes ago to an hour on, in UTC; the Reboot's
 # deadline two hours on, on a whole minute.
 win=$(date -u -d '-5 min' +%H:%M)-$(date -u -d '+60 min' +%H:%M)
@@ -70,13 +70,13 @@ cp_in "$KDEBS"/linux-image-"$KREL"_*.deb "$KDEBS"/linux-modules-"$KREL"_*.deb
 "${S[@]}" "sudo dpkg -i linux-modules-${KREL}_*.deb linux-image-${KREL}_*.deb" >> "$w/log.txt" 2>&1
 log "installed: $("${S[@]}" "ls /boot/vmlinuz-$KREL /boot/initrd.img-$KREL; sudo grub-editenv list" | tr '\n' ' ')"
 # The agent, as in B1's test.
-cp_in "$w/autopatch-agent" "$w/in/policy.json" "$w/in/reboot-1.json" "$w/in/reboot-2.json"
-"${S[@]}" 'sudo install -o root -g root -m 0755 autopatch-agent /usr/local/sbin/autopatch-agent && sudo useradd --system --home-dir /nonexistent --shell /usr/sbin/nologin autopatch'
-"${S[@]}" 'sudo /usr/local/sbin/autopatch-agent install' >> "$w/log.txt" 2>&1
-key=$("${S[@]}" 'sudo /usr/local/sbin/autopatch-agent init -host vm1 -seq 0 -intake-user autopatch /home/rig/policy.json' | tail -1)
+cp_in "$w/repairer-agent" "$w/in/policy.json" "$w/in/reboot-1.json" "$w/in/reboot-2.json"
+"${S[@]}" 'sudo install -o root -g root -m 0755 repairer-agent /usr/local/sbin/repairer-agent && sudo useradd --system --home-dir /nonexistent --shell /usr/sbin/nologin repairer'
+"${S[@]}" 'sudo /usr/local/sbin/repairer-agent install' >> "$w/log.txt" 2>&1
+key=$("${S[@]}" 'sudo /usr/local/sbin/repairer-agent init -host vm1 -seq 0 -intake-user repairer /home/rig/policy.json' | tail -1)
 log "init: agent key $key"
 report() { # report N: fetch the signed report as the unprivileged user and check it here
-  "${S[@]}" 'sudo -u autopatch /usr/local/sbin/autopatch-agent report' > "$w/report-$1.json" 2>/dev/null || return 1
+  "${S[@]}" 'sudo -u repairer /usr/local/sbin/repairer-agent report' > "$w/report-$1.json" 2>/dev/null || return 1
   "$w/e2e" verify "$w/report-$1.json" "$key" > "$w/summary-$1.txt" 2>&1 || { log "VERIFY FAILED: $(cat "$w/summary-$1.txt")"; return 1; }
 }
 said() { sed -n 's/^  reboot: //p' "$w/summary-$1.txt"; }
@@ -88,7 +88,7 @@ for i in $(seq 1 70); do
   log "$n: running $rel; reboot: ${line:-(nothing owed)}"
   case $line in rebooting*|booted*) went=yes;; esac
   if [ "$mode" = signed ] && [ "$asked" = no ] && [[ $line == *"waits for your signed Reboot"* ]]; then
-    log "the tier waits for the owner; the signed Reboot goes in through intake: $("${S[@]}" 'sudo -u autopatch /usr/local/sbin/autopatch-agent intake < /home/rig/reboot-1.json' 2>&1)"
+    log "the tier waits for the owner; the signed Reboot goes in through intake: $("${S[@]}" 'sudo -u repairer /usr/local/sbin/repairer-agent intake < /home/rig/reboot-1.json' 2>&1)"
     asked=yes
   fi
   if [[ $line == "rebooted into $KREL; it is the default now" ]]; then settled=yes; break; fi
@@ -105,7 +105,7 @@ if [ "$mode" = signed ] && [ "$settled" = yes ]; then
     line=$(said $n)
     log "$n: running $("${S[@]}" uname -r 2>/dev/null || echo "?"); reboot: ${line:-(nothing owed)}"
     if [ "$asked2" = no ] && [[ $line == "a reboot is owed: the system asks for one (libc6, systemd); this tier waits for your signed Reboot"* ]]; then
-      log "the second signed Reboot goes in through intake: $("${S[@]}" 'sudo -u autopatch /usr/local/sbin/autopatch-agent intake < /home/rig/reboot-2.json' 2>&1)"
+      log "the second signed Reboot goes in through intake: $("${S[@]}" 'sudo -u repairer /usr/local/sbin/repairer-agent intake < /home/rig/reboot-2.json' 2>&1)"
       asked2=yes
     fi
     if [[ $line == "rebooted (the system asked); health held" ]]; then held=yes; break; fi
@@ -116,7 +116,7 @@ if [ "$mode" = signed ] && [ "$settled" = yes ]; then
   log "the system's reboot: asked=$asked2 held=$held, a new boot: $([ "$boot0" != "$boot1" ] && echo yes || echo no); phase 2 ok=$phase2"
 fi
 grubenv=$("${S[@]}" 'sudo grub-editenv list' 2>&1 | tr '\n' ' ')
-state=$("${S[@]}" 'sudo cat /var/lib/autopatch/reboot.json' 2>&1)
+state=$("${S[@]}" 'sudo cat /var/lib/repairer/reboot.json' 2>&1)
 final=$("${S[@]}" uname -r 2>&1)
 log "grubenv: $grubenv"
 log "reboot.json: $state"

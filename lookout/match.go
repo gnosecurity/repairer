@@ -1,4 +1,4 @@
-// Package lookout is the watcher's side of autopatch: it reads the
+// Package lookout is the watcher's side of repairer: it reads the
 // machines' signed reports and the public flaw feeds, and says which
 // machines a flaw reaches and what would fix it. It holds no key an agent
 // trusts and changes nothing on any machine.
@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jaekwon/autopatch/guard"
+	"github.com/jaekwon/repairer/guard"
 )
 
 // Machine is what the lookout matches flaws against: a machine's facts, as

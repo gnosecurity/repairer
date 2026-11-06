@@ -21,10 +21,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jaekwon/autopatch/approve"
-	"github.com/jaekwon/autopatch/check"
-	"github.com/jaekwon/autopatch/guard"
-	"github.com/jaekwon/autopatch/policy"
+	"github.com/jaekwon/repairer/approve"
+	"github.com/jaekwon/repairer/check"
+	"github.com/jaekwon/repairer/guard"
+	"github.com/jaekwon/repairer/policy"
 )
 
 // Statement is one owner statement, ready to sign: its call's function and
@@ -269,7 +269,7 @@ const noRemote = "127.0.0.1:1"
 // Sign makes the transaction, signs it, checks it as an agent would against
 // the owner's key, and returns the signed file.
 func (gk Gnokey) Sign(ctx context.Context, st *Statement, owner []byte) ([]byte, error) {
-	dir, err := os.MkdirTemp("", "autopatch-sign")
+	dir, err := os.MkdirTemp("", "repairer-sign")
 	if err != nil {
 		return nil, err
 	}

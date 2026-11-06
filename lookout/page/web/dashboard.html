@@ -43,7 +43,7 @@
 
 <h2>Sign on your own machine</h2>
 <p>Download <a href="/admin/reports.tar">the machines' signed reports</a> and <a href="/admin/policy.json">the policy</a>,
-and the guard above. Run autopatch-sign with them; it writes the memo itself and checks what it signs.
+and the guard above. Run repairer-sign with them; it writes the memo itself and checks what it signs.
 Then upload the file it wrote. The page offers files, never commands.</p>
 <form method="post" action="/admin/upload" enctype="multipart/form-data">
 <input type="file" name="file" accept=".json,application/json" required> <button type="submit">Upload</button></form>

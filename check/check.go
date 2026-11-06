@@ -1,4 +1,4 @@
-// Package check defines autopatch's was-I-hit check: a read-only question
+// Package check defines repairer's was-I-hit check: a read-only question
 // about a machine, written as data.
 //
 // A check names one kind from a fixed list and fills its typed fields. The
@@ -19,7 +19,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/jaekwon/autopatch/guard"
+	"github.com/jaekwon/repairer/guard"
 )
 
 // MaxSize is the largest check file the agent reads.

@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jaekwon/autopatch/guard"
+	"github.com/jaekwon/repairer/guard"
 )
 
 // OSVRecord is the part of an OSV record (ossf.github.io/osv-schema) the

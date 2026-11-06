@@ -15,11 +15,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jaekwon/autopatch/admit"
-	"github.com/jaekwon/autopatch/approve"
-	"github.com/jaekwon/autopatch/check"
-	"github.com/jaekwon/autopatch/guard"
-	"github.com/jaekwon/autopatch/policy"
+	"github.com/jaekwon/repairer/admit"
+	"github.com/jaekwon/repairer/approve"
+	"github.com/jaekwon/repairer/check"
+	"github.com/jaekwon/repairer/guard"
+	"github.com/jaekwon/repairer/policy"
 )
 
 // Bundle is what the lookout hands an agent through intake: the owner's

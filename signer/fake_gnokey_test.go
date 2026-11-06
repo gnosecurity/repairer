@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jaekwon/autopatch/approve"
+	"github.com/jaekwon/repairer/approve"
 )
 
 // fakeGnokey is a gnokey stand-in. maketx fails unless it is told not to
@@ -21,7 +21,7 @@ args="$*"
 case "$args" in *"-remote 127.0.0.1:1"*) ;; *) echo "a reachable remote" >&2; exit 3;; esac
 if [ "$1 $2" = "maketx call" ]; then
   case "$args" in *"-broadcast=false"*) ;; *) echo "would broadcast" >&2; exit 3;; esac
-  echo '{"msg":[{"@type":"/vm.m_call","caller":"g1ss6w8xfy7vnp595yely63jqa8553k03mjcglen","send":"","max_deposit":"","pkg_path":"gno.land/r/autopatch/approve","func":"Yes","args":[]}],"fee":{"gas_wanted":"1","gas_fee":"1ugnot"},"signatures":null,"memo":"x"}'
+  echo '{"msg":[{"@type":"/vm.m_call","caller":"g1ss6w8xfy7vnp595yely63jqa8553k03mjcglen","send":"","max_deposit":"","pkg_path":"gno.land/r/repairer/approve","func":"Yes","args":[]}],"fee":{"gas_wanted":"1","gas_fee":"1ugnot"},"signatures":null,"memo":"x"}'
   exit 0
 fi
 while [ $# -gt 0 ]; do [ "$1" = "-tx-path" ] && p="$2"; shift; done

@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jaekwon/autopatch/guard"
-	"github.com/jaekwon/autopatch/policy"
+	"github.com/jaekwon/repairer/guard"
+	"github.com/jaekwon/repairer/policy"
 )
 
 // The fleet of approve's signed fixtures: fleet "test", owned by the public

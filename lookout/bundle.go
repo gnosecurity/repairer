@@ -10,11 +10,11 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/jaekwon/autopatch/agent"
-	"github.com/jaekwon/autopatch/approve"
-	"github.com/jaekwon/autopatch/check"
-	"github.com/jaekwon/autopatch/guard"
-	"github.com/jaekwon/autopatch/policy"
+	"github.com/jaekwon/repairer/agent"
+	"github.com/jaekwon/repairer/approve"
+	"github.com/jaekwon/repairer/check"
+	"github.com/jaekwon/repairer/guard"
+	"github.com/jaekwon/repairer/policy"
 )
 
 // Store holds what the lookout carries: the owner's signed statements by
@@ -38,13 +38,13 @@ func (s *Store) put(path string, b []byte) error {
 	return os.Rename(tmp, path)
 }
 
-// AddMessage keeps an owner statement as autopatch-sign wrote it. A second
+// AddMessage keeps an owner statement as repairer-sign wrote it. A second
 // statement with the same sequence is refused: the owner signs each number
 // once.
 func (s *Store) AddMessage(b []byte) (uint64, error) {
 	var m agent.Message
 	if err := json.Unmarshal(b, &m); err != nil || m.Seq == 0 || len(m.Tx) == 0 {
-		return 0, errors.New("lookout: not a message from autopatch-sign")
+		return 0, errors.New("lookout: not a message from repairer-sign")
 	}
 	p := s.path("messages", strconv.FormatUint(m.Seq, 10)+".json")
 	if old, err := os.ReadFile(p); err == nil && string(old) != string(b) {
@@ -101,7 +101,7 @@ func (s *Store) AddSigned(b []byte) error {
 	return s.put(s.path("signed", name), out)
 }
 
-// AddFile keeps a file by what it is: a message from autopatch-sign, a
+// AddFile keeps a file by what it is: a message from repairer-sign, a
 // signed statement, a guard, or a policy. It says what it kept.
 func (s *Store) AddFile(b []byte) (string, error) {
 	var probe map[string]json.RawMessage

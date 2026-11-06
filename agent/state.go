@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jaekwon/autopatch/guard"
+	"github.com/jaekwon/repairer/guard"
 )
 
 // Status of a guard on this machine.

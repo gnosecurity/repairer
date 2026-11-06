@@ -16,15 +16,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jaekwon/autopatch/guard"
-	"github.com/jaekwon/autopatch/nft"
-	"github.com/jaekwon/autopatch/policy"
+	"github.com/jaekwon/repairer/guard"
+	"github.com/jaekwon/repairer/nft"
+	"github.com/jaekwon/repairer/policy"
 )
 
 // Files the agent owns. The sysctl file sorts after 99-sysctl.conf, so its
 // settings win over the system's own.
 const (
-	SysctlFile  = "/etc/sysctl.d/99-zz-autopatch.conf"
+	SysctlFile  = "/etc/sysctl.d/99-zz-repairer.conf"
 	modprobeDir = "/etc/modprobe.d"
 )
 
@@ -100,11 +100,11 @@ func sameResource(x, y step) bool {
 }
 
 func modprobeFile(hash, module string) string {
-	return modprobeDir + "/autopatch-" + hash + "-" + module + ".conf"
+	return modprobeDir + "/repairer-" + hash + "-" + module + ".conf"
 }
 
 func modprobeText(module string) string {
-	return "# autopatch: this module is blocked by a guard.\ninstall " + module + " /bin/false\nblacklist " + module + "\n"
+	return "# repairer: this module is blocked by a guard.\ninstall " + module + " /bin/false\nblacklist " + module + "\n"
 }
 
 // probeRule returns the position, among the guard's IPv4 drops, of the drop
@@ -729,7 +729,7 @@ func (a *Agent) writeSysctlFile(st *State) error {
 	}
 	sort.Strings(names)
 	var b strings.Builder
-	b.WriteString("# Written by autopatch for its confirmed guards; it rewrites this file.\n")
+	b.WriteString("# Written by repairer for its confirmed guards; it rewrites this file.\n")
 	for _, n := range names {
 		fmt.Fprintf(&b, "# %s\n%s = %s\n", strings.Join(byName[n], ", "), n, value[n])
 	}

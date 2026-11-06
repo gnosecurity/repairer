@@ -22,8 +22,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jaekwon/autopatch/approve"
-	"github.com/jaekwon/autopatch/guard"
+	"github.com/jaekwon/repairer/approve"
+	"github.com/jaekwon/repairer/guard"
 )
 
 // Ask is what goes to the model: advisories and a guard, never the inventory.

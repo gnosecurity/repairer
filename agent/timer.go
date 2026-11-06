@@ -18,7 +18,7 @@ type Timer interface {
 }
 
 // SystemdTimer arms the undo as a transient systemd timer that runs
-// "autopatch-agent undo -if-unconfirmed <hash>".
+// "repairer-agent undo -if-unconfirmed <hash>".
 type SystemdTimer struct {
 	Sys      System
 	Self     string // the agent's own executable, an absolute path
@@ -28,7 +28,7 @@ type SystemdTimer struct {
 
 // undoUnit names a guard's undo units by the guard's whole hash, so no
 // other guard can share the name.
-func undoUnit(hash string) string { return "autopatch-undo-" + hash }
+func undoUnit(hash string) string { return "repairer-undo-" + hash }
 
 func (t SystemdTimer) Arm(ctx context.Context, hash string, after time.Duration) error {
 	if err := safeExecutable(t.Self); err != nil {
@@ -49,7 +49,7 @@ func (t SystemdTimer) Arm(ctx context.Context, hash string, after time.Duration)
 		"--unit=" + undoUnit(hash),
 		fmt.Sprintf("--on-active=%ds", secs),
 		"--timer-property=AccuracySec=1s",
-		"--description=autopatch: take guard " + hash[:12] + " off unless confirmed",
+		"--description=repairer: take guard " + hash[:12] + " off unless confirmed",
 		t.Self, "undo", "-state-dir", t.StateDir,
 	}
 	if t.Root != "" {

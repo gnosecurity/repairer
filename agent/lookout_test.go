@@ -11,11 +11,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jaekwon/autopatch/agent"
-	"github.com/jaekwon/autopatch/approve"
-	"github.com/jaekwon/autopatch/guard"
-	"github.com/jaekwon/autopatch/lookout"
-	"github.com/jaekwon/autopatch/policy"
+	"github.com/jaekwon/repairer/agent"
+	"github.com/jaekwon/repairer/approve"
+	"github.com/jaekwon/repairer/guard"
+	"github.com/jaekwon/repairer/lookout"
+	"github.com/jaekwon/repairer/policy"
 )
 
 // C2's test, in memory: three machines and a lookout, a minute at a time.
@@ -66,7 +66,7 @@ func TestCanaryFirstThroughTheLookout(t *testing.T) {
 	if _, err := store.AddGuard(g.Canonical()); err != nil {
 		t.Fatal(err)
 	}
-	sg, _ := approve.SignStatement(rig, approve.Statement{Version: approve.MemoVersion, Kind: approve.KindTested, Image: "ubuntu 24.04", Chain: "autopatch:vet", Guard: g.Hash(), Rig: strings.Repeat("0", 64)})
+	sg, _ := approve.SignStatement(rig, approve.Statement{Version: approve.MemoVersion, Kind: approve.KindTested, Image: "ubuntu 24.04", Chain: "repairer:vet", Guard: g.Hash(), Rig: strings.Repeat("0", 64)})
 	raw, _ := json.Marshal(sg)
 	if err := store.AddSigned(raw); err != nil {
 		t.Fatal(err)

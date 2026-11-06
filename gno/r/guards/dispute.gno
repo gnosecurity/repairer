@@ -5,7 +5,7 @@ import (
 	"strconv"
 )
 
-// A dispute (AUTOPATCH.md, the swarm's rules 3 and 5): a filing's
+// A dispute (REPAIRER.md, the swarm's rules 3 and 5): a filing's
 // transcripts differ, or someone objected to their agreement.
 //   - The same parties, the worker and its checkers, run it again, up to
 //     Reruns times: honest runs that differed by chance now agree, and the

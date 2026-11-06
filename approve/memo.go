@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jaekwon/autopatch/check"
-	"github.com/jaekwon/autopatch/guard"
-	"github.com/jaekwon/autopatch/policy"
+	"github.com/jaekwon/repairer/check"
+	"github.com/jaekwon/repairer/guard"
+	"github.com/jaekwon/repairer/policy"
 )
 
 // MaxMemo caps a memo, so that every statement stays small enough for a
@@ -349,7 +349,7 @@ func MemoCancel(fleet, pending string) (string, error) {
 
 // MemoVersion starts every memo, so that a release can change the memo
 // format without the agents and signing tools of one fleet disagreeing.
-const MemoVersion = "autopatch/1"
+const MemoVersion = "repairer/1"
 
 // MemoPolicy writes a policy change's memo: the full diff, field by field,
 // against the policy it replaces. A key the change adds shows its owner's

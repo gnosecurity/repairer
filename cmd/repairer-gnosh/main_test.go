@@ -98,7 +98,7 @@ func TestLaunchJailed(t *testing.T) {
 		t.Skip("no go to build the program")
 	}
 	dir := t.TempDir()
-	bin := filepath.Join(dir, "autopatch-gnosh")
+	bin := filepath.Join(dir, "repairer-gnosh")
 	build := exec.Command(gobin, "build", "-o", bin, ".")
 	build.Env = append(os.Environ(), "CGO_ENABLED=0") // as released: the jail holds no loader
 	if out, err := build.CombinedOutput(); err != nil {
@@ -116,7 +116,7 @@ func TestLaunchJailed(t *testing.T) {
 		t.Fatal(err)
 	}
 	ask, _ := json.Marshal(map[string]any{"advisories": []string{"CVE-2026-98432: IP options."}, "guard": json.RawMessage(guardJSON(g))})
-	args := []string{"launch", "-socket", sock, "-model", "m", "-weights", "w1", "-key", keyFile, "-chain", "autopatch:x/home"}
+	args := []string{"launch", "-socket", sock, "-model", "m", "-weights", "w1", "-key", keyFile, "-chain", "repairer:x/home"}
 	c := exec.Command(bin, append(args, "-drafts", drafts)...)
 	c.Stdin = bytes.NewReader(ask)
 	out, err := c.CombinedOutput()

@@ -1,17 +1,17 @@
-// Command autopatch-sign is the owner's signing tool. It runs on the
+// Command repairer-sign is the owner's signing tool. It runs on the
 // owner's own machine, next to gnokey and the Ledger: it reads the file a
 // statement is about, writes the memo itself, checks every machine's
 // pending policy from fresh signed reports, shows the owner what will be
 // signed, has gnokey sign it (never broadcast), and checks the result as an
 // agent would before writing the message for the lookout to carry.
 //
-//	autopatch-sign yes    -policy P.json -tiers A,B -until 2026-11-12T00:00:00Z GUARD.json
-//	autopatch-sign off    -policy P.json -hosts mail,web GUARD.json
-//	autopatch-sign on     -policy P.json -hosts mail GUARD.json
-//	autopatch-sign policy -policy OLD.json NEW.json
-//	autopatch-sign reboot -policy P.json -kernel 6.8.0-149-generic -until 2026-11-06T09:00:00Z web
-//	autopatch-sign check  -policy P.json CHECK.json
-//	autopatch-sign standing -policy P.json
+//	repairer-sign yes    -policy P.json -tiers A,B -until 2026-11-12T00:00:00Z GUARD.json
+//	repairer-sign off    -policy P.json -hosts mail,web GUARD.json
+//	repairer-sign on     -policy P.json -hosts mail GUARD.json
+//	repairer-sign policy -policy OLD.json NEW.json
+//	repairer-sign reboot -policy P.json -kernel 6.8.0-149-generic -until 2026-11-06T09:00:00Z web
+//	repairer-sign check  -policy P.json CHECK.json
+//	repairer-sign standing -policy P.json
 package main
 
 import (
@@ -29,14 +29,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jaekwon/autopatch/approve"
-	"github.com/jaekwon/autopatch/check"
-	"github.com/jaekwon/autopatch/guard"
-	"github.com/jaekwon/autopatch/policy"
-	"github.com/jaekwon/autopatch/signer"
+	"github.com/jaekwon/repairer/approve"
+	"github.com/jaekwon/repairer/check"
+	"github.com/jaekwon/repairer/guard"
+	"github.com/jaekwon/repairer/policy"
+	"github.com/jaekwon/repairer/signer"
 )
 
-const usage = `usage: autopatch-sign <yes|off|on|policy|cancel|reboot|check|standing> [flags] FILE|HASH|HOST
+const usage = `usage: repairer-sign <yes|off|on|policy|cancel|reboot|check|standing> [flags] FILE|HASH|HOST
 
   yes    GUARD.json   the owner's yes to a guard: -tiers A,B -until RFC3339 [-mode undo|keep] [-nocanary] [-kev KEV.json]
   off    GUARD.json   take a guard off some hosts and keep it off there: -hosts mail,web
@@ -58,7 +58,7 @@ Every command needs:
                    without a fresh one must be named in -unchecked
   -key NAME        your key in gnokey's keybase (your Ledger entry)
 and takes -seq N (default: one above the highest sequence any agent or this tool has seen),
--gnokey PATH, -home DIR (gnokey's), -config DIR (default ~/.config/autopatch), -out FILE.
+-gnokey PATH, -home DIR (gnokey's), -config DIR (default ~/.config/repairer), -out FILE.
 `
 
 func main() {
@@ -67,7 +67,7 @@ func main() {
 		os.Exit(2)
 	}
 	if err := run(context.Background(), os.Args[1], os.Args[2:], os.Stdout); err != nil {
-		fmt.Fprintln(os.Stderr, "autopatch-sign:", err)
+		fmt.Fprintln(os.Stderr, "repairer-sign:", err)
 		os.Exit(1)
 	}
 }
@@ -93,7 +93,7 @@ func run(ctx context.Context, cmd string, args []string, stdout io.Writer) error
 	seq := fs.Uint64("seq", 0, "the statement's sequence (default: one above the highest seen)")
 	gnokeyBin := fs.String("gnokey", "gnokey", "the gnokey program")
 	home := fs.String("home", "", "gnokey's home directory")
-	configDir := fs.String("config", "", "where this tool keeps your address book and its own record (default ~/.config/autopatch)")
+	configDir := fs.String("config", "", "where this tool keeps your address book and its own record (default ~/.config/repairer)")
 	out := fs.String("out", "", "where to write the message for the lookout (default: <statement>-<seq>.json)")
 	assumeYes := fs.Bool("yes", false, "don't ask before signing (tests only)")
 	tiers := fs.String("tiers", "", "yes: the tiers, comma-separated")
@@ -117,7 +117,7 @@ func run(ctx context.Context, cmd string, args []string, stdout io.Writer) error
 			if err != nil {
 				return err
 			}
-			*configDir = filepath.Join(h, ".config", "autopatch")
+			*configDir = filepath.Join(h, ".config", "repairer")
 		}
 		cur, err := readPolicy(*policyFile)
 		if err != nil {
@@ -134,7 +134,7 @@ func run(ctx context.Context, cmd string, args []string, stdout io.Writer) error
 		if err != nil {
 			return err
 		}
-		*configDir = filepath.Join(h, ".config", "autopatch")
+		*configDir = filepath.Join(h, ".config", "repairer")
 	}
 	cur, err := readPolicy(*policyFile)
 	if err != nil {
@@ -182,7 +182,7 @@ func run(ctx context.Context, cmd string, args []string, stdout io.Writer) error
 		}
 		g, err := guard.Parse(b)
 		if err != nil {
-			return fmt.Errorf("%s: %w (autopatch-agent fmt writes the canonical form)", fs.Arg(0), err)
+			return fmt.Errorf("%s: %w (repairer-agent fmt writes the canonical form)", fs.Arg(0), err)
 		}
 		switch cmd {
 		case "off":
@@ -435,7 +435,7 @@ func standing(configDir string, p *policy.Policy, now time.Time, stdout io.Write
 		if y.NoCanary {
 			nc = " -nocanary"
 		}
-		fmt.Fprintf(stdout, "  statement %d, guard %.16s, tiers %s, until %s, mode %s%s\n    autopatch-sign yes -policy P.json -tiers %s -until %s -mode %s%s GUARD.json\n",
+		fmt.Fprintf(stdout, "  statement %d, guard %.16s, tiers %s, until %s, mode %s%s\n    repairer-sign yes -policy P.json -tiers %s -until %s -mode %s%s GUARD.json\n",
 			s, y.Hash, strings.Join(ts, ","), y.Until.UTC().Format(time.RFC3339), y.Mode, nc,
 			strings.Join(ts, ","), y.Until.UTC().Format(time.RFC3339), y.Mode, nc)
 	}

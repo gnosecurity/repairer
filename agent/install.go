@@ -7,18 +7,18 @@ import (
 )
 
 // Units the agent installs. Three jobs, kept apart:
-//   - autopatch-boot runs once, early at every boot: it takes off what was
+//   - repairer-boot runs once, early at every boot: it takes off what was
 //     never confirmed and puts back what was.
-//   - autopatch-firewall is tied to nftables.service and firewalld.service,
+//   - repairer-firewall is tied to nftables.service and firewalld.service,
 //     whose restarts and reloads flush the ruleset. It only repairs, so a
 //     firewall restart during a guard's trial doesn't take the guard off.
-//   - autopatch-check.timer repairs drift every minute, whatever caused it.
+//   - repairer-check.timer repairs drift every minute, whatever caused it.
 const (
 	unitDir      = "/etc/systemd/system"
-	bootUnit     = "autopatch-boot.service"
-	firewallUnit = "autopatch-firewall.service"
-	checkUnit    = "autopatch-check.service"
-	checkTimer   = "autopatch-check.timer"
+	bootUnit     = "repairer-boot.service"
+	firewallUnit = "repairer-firewall.service"
+	checkUnit    = "repairer-check.service"
+	checkTimer   = "repairer-check.timer"
 )
 
 // UnitFiles returns the agent's systemd units, running the agent at self.
@@ -26,8 +26,8 @@ func UnitFiles(self, stateDir string) map[string]string {
 	run := self + " %s -state-dir " + stateDir
 	return map[string]string{
 		bootUnit: `[Unit]
-Description=autopatch: put back confirmed guards, take off unconfirmed ones
-Documentation=https://github.com/jaekwon/autopatch
+Description=repairer: put back confirmed guards, take off unconfirmed ones
+Documentation=https://github.com/jaekwon/repairer
 DefaultDependencies=no
 Wants=network-pre.target
 After=local-fs.target nftables.service firewalld.service
@@ -43,9 +43,9 @@ ExecStart=` + fmt.Sprintf(run, "boot") + `
 WantedBy=sysinit.target
 `,
 		firewallUnit: `[Unit]
-Description=autopatch: put guards back after a firewall restart or reload
-Documentation=https://github.com/jaekwon/autopatch
-After=autopatch-boot.service nftables.service firewalld.service
+Description=repairer: put guards back after a firewall restart or reload
+Documentation=https://github.com/jaekwon/repairer
+After=repairer-boot.service nftables.service firewalld.service
 PartOf=nftables.service firewalld.service
 ReloadPropagatedFrom=nftables.service firewalld.service
 
@@ -59,17 +59,17 @@ ExecReload=` + fmt.Sprintf(run, "check") + ` -repair
 WantedBy=multi-user.target
 `,
 		checkUnit: `[Unit]
-Description=autopatch: put back what drifted, take in signed messages, move guards on, report
-Documentation=https://github.com/jaekwon/autopatch
-After=autopatch-boot.service
+Description=repairer: put back what drifted, take in signed messages, move guards on, report
+Documentation=https://github.com/jaekwon/repairer
+After=repairer-boot.service
 
 [Service]
 Type=oneshot
 ExecStart=` + fmt.Sprintf(run, "tick") + `
 `,
 		checkTimer: `[Unit]
-Description=autopatch: check guards every minute
-Documentation=https://github.com/jaekwon/autopatch
+Description=repairer: check guards every minute
+Documentation=https://github.com/jaekwon/repairer
 
 [Timer]
 OnBootSec=1min

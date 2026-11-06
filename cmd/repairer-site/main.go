@@ -1,4 +1,4 @@
-// Command autopatch-site builds gno.security's guard pages (H1) from the
+// Command repairer-site builds gno.security's guard pages (H1) from the
 // Guards realm. It asks a gno.land node for the realm's pages (vm/qrender),
 // turns their small Markdown into HTML, and writes a static site: the
 // index, a page per filing, per guard and per address the filings name,
@@ -7,7 +7,7 @@
 // minute; ask only a node you run, since every page it reads is a question
 // to that node.
 //
-//	autopatch-site -rpc http://127.0.0.1:26657 -realm gno.land/r/autopatch/guards -out /var/www/guards
+//	repairer-site -rpc http://127.0.0.1:26657 -realm gno.land/r/repairer/guards -out /var/www/guards
 package main
 
 import (
@@ -29,16 +29,16 @@ import (
 
 func main() {
 	rpc := flag.String("rpc", "http://127.0.0.1:26657", "a gno.land node you run")
-	realm := flag.String("realm", "gno.land/r/autopatch/guards", "the Guards realm")
+	realm := flag.String("realm", "gno.land/r/repairer/guards", "the Guards realm")
 	out := flag.String("out", "", "the site: a symlink this swaps to each new build")
 	flag.Parse()
 	if *out == "" {
-		fmt.Fprintln(os.Stderr, "usage: autopatch-site -rpc URL -realm PATH -out DIR")
+		fmt.Fprintln(os.Stderr, "usage: repairer-site -rpc URL -realm PATH -out DIR")
 		os.Exit(2)
 	}
 	n, err := Build(&Node{RPC: *rpc, Client: &http.Client{Timeout: 30 * time.Second}}, *realm, *out)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "autopatch-site:", err)
+		fmt.Fprintln(os.Stderr, "repairer-site:", err)
 		os.Exit(1)
 	}
 	fmt.Printf("built %d pages\n", n)
@@ -176,11 +176,11 @@ func write(path string, b []byte) error {
 
 const verifyMD = "# Verify a guard's level yourself\n\n" +
 	"A level here is a copy. What counts is what the chain proves, and you can check it without trusting this site or the node that answers.\n\n" +
-	"- The Guards realm keeps one param per guard and system: `lvl_<hash>_<system>` (such as `lvl_<hash>_ubuntu-24.04`), stored at `/pv/vm:gno.land/r/autopatch/guards:lvl_<hash>_<system>` in the chain's main store.\n" +
+	"- The Guards realm keeps one param per guard and system: `lvl_<hash>_<system>` (such as `lvl_<hash>_ubuntu-24.04`), stored at `/pv/vm:gno.land/r/repairer/guards:lvl_<hash>_<system>` in the chain's main store.\n" +
 	"- Ask a node you run for that key at height H, with `abci_query` on `.store/main/key` and prove=true.\n" +
 	"- Check the proof against the app hash of header H+1, and that more than two thirds of the validators you trust signed that header.\n" +
 	"- The header must be recent, never dated ahead of your clock, and never older than one you already accepted.\n" +
-	"- autopatch's light client does exactly this (github.com/jaekwon/autopatch, lightclient/).\n"
+	"- repairer's light client does exactly this (github.com/jaekwon/repairer, lightclient/).\n"
 
 // page wraps a realm page's HTML in the site's page.
 func page(md string, depth int) []byte {

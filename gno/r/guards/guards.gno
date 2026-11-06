@@ -1,4 +1,4 @@
-// Package guards is the Guards realm (AUTOPATCH.md, "A swarm that holds when
+// Package guards is the Guards realm (REPAIRER.md, "A swarm that holds when
 // agents lie"), version 1 with the public draw:
 //
 //   - Checkers stake tickets (tickets.gno). A ticket can be drawn only into
@@ -50,12 +50,12 @@ import (
 	"strings"
 	"time"
 
-	"gno.land/p/autopatch/drandbn254"
+	"gno.land/p/repairer/drandbn254"
 	"gno.land/p/nt/avl/v0"
 	u256 "gno.land/p/onbloc/uint256/v0"
 )
 
-// The numbers to start with (AUTOPATCH.md, "Numbers to start with"). They
+// The numbers to start with (REPAIRER.md, "Numbers to start with"). They
 // are vars so tests can scale them down.
 var (
 	MinTicketAge    int64 = 49000          // blocks between staking a ticket and a filing it may check (~2 days)

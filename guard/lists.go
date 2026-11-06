@@ -138,7 +138,7 @@ var neverStopPrefixes = []string{
 	"snapd", "certbot", "letsencrypt", "acme", "networking", "NetworkManager", "network",
 	"wpa_supplicant", "resolvconf", "cloud-", "droplet-agent", "do-agent", "qemu-guest-agent",
 	"google-", "amazon-", "waagent", "walinuxagent", "getty", "serial-getty", "console-",
-	"multipathd", "lvm2", "mdmonitor", "udisks2", "autopatch", "tmkms",
+	"multipathd", "lvm2", "mdmonitor", "udisks2", "repairer", "tmkms",
 	"ua-", "ubuntu-advantage", "esm-cache", "fwupd", "dropbear", "tailscale", "sssd",
 	"canonical-livepatch", "amazon-ssm-agent", "ssm-agent", "wg-quick", "openvpn",
 	"teleport", "cloudflared", "cockpit", "zerotier", "netbird",

@@ -23,7 +23,7 @@ B=${1:?the directory with gnodev, gnoland and gnokey}
 NODE=${NODE:-gnodev}
 POOL=${POOL:-0} # more owners, each staking a ticket, and a 31-seat panel: the gas of a large pool
 RPC=127.0.0.1:21757 # below the ephemeral range (32768 on), so no outgoing connection holds it
-REALM=gno.land/r/autopatch/guards
+REALM=gno.land/r/repairer/guards
 repo=$(cd "$(dirname "$0")/.." && pwd)
 D=$(mktemp -d)
 trap 'kill $(cat "$D/pid" 2>/dev/null) 2>/dev/null || true; rm -rf "$D"' EXIT
@@ -93,7 +93,7 @@ if [ "$NODE" = gnoland ]; then
   echo $! > "$D/pid"
   up 2
   key1
-  for p in "p/drandbn254 gno.land/p/autopatch/drandbn254" "r/guards $REALM"; do
+  for p in "p/drandbn254 gno.land/p/repairer/drandbn254" "r/guards $REALM"; do
     set -- $p
     echo "" | "$B/gnokey" maketx addpkg -home "$D/kb" -insecure-password-stdin -pkgdir "$ws/$1" -pkgpath "$2" \
       -gas-fee 10000000ugnot -gas-wanted 900000000 -max-deposit 1000000000ugnot -broadcast -chainid dev -remote "$RPC" test1 > "$D/addpkg.out" 2>&1 \

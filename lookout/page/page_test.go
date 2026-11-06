@@ -21,10 +21,10 @@ import (
 
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/decred/dcrd/dcrec/secp256k1/v4/ecdsa"
-	"github.com/jaekwon/autopatch/agent"
-	"github.com/jaekwon/autopatch/approve"
-	"github.com/jaekwon/autopatch/lookout"
-	"github.com/jaekwon/autopatch/policy"
+	"github.com/jaekwon/repairer/agent"
+	"github.com/jaekwon/repairer/approve"
+	"github.com/jaekwon/repairer/lookout"
+	"github.com/jaekwon/repairer/policy"
 )
 
 // The address rule, against a pair taken off the live chain (gnoshop's test).
@@ -247,9 +247,9 @@ func TestSignInRefuses(t *testing.T) {
 	}
 }
 
-// An uploaded message from autopatch-sign is kept for the next delivery;
+// An uploaded message from repairer-sign is kept for the next delivery;
 // only a signed-in admin, from the page itself, can upload. The downloads
-// are the machines' signed reports (a tar for autopatch-sign), the policy
+// are the machines' signed reports (a tar for repairer-sign), the policy
 // and a kept guard.
 func TestUploadAndDownloads(t *testing.T) {
 	w := newTestWallet(t)

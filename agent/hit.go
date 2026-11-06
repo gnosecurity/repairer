@@ -20,10 +20,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jaekwon/autopatch/check"
+	"github.com/jaekwon/repairer/check"
 )
 
-// Was-I-hit checks (W1; AUTOPATCH.md, "Was-I-hit checks"). A check runs
+// Was-I-hit checks (W1; REPAIRER.md, "Was-I-hit checks"). A check runs
 // read-only through the agent's own code and its fixed programs (find,
 // dpkg, dpkg-query, modinfo, dkms, journalctl) with fixed arguments, capped
 // in time, files and bytes. Files are read as they stream, never through a

@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jaekwon/autopatch/approve"
-	"github.com/jaekwon/autopatch/guard"
+	"github.com/jaekwon/repairer/approve"
+	"github.com/jaekwon/repairer/guard"
 )
 
 // fakeModel answers over a UNIX socket as a model server would, saying
@@ -64,7 +64,7 @@ func TestYesOnlyWithinRule6(t *testing.T) {
 	if ans.Verdict != "yes" || ans.ModelHash != "test-model@w1" || len(ans.PromptHash) != 64 {
 		t.Fatalf("%+v", ans)
 	}
-	sg, err := SignYes(priv, "autopatch:x/home", drop, ans, nil)
+	sg, err := SignYes(priv, "repairer:x/home", drop, ans, nil)
 	if err != nil || sg.Statement.Kind != approve.KindModel {
 		t.Fatalf("a drop within rule 6: %v", err)
 	}
@@ -74,12 +74,12 @@ func TestYesOnlyWithinRule6(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := SignYes(priv, "autopatch:x/home", injected, ans, nil); err == nil || !strings.Contains(err.Error(), "rule 6") {
+	if _, err := SignYes(priv, "repairer:x/home", injected, ans, nil); err == nil || !strings.Contains(err.Error(), "rule 6") {
 		t.Fatalf("signed a setting on the model's word: %v", err)
 	}
 	// Its own draft: never.
 	g, _ := guard.Parse(drop.Guard)
-	if _, err := SignYes(priv, "autopatch:x/home", drop, mustJudge(t, m, drop), map[string]bool{g.Hash(): true}); err == nil {
+	if _, err := SignYes(priv, "repairer:x/home", drop, mustJudge(t, m, drop), map[string]bool{g.Hash(): true}); err == nil {
 		t.Fatal("signed the model's own draft")
 	}
 }

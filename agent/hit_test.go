@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jaekwon/autopatch/approve"
-	"github.com/jaekwon/autopatch/check"
-	"github.com/jaekwon/autopatch/guard"
-	"github.com/jaekwon/autopatch/policy"
+	"github.com/jaekwon/repairer/approve"
+	"github.com/jaekwon/repairer/check"
+	"github.com/jaekwon/repairer/guard"
+	"github.com/jaekwon/repairer/policy"
 )
 
 func md5hex(s string) string {
@@ -327,7 +327,7 @@ func TestCheckOnYourWord(t *testing.T) {
 		t.Fatalf("another system's: %+v", res)
 	}
 	// A memo this agent doesn't write for the check: skipped, nothing run.
-	if res := tick([]Message{sign(c, "autopatch/1 Check a check that reads nothing")}, c); len(res.Hits) != 0 {
+	if res := tick([]Message{sign(c, "repairer/1 Check a check that reads nothing")}, c); len(res.Hits) != 0 {
 		t.Fatalf("a memo that hides what it reads: %+v", res)
 	}
 	f, _ := a.loadFleet()

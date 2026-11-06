@@ -1,14 +1,20 @@
 # One gate before anything ships: format, vet, unit tests, builds.
 # The integration test needs root and a Linux kernel: make integration.
 # The signing test needs gnokey and a test keybase: make golden (see below).
-.PHONY: qa fmt vet test build integration golden gnotest site-e2e lookout-browser realm-e2e realm-e2e-gnoland
+.PHONY: qa fmt gnocheck vet test build integration golden gnotest site-e2e lookout-browser realm-e2e realm-e2e-gnoland
 
-qa: fmt vet test build
+qa: fmt gnocheck vet test build
 
 # vendor/ holds decred's secp256k1, pinned and reviewed; it is checked as shipped.
 # gofmt reads the .gno files too: gno is Go's syntax.
 fmt:
 	@out=$$(gofmt -l admit agent approve cmd gnosh guard lookout nft policy scripts signer $$(find gno -name '*.gno')); if [ -n "$$out" ]; then echo "gofmt needed:"; echo "$$out"; exit 1; fi
+
+# The realm rules a text scan can hold (AGENTS.md): an exported function that
+# doesn't cross reads no params or stack, which would answer for its caller,
+# and a payment is read only beside the check that an account called.
+gnocheck:
+	python3 scripts/check-realm-context.py
 
 vet:
 	go vet ./...

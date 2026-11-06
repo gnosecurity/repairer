@@ -68,11 +68,11 @@ type poolVote struct {
 	reveals   int
 	by        map[string]int64 // transcript → revealed weight
 	order     []string         // transcripts in the order first revealed: ties go to the first
-	voters    *avl.Tree // owner → *voter: one path read per lookup (round 13, new major 1)
-	voted     *avl.Tree // key(ticket) → true
+	voters    *avl.Tree        // owner → *voter: one path read per lookup (round 13, new major 1)
+	voted     *avl.Tree        // key(ticket) → true
 	closed    bool
 	closedAt  int64
-	leaveMark int // leaves when it opened: a ticket that began leaving by then has no vote in it
+	leaveMark int    // leaves when it opened: a ticket that began leaving by then has no vote in it
 	decided   string // the winning transcript, or "" when undecided
 	winners   int64  // the winning weight
 	pot       int64  // PoolFee, set aside from the fund

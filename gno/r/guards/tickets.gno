@@ -177,7 +177,7 @@ func StakeTicket(cur realm) int {
 		panic("guards: no more tickets")
 	}
 	who := caller(cur)
-	n := received(MinTicket)
+	n := paid(cur, MinTicket)
 	t := &ticket{id: nTickets, owner: who, weight: n, stake: n, height: now(), votes: len(allVotes)}
 	nTickets++
 	tickets.Set(key(uint64(t.id)), t)

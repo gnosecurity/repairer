@@ -235,7 +235,7 @@ func Appeal(cur realm, id int) string {
 	if f.state != Appealable || now() > f.until {
 		panic("guards: nothing to appeal")
 	}
-	f.appeals = append(f.appeals, appeal{who: who, bond: received(AppealCost(id)), against: f.verdict})
+	f.appeals = append(f.appeals, appeal{who: who, bond: paid(cur, AppealCost(id)), against: f.verdict})
 	f.verdict, f.until = "", 0
 	f.panelLevel++
 	chain.Emit("GuardAppealed", "filing", strconv.Itoa(id), "by", string(who))
@@ -318,8 +318,7 @@ func keepAnswering(panel []*check, silent func(*check) bool) []*check {
 
 // Fund adds the coins sent to the dispute fund.
 func Fund(cur realm) {
-	caller(cur)
-	fund += received(1)
+	fund += paid(cur, 1)
 }
 
 // FundBalance is what the dispute fund holds.

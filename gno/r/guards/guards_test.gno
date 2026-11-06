@@ -3,6 +3,7 @@ package guards
 import (
 	"chain"
 	"chain/banker"
+	"chain/params"
 	"chain/runtime"
 	"strings"
 	"testing"
@@ -31,8 +32,15 @@ const guardText = `{"flaw":"CVE-2026-98432","drop":{"ip_options":true}}` + "\n"
 // sys is the system the tests' transcripts are for.
 const sys = "ubuntu 24.04"
 
-// lvl is the tests' guard's level on sys.
-func lvl() string { return Level(GuardHash(guardText), sys) }
+// lvl is the tests' guard's level on sys. The param light clients prove
+// must hold the same: the tests run as the realm, so they read its params.
+func lvl() string {
+	l := Level(GuardHash(guardText), sys)
+	if p, _ := params.GetString(levelKey(GuardHash(guardText), sys)); p != l {
+		panic("the level is " + l + " but its param " + p)
+	}
+	return l
+}
 
 var (
 	worker = testutils.TestAddress("worker")

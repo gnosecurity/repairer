@@ -50,9 +50,9 @@ import (
 	"strings"
 	"time"
 
-	"gno.land/p/repairer/drandbn254"
 	"gno.land/p/nt/avl/v0"
 	u256 "gno.land/p/onbloc/uint256/v0"
+	"gno.land/p/repairer/drandbn254"
 )
 
 // The numbers to start with (REPAIRER.md, "Numbers to start with"). They
@@ -205,7 +205,7 @@ func Commit(cur realm, commitment string) int {
 	if int64(Checkers)*CheckFee+FundFee+DrawFee > FilingBond {
 		panic("guards: the bond can't pay its checkers, its draw and the dispute fund")
 	}
-	f := &filing{filer: caller(cur), commitment: commitment, committed: now(), bond: received(FilingBond), state: Committed,
+	f := &filing{filer: caller(cur), commitment: commitment, committed: now(), bond: paid(cur, FilingBond), state: Committed,
 		silent: map[address]bool{}}
 	f.oldBelow = oldBelow(f.committed - MinTicketAge)
 	id := nFilings
@@ -585,7 +585,7 @@ func Object(cur realm, id int, transcript string) {
 	case party(f, who):
 		panic("guards: a party can't object to its own filing")
 	}
-	f.objBond = received(ObjectionBond)
+	f.objBond = paid(cur, ObjectionBond)
 	f.objector = &check{ticket: -2, owner: who, transcript: transcript, revealed: true}
 	f.verdict, f.until = "", 0
 	chain.Emit("GuardObjected", "filing", strconv.Itoa(id), "by", string(who))
@@ -797,11 +797,17 @@ func levelKey(hash, system string) string {
 	return "lvl_" + hash + "_" + strings.Replace(system, " ", "-", 1)
 }
 
-// Level is a guard's level on a system, as the param lvl_<hash>_<system>
-// that light clients prove holds it: "tested", "pulled", or "".
+// Level is a guard's level on a system: "tested", "pulled", or "". It reads
+// the realm's own record, which setLevel writes beside the param
+// lvl_<hash>_<system> that light clients prove, so it answers the same
+// whoever calls it. It can't read the param: chain/params keys by the realm
+// acting, and a call from another realm, not crossing, leaves that realm
+// acting (gno-interrealm-v2.md §2), so it would read the caller's own param.
 func Level(guardHash, system string) string {
-	v, _ := params.GetString(levelKey(guardHash, system))
-	return v
+	if v := levels.Get(levelKey(guardHash, system)); v != nil {
+		return v.(string)
+	}
+	return ""
 }
 
 // isSystem says whether s names a system as an os-release ID and
@@ -855,9 +861,21 @@ func caller(cur realm) address {
 	return cur.Previous().Address()
 }
 
-// received is what the call sent; a user call's send lands here.
-func received(min int64) int64 {
-	n := unsafe.OriginSend().AmountOf("ugnot")
+// paid is the ugnot the call sent, at least min. The send is read only
+// here, after caller's check that an account called directly: only then
+// did the send land here. A MsgRun script's send stays in its sender's
+// account, though the script, which IsUser lets in, sees it all the same
+// (gno-security-guide.md §5.5). Other denoms are refused: nothing here
+// could use them or send them back.
+func paid(cur realm, min int64) int64 {
+	caller(cur)
+	sent := unsafe.OriginSend()
+	for _, c := range sent {
+		if c.Denom != "ugnot" {
+			panic("guards: send only ugnot")
+		}
+	}
+	n := sent.AmountOf("ugnot")
 	if n < min {
 		panic("guards: send at least " + strconv.FormatInt(min, 10) + "ugnot")
 	}

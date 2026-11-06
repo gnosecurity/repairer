@@ -11,14 +11,14 @@ import (
 	"github.com/gnolang/gno/tm2/pkg/bft/types"
 )
 
-// Against a local chain (LC_RPC, LC_HEIGHT, a height where the guards
+// Against a local chain (LC_RPC, LC_HEIGHT, a height where the spike
 // realm's lvl_<hash> param was "tested"): the param is proven; the same
 // proof refuses another value; a key never set is proven absent; and a
 // header signed by validators the client doesn't trust is refused.
 func TestParamOnALocalChain(t *testing.T) {
 	rpc, hs := os.Getenv("LC_RPC"), os.Getenv("LC_HEIGHT")
 	if rpc == "" || hs == "" {
-		t.Skip("set LC_RPC and LC_HEIGHT to a local chain with the guards realm")
+		t.Skip("set LC_RPC and LC_HEIGHT to a local chain with the spike realm")
 	}
 	h, _ := strconv.ParseInt(hs, 10, 64)
 	ctx := context.Background()
@@ -39,7 +39,7 @@ func TestParamOnALocalChain(t *testing.T) {
 	if err := lc.Start(ctx, Checkpoint{Height: 1, ValidatorsHash: types.NewValidatorSet(vals.Validators).Hash(), Time: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
-	const realm = "gno.land/r/repairer/guards"
+	const realm = "gno.land/r/repairer/lcspike" // the spike realm, at a path of its own
 	const key = "lvl_73804a3fcab787f11c404c13c46b06eb8452aa585fb7f92429fa7ab98635ed6c"
 	v, found, err := lc.Param(ctx, realm, key, h)
 	if err != nil || !found || string(v) != `"tested"` {

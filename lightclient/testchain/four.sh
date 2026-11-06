@@ -128,14 +128,14 @@ waitvals() { # waitvals N: until the chain's set has N validators, then two more
   local h; h=$(height "$R"); while [ "$(height "$R")" -lt $((h + 2)) ]; do sleep 1; done
 }
 ch() { echo "vals.NewValoperChange(address(\"$(addr "op$1")\"), $2)"; }
-tx test1 addpkg -pkgdir "$here/guards" -pkgpath gno.land/r/repairer/guards -max-deposit 100000000ugnot >/dev/null
+tx test1 addpkg -pkgdir "$here/lcspike" -pkgpath gno.land/r/repairer/lcspike -max-deposit 100000000ugnot >/dev/null
 A=$(prop "nodes 2, 3 and 4 join" "$(ch 2 10), $(ch 3 10), $(ch 4 10)")
 waitvals 4
-H1=$(tx test1 call -pkgpath gno.land/r/repairer/guards -func SetLevel -args one -args tested)
+H1=$(tx test1 call -pkgpath gno.land/r/repairer/lcspike -func SetLevel -args one -args tested)
 log "change A at $A: four validators; level one set at $H1"
 Bh=$(prop "node 5 joins, 2 and 3 leave" "$(ch 5 10), $(ch 2 0), $(ch 3 0)")
 waitvals 3
-H2=$(tx test1 call -pkgpath gno.land/r/repairer/guards -func SetLevel -args two -args tested)
+H2=$(tx test1 call -pkgpath gno.land/r/repairer/lcspike -func SetLevel -args two -args tested)
 log "change B at $Bh: nodes 1, 4 and 5 validate; level two set at $H2"
 # Two more blocks, so header H2+1 exists.
 while [ "$(height "$R")" -lt $((H2 + 2)) ]; do sleep 1; done

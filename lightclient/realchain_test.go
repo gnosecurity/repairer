@@ -73,7 +73,7 @@ func TestFollowsARealChain(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkpoint := Checkpoint{Height: cp, ValidatorsHash: types.NewValidatorSet(vals.Validators).Hash(), Time: rc.SignedHeader.Header.Time}
-	const realm = "gno.land/r/repairer/guards"
+	const realm = "gno.land/r/repairer/lcspike" // the spike realm, at a path of its own
 	fresh := func(n Node) *Client {
 		c := &Client{RPC: n, ChainID: st.NodeInfo.Network, MaxAge: time.Hour, Now: time.Now}
 		if err := c.Start(ctx, checkpoint); err != nil {

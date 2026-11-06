@@ -29,6 +29,7 @@ type fakeSys struct {
 	runOut   map[string]string // output for a program and its args, joined by spaces
 	runErr   map[string]string // stderr for a program and its args, which then exits 1 (RunCapped)
 	special  map[string]string // a path that is a "fifo" or a "link" (OpenFile)
+	missing  map[string]bool   // programs not installed (Has, Run)
 	read     map[string]int    // bytes read through OpenFile, by path
 	ephLo    int
 	ephHi    int
@@ -129,7 +130,13 @@ var (
 	ruleRe      = regexp.MustCompile(`(?m)^\t\t(.*) comment "([^"]*)"$`)
 )
 
+// Has reports a program installed unless the test made it missing.
+func (f *fakeSys) Has(prog string) bool { return !f.missing[prog] }
+
 func (f *fakeSys) Run(_ context.Context, stdin []byte, prog string, args ...string) ([]byte, error) {
+	if f.missing[prog] {
+		return nil, fmt.Errorf("run %s: not found in /usr/sbin, /usr/bin, /sbin, /bin", prog)
+	}
 	line := prog + " " + strings.Join(args, " ")
 	if prog == "nft" && len(args) == 2 && args[0] == "-f" {
 		// A script: deletes first, then the table it defines.

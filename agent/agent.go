@@ -226,6 +226,18 @@ func (a *Agent) Plan(g *guard.Guard) (*Plan, error) {
 			}
 		}
 	}
+	// Drops are nft's to put on and take off. Without nft, apply would fail
+	// at the first drop and couldn't take it back off either, leaving the
+	// guard half on with its undo armed; so say so here, before anything
+	// happens. Debian's cloud images have no nft.
+	for _, s := range steps(g) {
+		if s.drops != nil {
+			if !a.Sys.Has("nft") {
+				p.Problems = append(p.Problems, "its drops need nft, which isn't installed here (apt-get install nftables)")
+			}
+			break
+		}
+	}
 	for _, pr := range a.problems(g) {
 		p.Problems = append(p.Problems, pr.why)
 		p.code(pr.code)

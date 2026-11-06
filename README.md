@@ -7,29 +7,38 @@ vendor's fix running. It is one of gno.security's two products, beside
 Immune: a small agent on each server puts on **guards**, which are stopgaps
 written as data, when the owner's signed rules allow, and takes them off once
 the real fix runs. A lookout on the owner's own network reads the security
-news, the owner signs approvals on a hardware wallet, and a swarm of
-[gnosh.ai](https://gnosh.ai) sessions on gno.land writes and checks the
-guards, with money at stake. More at https://gno.security/repairer/.
+news, the owner signs approvals on a hardware wallet, and a swarm on
+gno.land writes and checks the guards, with money at stake: by design, a
+swarm of [gnosh.ai](https://gnosh.ai) sessions. More at
+https://gno.security/repairer/.
 
 Built and tested on test machines (Ubuntu 22.04, 24.04 and 26.04, Debian 12
 and 13): the agent with its guards, reboots and was-I-hit checks; signed
 policies and approvals; the lookout and its page; the test rig; gnosh at
-home; a light client for gno.land; and the Guards realm on a local chain.
-Not yet on gno.land, and not yet running on anyone's servers.
+home, against a stand-in model; a light client for gno.land; and the Guards
+realm on a local chain, with scripted checkers. Not built yet: gnosh.ai
+sessions as the swarm's writers and checkers. Not yet on gno.land, and not
+yet running on anyone's servers.
 
 ## Try it in two minutes
 
 On a **throwaway Ubuntu or Debian VM** (the agent changes the firewall and a
-kernel setting, so don't use a machine you care about), as root:
+kernel setting, so don't use a machine you care about), as a user with sudo:
 
 ```sh
 # the agent, and stopgap number one: the workaround for CVE-2026-98432
 curl -LO https://github.com/gnosecurity/repairer/releases/latest/download/repairer-agent-linux-amd64
 curl -LO https://github.com/gnosecurity/repairer/releases/latest/download/cve-2026-98432.json
-chmod +x repairer-agent-linux-amd64
+
+# root runs the agent again later (its undo timer), so the agent must sit
+# where only root can change it; it won't arm its undo from anywhere else
+sudo install -m 0755 repairer-agent-linux-amd64 /usr/local/sbin/repairer-agent
+
+# Debian's cloud images have no nft (Ubuntu's do)
+sudo apt-get update && sudo apt-get install -y nftables
 
 # see what it would do — changes nothing
-./repairer-agent-linux-amd64 plan cve-2026-98432.json
+sudo repairer-agent plan cve-2026-98432.json
 #   cve-2026-98432/linux-ipv4-ipopt v1, hash 3526eb39...
 #   this machine: ubuntu 24.04, kernel 6.8.0-142 generic
 #     drop inbound ipv4 tcp carrying IP options (bites: now)
@@ -38,16 +47,16 @@ chmod +x repairer-agent-linux-amd64
 
 # put it on, with the undo already armed (it reverts by itself in ten minutes
 # unless you confirm); it probes that the drop really blocks
-./repairer-agent-linux-amd64 apply cve-2026-98432.json
-./repairer-agent-linux-amd64 status
+sudo repairer-agent apply cve-2026-98432.json
+sudo repairer-agent status
 
 # take it straight back off
-./repairer-agent-linux-amd64 undo cve-2026-98432/linux-ipv4-ipopt
+sudo repairer-agent undo cve-2026-98432/linux-ipv4-ipopt
 ```
 
-It needs `nftables`, which Ubuntu and Debian have by default. Nothing leaves
-the machine, and nothing here touches gno.land. On arm64, use the `-arm64`
-binary.
+Nothing leaves the machine, and nothing here touches gno.land. On arm64,
+use the `-arm64` binary. `scripts/rig/quickstart-e2e.sh` runs exactly these
+steps in fresh Ubuntu and Debian VMs.
 
 ## Guards only take away
 

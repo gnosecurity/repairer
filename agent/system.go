@@ -28,6 +28,9 @@ import (
 type System interface {
 	// Run runs a program, without a shell, and returns its standard output.
 	Run(ctx context.Context, stdin []byte, prog string, args ...string) ([]byte, error)
+	// Has reports whether a program Run would run is installed: in one of
+	// the directories the agent runs programs from (progDirs).
+	Has(prog string) bool
 	ReadFile(name string) ([]byte, error)
 	// OpenFile opens a regular file to read, never through a link at its
 	// last component and never waiting on a FIFO or a device: anything but
@@ -120,6 +123,12 @@ func progPath(prog string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("run %s: not found in %s", prog, strings.Join(progDirs, ", "))
+}
+
+// Has reports whether Run would find prog.
+func (Linux) Has(prog string) bool {
+	_, err := progPath(prog)
+	return err == nil
 }
 
 func (l Linux) Run(ctx context.Context, stdin []byte, prog string, args ...string) ([]byte, error) {
@@ -267,8 +276,11 @@ func (l Linux) InUse(what string) (string, error) {
 		return otherNamespace("/proc/1/ns/user", "user", "uses a user namespace")
 	case what == "netns":
 		// net.* settings live in each network namespace: the agent's write
-		// reaches only its own.
-		return otherNamespace("/proc/self/ns/net", "net", "lives in another network namespace, which keeps its own net.* settings; the guard's setting covers only the agent's")
+		// reaches only its own. A namespace whose only interface is the
+		// loopback (systemd's PrivateNetwork=, as polkitd has on Ubuntu
+		// 26.04) takes no packet from outside itself, so a setting left
+		// there is out of a remote attacker's reach: it doesn't count.
+		return otherNetNamespace()
 	case what == "io_uring":
 		return ioUringInUse()
 	case strings.HasPrefix(what, "module:"):
@@ -291,6 +303,50 @@ func otherNamespace(ref, kind, says string) (string, error) {
 		}
 		return ""
 	})
+}
+
+// otherNetNamespace names a process in a network namespace other than the
+// agent's that has an interface besides the loopback. Each namespace's
+// interfaces are read once, through the first of its processes found.
+func otherNetNamespace() (string, error) {
+	refNS, err := os.Readlink("/proc/self/ns/net")
+	if err != nil {
+		return "", err
+	}
+	loOnly := map[string]bool{}
+	return scanProcs(func(pid string) string {
+		ns, err := os.Readlink("/proc/" + pid + "/ns/net")
+		if err != nil || ns == refNS {
+			return ""
+		}
+		only, seen := loOnly[ns]
+		if !seen {
+			dev, err := os.ReadFile("/proc/" + pid + "/net/dev")
+			only = err == nil && onlyLoopback(string(dev))
+			loOnly[ns] = only
+		}
+		if only {
+			return ""
+		}
+		return "process " + pid + " (" + comm(pid) + ") lives in another network namespace, which keeps its own net.* settings; the guard's setting covers only the agent's"
+	})
+}
+
+// onlyLoopback reports whether a /proc/<pid>/net/dev lists no interface but
+// lo. Anything else, or anything it can't read as that, counts as more:
+// a tunnel's fallback device (sit0, gre0), down as it may be, counts too.
+func onlyLoopback(dev string) bool {
+	lines := strings.Split(strings.TrimSpace(dev), "\n")
+	if len(lines) < 3 { // two header lines, then one line per interface
+		return false
+	}
+	for _, l := range lines[2:] {
+		name, _, ok := strings.Cut(l, ":")
+		if !ok || strings.TrimSpace(name) != "lo" {
+			return false
+		}
+	}
+	return true
 }
 
 // ioUringInUse names a process holding an io_uring.

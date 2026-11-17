@@ -467,6 +467,9 @@ func tierLines(p *policy.Policy) []string {
 		if t.RebootAfter != "" {
 			line += " after " + t.RebootAfter
 		}
+		if t.StaySeconds > 0 {
+			line += fmt.Sprintf(" failed guards stay on %ds", t.StaySeconds)
+		}
 		out = append(out, line)
 	}
 	return out

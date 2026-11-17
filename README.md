@@ -121,6 +121,24 @@ turns MPTCP off for new sockets.
 - **A failed undo is kept.** The guard stays in the state, marked, so status
   shows it and the next undo or boot tries again.
 
+## A failed check can be a flood
+
+The window after `apply` takes a guard off when a health check fails three
+samples in a row. A check can't tell a guard that broke something from a
+flood on whatever it reads, and whoever floods can often see when a guard is
+on, so a guard admitted without the owner's keep can be lifted by three
+minutes of outage, with the flaw still open. If the check is still failing
+when the retry comes, the guard then waits for the owner, off.
+
+A tier that would rather risk its uptime than that sets `stay_seconds` in the
+signed policy, up to a week. A guard whose window failed then stays on, its
+undo moved past the end of the stay, and the lookout's page asks the owner:
+a Yes with `keep` keeps it, an Off takes it off. If the checks come back, the
+window goes on to its verdict and no try is counted. If the stay runs out,
+the guard comes off as it would have, and a window gets one stay. No other
+guard starts its window during a stay, though a keep still goes on. Without
+`stay_seconds`, a failed window takes the guard off at once.
+
 ## Checked on the machine itself
 
 A guard's fields can't show everything, so the agent also checks the machine

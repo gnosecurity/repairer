@@ -51,6 +51,9 @@ type Entry struct {
 	Observed   int  `json:"observed,omitempty"`
 	BootWindow bool `json:"boot_window,omitempty"`
 	Booted     bool `json:"booted,omitempty"`
+	// StayUntil is set once the guard's window has failed and its tier's stay
+	// keeps it on: the end of that stay. A window gets one.
+	StayUntil time.Time `json:"stay_until,omitzero"`
 }
 
 // UnitState is a unit's state before the first guard masked it.

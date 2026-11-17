@@ -179,6 +179,8 @@ const (
 	// trialArm is how long the undo is armed for a window: five minutes
 	// more than the window, as a backstop for a tick that doesn't come.
 	trialArm = TrialWindow + 5*time.Minute
+	// stayArm is the same backstop past the end of a tier's stay.
+	stayArm = 5 * time.Minute
 	// The baseline is baselineSamples samples over at least baselineSpan,
 	// taken again if it grows older than baselineStale.
 	baselineSamples = 3
@@ -205,6 +207,7 @@ type TickResult struct {
 	Applied   []string // guards put on
 	Confirmed []string // windows that held
 	Undone    []string // windows that failed, and why
+	Staying   []string // windows that failed, kept on by the tier's stay
 	Waiting   []string // admitted but for a canary's Healthy
 	Drift     []string // live state put back, or guards taken off as unsafe now
 	// Held says why the owner's statements stopped at a sequence: a later
@@ -362,6 +365,7 @@ func (a *Agent) advance(ctx context.Context, f *Fleet, p *policy.Policy, sample 
 		on[e.Hash] = e
 	}
 	checks := checksFor(p, f.Host)
+	stay := stayFor(p, f.Host)
 	// A window that ended without a verdict (the undo timer fired first,
 	// the machine restarted, or a hand took the guard off) is a failure.
 	for _, h := range sortedKeys(evs) {
@@ -382,7 +386,7 @@ func (a *Agent) advance(ctx context.Context, f *Fleet, p *policy.Policy, sample 
 		}
 	}
 	// The guards a boot brought back share one window (bootgroup.go).
-	busy, err := a.watchBootGroup(ctx, f, checks, sample, entries, evs, res)
+	busy, err := a.watchBootGroup(ctx, f, checks, sample, stay, entries, evs, res)
 	if err != nil {
 		res.Refused = append(res.Refused, "the window after the boot: "+err.Error())
 	}
@@ -400,7 +404,7 @@ func (a *Agent) advance(ctx context.Context, f *Fleet, p *policy.Policy, sample 
 				ev = &Evidence{}
 				evs[e.Hash] = ev
 			}
-			a.watch(ctx, e, ev, checks, sample, res)
+			a.watch(ctx, e, ev, checks, sample, stay, res)
 			busy = true
 		}
 	}
@@ -430,10 +434,11 @@ func (t *Trial) closeWindow() {
 
 // watch reads this tick's health sample for a guard in its window. A check
 // that held in the baseline and now fails failRun samples in a row takes the
-// guard off; a window that runs its length from when it settled, with no
-// check failing, confirms it. In a window after a boot, a check counts only
-// once it is armed: it has passed since the boot, or its grace has run out.
-func (a *Agent) watch(ctx context.Context, e *Entry, ev *Evidence, checks []policy.Health, sample map[string]string, res *TickResult) string {
+// guard off, after the tier's stay if it sets one; a window that runs its
+// length from when it settled, with no check failing, confirms it. In a
+// window after a boot, a check counts only once it is armed: it has passed
+// since the boot, or its grace has run out.
+func (a *Agent) watch(ctx context.Context, e *Entry, ev *Evidence, checks []policy.Health, sample map[string]string, stay time.Duration, res *TickResult) string {
 	if ev.Trial == nil { // the evidence was lost: count every check as held
 		ev.Trial = &Trial{Before: map[string]int{}}
 		for _, h := range checks {
@@ -489,16 +494,19 @@ func (a *Agent) watch(ctx context.Context, e *Entry, ev *Evidence, checks []poli
 		}
 	}
 	stamp := now.UTC().Format(time.RFC3339)
+	sort.Strings(bad)
+	why := fmt.Sprintf("health failed %d times in a row: %s", failRun, strings.Join(bad, "; "))
 	switch {
+	case len(bad) > 0 && a.stayOn(ctx, e.Hash, stay, why, res):
+		a.saveEvidence(e.Hash, ev)
+		return verdictNone
 	case len(bad) > 0:
-		sort.Strings(bad)
 		if _, err := a.Undo(ctx, e.Hash, false); err != nil {
 			res.Refused = append(res.Refused, e.Guard.Name()+": taking it off after its health failed: "+err.Error())
 			a.saveEvidence(e.Hash, ev)
 			return verdictNone
 		}
 		ev.noteBroke(broke, now, e.BootWindow, t.Shared)
-		why := fmt.Sprintf("health failed %d times in a row: %s", failRun, strings.Join(bad, "; "))
 		if t.Shared {
 			a.suspectWindow(e.Hash, ev, why+" (a keep went on during its window)", res)
 		} else {
@@ -792,6 +800,16 @@ func (a *Agent) shareOpenWindows(entries []*Entry, evs map[string]*Evidence) {
 // baselined reports whether a baseline is complete.
 func (a *Agent) baselined(t *Trial) bool {
 	return t.Samples >= baselineSamples && a.now().Sub(t.Since) >= baselineSpan
+}
+
+// stayFor is how long this machine's tier keeps a guard on after its window
+// failed.
+func stayFor(p *policy.Policy, host string) time.Duration {
+	tier, ok := p.TierOf(host)
+	if !ok {
+		return 0
+	}
+	return time.Duration(tier.StaySeconds) * time.Second
 }
 
 // spacing is how long a machine waits after first finding a guard admitted:

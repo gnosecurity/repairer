@@ -821,7 +821,7 @@ func (a *Agent) confirm(ctx context.Context, s *store, st *State, e *Entry) erro
 		}
 	}
 	e.Status = Confirmed
-	e.ConfirmBy = time.Time{}
+	e.ConfirmBy, e.StayUntil = time.Time{}, time.Time{}
 	if e.BootWindow {
 		e.BootWindow, e.Booted = false, true
 	}
@@ -834,6 +834,43 @@ func (a *Agent) confirm(ctx context.Context, s *store, st *State, e *Entry) erro
 		return err
 	}
 	return a.Timer.Disarm(ctx, e.Hash)
+}
+
+// stayOn is what a failed window asks before it takes a guard off: it reports
+// whether the guard stays on for now. The first failure starts the tier's
+// stay and moves the undo past its end. The owner's keep or Off ends a stay
+// early; a check that comes back lets the window reach its verdict; a stay
+// that runs out leaves the window to fail as it would have.
+func (a *Agent) stayOn(ctx context.Context, hash string, stay time.Duration, why string, res *TickResult) bool {
+	if stay <= 0 {
+		return false
+	}
+	s, st, err := a.open()
+	if err != nil {
+		res.Refused = append(res.Refused, hash[:12]+": its stay: "+err.Error())
+		return true // the undo already armed still stands
+	}
+	defer s.close()
+	e := st.find(hash)
+	if e == nil || e.Status != Pending {
+		return false
+	}
+	if e.StayUntil.IsZero() {
+		e.StayUntil = a.now().Add(stay)
+		e.ConfirmBy = e.StayUntil.Add(stayArm)
+		if err := s.save(st); err != nil {
+			res.Refused = append(res.Refused, e.Guard.Name()+": its stay: "+err.Error())
+			return true
+		}
+		if err := a.Timer.Arm(ctx, hash, stay+stayArm); err != nil {
+			res.Refused = append(res.Refused, e.Guard.Name()+": moving its undo past its stay: "+err.Error())
+		}
+	}
+	if !a.now().Before(e.StayUntil) {
+		return false
+	}
+	res.Staying = append(res.Staying, e.Guard.Name()+": "+why+"; it stays on until "+e.StayUntil.UTC().Format(time.RFC3339))
+	return true
 }
 
 // Undo takes a guard off. With ifUnconfirmed, a confirmed guard stays on:

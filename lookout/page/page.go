@@ -226,6 +226,9 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 			row.Facts = factLines(rep.Facts, s.Now())
 			for _, g := range rep.Guards {
 				row.Guards = append(row.Guards, guardLine(g))
+				if !g.StayUntil.IsZero() {
+					v.Waiting = append(v.Waiting, waitRow{Host: st.Host, Hash: g.Hash, Name: g.Name, Why: stayLine(g), Ask: true})
+				}
 			}
 			row.Wants = len(rep.Wants)
 			for _, h := range rep.Hits {
@@ -421,6 +424,11 @@ func confLine(h agent.HitResult) string {
 		}
 	}
 	return s
+}
+
+func stayLine(g agent.GuardState) string {
+	return "waiting for you: its window failed, which may be a flood and not the guard; it stays on until " +
+		g.StayUntil.UTC().Format("2006-01-02 15:04 UTC") + " unless you keep it or turn it off"
 }
 
 func wayLine(o agent.OnTheWay) string {

@@ -72,6 +72,8 @@ func TestRefusals(t *testing.T) {
 		{"an unknown reboot mode", `"spacing_seconds": 900}`, `"spacing_seconds": 900, "reboot": "sometimes"}`, "window, yes or never"},
 		{"a window tier without a window", `"spacing_seconds": 900}`, `"spacing_seconds": 900, "reboot": "window"}`, "HH:MM-HH:MM"},
 		{"a window past 23:59", `"spacing_seconds": 900}`, `"spacing_seconds": 900, "reboot": "window", "reboot_window": "23:00-24:00"}`, "isn't HH:MM"},
+		{"a stay past a week", `"spacing_seconds": 900}`, `"spacing_seconds": 900, "stay_seconds": 604801}`, "a stay is"},
+		{"a negative stay", `"spacing_seconds": 900}`, `"spacing_seconds": 900, "stay_seconds": -1}`, "a stay is"},
 		{"an empty window", `"spacing_seconds": 900}`, `"spacing_seconds": 900, "reboot": "window", "reboot_window": "03:00-03:00"}`, "empty"},
 		{"a window on a yes tier", `"spacing_seconds": 900}`, `"spacing_seconds": 900, "reboot_window": "03:00-04:00"}`, "reboots yes"},
 		{"rebooting after an unknown host", `"critical": true}`, `"critical": true, "reboot_after": "kourt"}`, "in no tier"},
@@ -144,6 +146,28 @@ func TestRebootWindow(t *testing.T) {
 	}
 	c, err := Parse(append(p.Canonical(), '\n'))
 	if err != nil || c.Hash() != p.Hash() || c.Tiers[0].RebootWindow != "23:30-00:30" {
+		t.Fatalf("canonical: %v", err)
+	}
+}
+
+// A tier's stay is signed with the rest of the policy, up to a week; a
+// policy that sets none reads and hashes as it did before stays existed.
+func TestStaySeconds(t *testing.T) {
+	plain, err := Decode([]byte(example))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(plain.Canonical()), "stay_seconds") {
+		t.Fatal("a policy with no stay names one in its canonical form")
+	}
+	p, err := Decode([]byte(strings.Replace(example, `"spacing_seconds": 900}`, `"spacing_seconds": 900, "stay_seconds": 604800}`, 1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Tiers[0].StaySeconds != MaxStaySeconds || p.Hash() == plain.Hash() {
+		t.Fatalf("stay %d, hash %s", p.Tiers[0].StaySeconds, p.Hash())
+	}
+	if c, err := Parse(append(p.Canonical(), '\n')); err != nil || c.Hash() != p.Hash() {
 		t.Fatalf("canonical: %v", err)
 	}
 }

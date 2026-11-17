@@ -90,6 +90,7 @@ func testPage(t *testing.T, w testWallet) (*Server, *httptest.Server, ed25519.Pr
 		Time: now.Add(-2 * time.Minute), Policy: p.Hash(),
 		Pending:  &agent.PendingReport{Hash: strings.Repeat("ab", 32), FirstSeen: now.Add(-time.Hour)},
 		OnTheWay: []agent.OnTheWay{{Hash: strings.Repeat("cd", 32), Name: "cve-2099-1/test v1", Ask: true, Last: "health failed 3 times in a row"}},
+		Guards:   []agent.GuardState{{Hash: strings.Repeat("ce", 32), Name: "cve-2099-2/test v1", Status: "pending", StayUntil: now.Add(time.Hour)}},
 		Hits:     []agent.HitResult{{Check: strings.Repeat("ef", 32), Name: "cve-2099-1/hit v1", Ran: now.Add(-time.Hour), Flag: true, Count: 1, Paths: []string{"/var/tmp/.s"}}},
 		Tick:     &agent.TickResult{Reboot: "a reboot into 6.8.0-149-generic is owed; it waits for the window 03:00-04:00 UTC"},
 		Facts: &agent.Report{OS: agent.OSFacts{ID: "ubuntu", Version: "25.04", EOL: "2026-01-15"},
@@ -192,7 +193,7 @@ func TestSignInAndDashboard(t *testing.T) {
 		t.Fatalf("cookie %+v", ck)
 	}
 	_, body = get(t, ts, "/admin", ck)
-	for _, want := range []string{"mail", "2 min ago", "PENDING", "waiting for you: health failed 3 times in a row", "cve-2099-1/test v1",
+	for _, want := range []string{"mail", "2 min ago", "PENDING", "waiting for you: health failed 3 times in a row", "cve-2099-1/test v1", "it stays on until 2026-11-05 13:00 UTC",
 		"<td>web</td>", "no agent key in the policy yet", // a machine that can't report yet is listed
 		"was I hit: cve-2099-1/hit v1 (2026-11-05 11:00 UTC): FLAGGED, 1 found: /var/tmp/.s",
 		// November's failures, which the plan says the page shows

@@ -79,6 +79,9 @@ type GuardState struct {
 	Booted     bool   `json:"booted,omitempty"`
 	Stopped    int64  `json:"stopped_packets"` // -1: a table is unreadable
 	Failed     string `json:"failed,omitempty"`
+	// StayUntil is set while the tier's stay keeps on a guard whose window
+	// failed.
+	StayUntil time.Time `json:"stay_until,omitzero"`
 }
 
 // OnTheWay is a guard with evidence here that isn't on: waiting, refused,
@@ -124,7 +127,7 @@ func (a *Agent) writeReport(ctx context.Context, f *Fleet, p *policy.Policy, res
 	for _, e := range entries {
 		on[e.Hash] = true
 		r.Guards = append(r.Guards, GuardState{Hash: e.Hash, Name: e.Guard.Name(), Status: e.Status, By: e.By, Keep: e.Keep,
-			Later: e.Later, BootWindow: e.BootWindow, Booted: e.Booted, Stopped: hits[e.Hash], Failed: e.Failed})
+			Later: e.Later, BootWindow: e.BootWindow, Booted: e.Booted, Stopped: hits[e.Hash], Failed: e.Failed, StayUntil: e.StayUntil})
 	}
 	evs, err := a.allEvidence()
 	fail("evidence", err)

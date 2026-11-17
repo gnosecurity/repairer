@@ -90,6 +90,12 @@ type Tier struct {
 	// nonce is the all-clear (still to come; until then this tier reboots
 	// only on the owner's Reboot).
 	RebootAfter string `json:"reboot_after,omitempty"`
+	// StaySeconds is how long a guard whose window failed stays on here
+	// before it comes off, for the owner to keep it or turn it off. 0, the
+	// default, takes it off at once. A failed check can't tell a guard that
+	// broke something from a flood on what the check reads, and a guard
+	// taken off by a flood leaves the flaw open to whoever sent it.
+	StaySeconds int `json:"stay_seconds,omitempty"`
 }
 
 // RebootMode is the tier's reboot mode, "yes" when it names none.
@@ -158,6 +164,9 @@ const (
 	DefaultGrace    = 600
 	MaxGraceSeconds = 3600
 )
+
+// MaxStaySeconds is the longest stay a tier may set: a week.
+const MaxStaySeconds = 7 * 86400
 
 // Grace is how long the check may fail after a boot before it counts.
 func (h Health) Grace() int {
@@ -369,6 +378,9 @@ func (p *Policy) Validate() error {
 			if hostTier[c] != t.Name {
 				return fmt.Errorf("policy: canary %s isn't in tier %s", c, t.Name)
 			}
+		}
+		if t.StaySeconds < 0 || t.StaySeconds > MaxStaySeconds {
+			return fmt.Errorf("policy: tier %s: a stay is 0 to %d seconds", t.Name, MaxStaySeconds)
 		}
 	}
 	known := func(hosts []string) error {

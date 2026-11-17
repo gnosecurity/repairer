@@ -347,3 +347,16 @@ func TestMemoPolicyReboots(t *testing.T) {
 		t.Fatalf("memo %q, %v", m, err)
 	}
 }
+
+// The memo says what a tier's stay does, so the owner sees it on the device.
+func TestMemoPolicyStay(t *testing.T) {
+	old, _ := fixturePolicies(t)
+	nw := *old
+	nw.Replaces = old.Hash()
+	nw.Tiers = append([]policy.Tier(nil), old.Tiers...)
+	nw.Tiers[0].StaySeconds = 3600
+	m, err := MemoPolicy(old, &nw)
+	if err != nil || !strings.Contains(m, "failed guards stay on 3600s") {
+		t.Fatalf("memo %q, %v", m, err)
+	}
+}

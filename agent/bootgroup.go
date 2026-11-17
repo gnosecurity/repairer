@@ -187,7 +187,7 @@ func (a *Agent) closeBootGroup() error {
 // watchBootGroup reads this tick's sample for the guards a boot brought
 // back. It reports whether the group is still open, which holds any other
 // change but a keep.
-func (a *Agent) watchBootGroup(ctx context.Context, f *Fleet, checks []policy.Health, sample map[string]string, entries []*Entry, evs map[string]*Evidence, res *TickResult) (bool, error) {
+func (a *Agent) watchBootGroup(ctx context.Context, f *Fleet, checks []policy.Health, sample map[string]string, stay time.Duration, entries []*Entry, evs map[string]*Evidence, res *TickResult) (bool, error) {
 	g, err := a.loadBootGroup()
 	if g == nil || err != nil {
 		return false, err
@@ -308,6 +308,18 @@ func (a *Agent) watchBootGroup(ctx context.Context, f *Fleet, checks []policy.He
 		g.Settled = now
 	}
 	stamp := now.UTC().Format(time.RFC3339)
+	sort.Strings(bad)
+	why := fmt.Sprintf("the window after the boot failed, %d times in a row: %s", failRun, strings.Join(bad, "; "))
+	// A tier's stay keeps the windowed guards on, and the window open.
+	if len(bad) > 0 {
+		staying := false
+		for _, h := range g.Windowed {
+			staying = a.stayOn(ctx, h, stay, why, res) || staying
+		}
+		if staying {
+			return true, a.saveBootGroup(g)
+		}
+	}
 	// The observed guards (keep, strips) count as booted once every check
 	// that held has passed since the boot, and every check one of them broke
 	// before came back through this boot and held for the window's length
@@ -341,8 +353,6 @@ func (a *Agent) watchBootGroup(ctx context.Context, f *Fleet, checks []policy.He
 	}
 	switch {
 	case len(bad) > 0:
-		sort.Strings(bad)
-		why := fmt.Sprintf("the window after the boot failed, %d times in a row: %s", failRun, strings.Join(bad, "; "))
 		shared = g.shared() // the observed guards count: any of them may have broken it
 		// What this boot broke is recorded against every guard it brought
 		// back, so none of them is booted while the check stays failed.
